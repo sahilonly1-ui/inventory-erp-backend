@@ -24,7 +24,7 @@ const ALIASES: Record<ImportType, Record<string, string>> = {
 // Parse the first worksheet into objects keyed by canonical field names.
 function parseSheet(buffer: Buffer, aliases: Record<string, string>): Promise<Record<string, unknown>[]> {
   const wb = new ExcelJS.Workbook();
-  return wb.xlsx.load(buffer).then(() => {
+  return wb.xlsx.load(buffer as Buffer).then(() => {
     const ws = wb.worksheets[0];
     if (!ws) throw new BadRequestError('Workbook has no sheets');
     const headerRow = ws.getRow(1);

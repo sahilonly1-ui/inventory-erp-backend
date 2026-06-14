@@ -55,7 +55,7 @@ export const marketplaceService = {
     const result = await prisma.$transaction(async (tx) => {
       const order = await tx.marketplaceOrder.findFirst({ where: { id: orderId, isDeleted: false }, include: { items: true } });
       if (!order) throw new NotFoundError('Order not found');
-      if (![MarketplaceOrderStatus.PENDING, MarketplaceOrderStatus.CONFIRMED].includes(order.status)) {
+      if (!([MarketplaceOrderStatus.PENDING, MarketplaceOrderStatus.CONFIRMED] as string[]).includes(order.status)) {
         throw new BadRequestError(`Order cannot be dispatched from status ${order.status}`);
       }
 
