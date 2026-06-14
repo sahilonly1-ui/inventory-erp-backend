@@ -12,40 +12,81 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Get Render services and commit result
+      - name: Deep Render diagnosis
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
-          SERVICES=$(curl -s \
-            -H "Authorization: Bearer $RENDER_API_KEY" \
+          echo "=== Testing Render API key ===" > render-summary.txt
+          
+          # Check owners
+          echo "--- /owners ---" >> render-summary.txt
+          OWNERS=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/owners?limit=5")
+          echo "$OWNERS" >> render-summary.txt
+          
+          # Try listing services with different params
+          echo "--- /services (no filter) ---" >> render-summary.txt
+          SVCS=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services?limit=20")
+          echo "$SVCS" >> render-summary.txt
           
-          # Write to a file in the repo
-          echo "$SERVICES" > render-status.json
+          # Get the owner ID and list their services specifically
+          OWNER_ID=$(echo "$OWNERS" | python3 -c "
+          import sys,json
+          try:
+            d=json.load(sys.stdin)
+            print(d[0]['owner']['id'] if d else 'NONE')
+          except Exception as e:
+            print('ERROR:', e)
+          " 2>/dev/null || echo "parse_error")
           
-          # Also write human-readable summary
-          echo "$SERVICES" | python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          items = d if isinstance(d, list) else []
-          print('SERVICES FOUND:', len(items))
-          for item in items:
-              s = item.get('service', {})
-              sd = s.get('serviceDetails', {})
-              print('---')
-              print('Name:', s.get('name'))
-              print('ID:', s.get('id'))
-              print('Type:', s.get('type'))
-              print('URL:', sd.get('url', 'none'))
-              print('Suspended:', s.get('suspended'))
-          " > render-summary.txt
+          echo "--- Owner ID: $OWNER_ID ---" >> render-summary.txt
+          
+          # Try creating a minimal test service to see error
+          echo "--- Attempting service creation ---" >> render-summary.txt
+          CREATE_RESULT=$(curl -s -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            https://api.render.com/v1/services \
+            -d "{
+              \"type\":\"web_service\",
+              \"name\":\"inventory-erp-backend\",
+              \"ownerId\":\"$OWNER_ID\",
+              \"repo\":\"https://github.com/sahilonly1-ui/inventory-erp-backend\",
+              \"branch\":\"main\",
+              \"autoDeploy\":\"yes\",
+              \"serviceDetails\":{
+                \"env\":\"node\",
+                \"buildCommand\":\"npm install && npm run build\",
+                \"startCommand\":\"npm run start:prod\",
+                \"plan\":\"free\",
+                \"region\":\"oregon\",
+                \"envVars\":[
+                  {\"key\":\"NODE_ENV\",\"value\":\"production\"},
+                  {\"key\":\"PORT\",\"value\":\"8080\"},
+                  {\"key\":\"DATABASE_URL\",\"value\":\"postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres\"},
+                  {\"key\":\"JWT_ACCESS_SECRET\",\"value\":\"erp_access_j8kX2mNpQvRtYw3sLhA5cE7uFz9dGbH4iJ6oK0lM1nP\"},
+                  {\"key\":\"JWT_REFRESH_SECRET\",\"value\":\"erp_refresh_K9mX3nQpRvSuYw4tLiA6cF8vGz0eHbI5jK1lN2oP7qR\"},
+                  {\"key\":\"JWT_ACCESS_TTL\",\"value\":\"15m\"},
+                  {\"key\":\"JWT_REFRESH_TTL_DAYS\",\"value\":\"7\"},
+                  {\"key\":\"CORS_ORIGINS\",\"value\":\"https://bespoke-souffle-3c1a0e.netlify.app\"},
+                  {\"key\":\"RATE_LIMIT_WINDOW_MS\",\"value\":\"60000\"},
+                  {\"key\":\"RATE_LIMIT_MAX\",\"value\":\"200\"},
+                  {\"key\":\"AUTH_RATE_LIMIT_MAX\",\"value\":\"20\"},
+                  {\"key\":\"BOOTSTRAP_ADMIN_EMAIL\",\"value\":\"harbans22@gmail.com\"},
+                  {\"key\":\"BOOTSTRAP_ADMIN_PASSWORD\",\"value\":\"Harbans@1073\"}
+                ]
+              }
+            }")
+          echo "$CREATE_RESULT" >> render-summary.txt
           
           cat render-summary.txt
       
-      - name: Commit render status to repo
+      - name: Commit results
         run: |
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
-          git add render-status.json render-summary.txt
-          git diff --staged --quiet || git commit -m "ci: render service status snapshot"
+          git add render-summary.txt render-status.json 2>/dev/null || true
+          git add render-summary.txt
+          git diff --staged --quiet || git commit -m "ci: render diagnosis output"
           git push
