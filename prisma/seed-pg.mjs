@@ -6,7 +6,7 @@ const argon2 = require('argon2');
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const PROJECT  = 'xukbgkwagjtzxoobcyuk';
-const PASSWORD = 'Harbans_1073';
+const PASSWORD = 'Harbans1073!';
 
 const CONNECTIONS = [
   { host: 'aws-1-ap-northeast-1.pooler.supabase.com', port: 6543, user: `postgres.${PROJECT}`, password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, label: 'Transaction Pooler' },

@@ -17,7 +17,7 @@
     "db:constraints:prod": "node dist/prisma/apply-constraints.js",
     "db:setup": "prisma migrate deploy && node dist/prisma/apply-constraints.js && npm run seed",
     "apply-schema": "node prisma/apply-schema.mjs",
-    "start:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node --dns-result-order=ipv4first prisma/apply-schema.mjs && NODE_TLS_REJECT_UNAUTHORIZED=0 node --dns-result-order=ipv4first prisma/seed-pg.mjs && NODE_TLS_REJECT_UNAUTHORIZED=0 DATABASE_URL=\"postgresql://postgres.xukbgkwagjtzxoobcyuk:Harbans_1073@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require\" node --dns-result-order=ipv4first -r ts-node/register/transpile-only src/server.ts"
+    "start:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node --dns-result-order=ipv4first prisma/apply-schema.mjs && NODE_TLS_REJECT_UNAUTHORIZED=0 node --dns-result-order=ipv4first prisma/seed-pg.mjs && NODE_TLS_REJECT_UNAUTHORIZED=0 DATABASE_URL=\"postgresql://postgres.xukbgkwagjtzxoobcyuk:Harbans1073!@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require\" node --dns-result-order=ipv4first -r ts-node/register/transpile-only src/server.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

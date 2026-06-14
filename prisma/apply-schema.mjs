@@ -11,7 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Supabase connection options — all with project ref in username for SNI
 const PROJECT = 'xukbgkwagjtzxoobcyuk';
-const PASSWORD = 'Harbans_1073';
+const PASSWORD = 'Harbans1073!';
 
 const CONNECTIONS = [
   // Transaction pooler (IPv4, port 6543) — project ref in username triggers SNI
