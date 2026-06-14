@@ -4,73 +4,57 @@ const { Client } = require('pg');
 const { readFileSync } = require('fs');
 const { join, dirname } = require('path');
 const { fileURLToPath } = require('url');
-const dns = require('dns');
 
-// Force IPv4 — Render Oregon can't reach Supabase over IPv6
-dns.setDefaultResultOrder('ipv4first');
+// Disable SSL cert verification for Supabase pooler
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-async function main() {
-  // Primary: Supabase Session Pooler (always IPv4, works from Render Oregon)
-  const POOLER_URL = 'postgresql://postgres.xukbgkwagjtzxoobcyuk:Harbans_1073@aws-0-us-west-1.pooler.supabase.com:5432/postgres';
-  const rawUrl = process.env.DATABASE_URL || POOLER_URL;
+// Supabase Transaction Pooler (port 6543) — IPv4, works from Render
+// Username: postgres (NOT postgres.projectref)
+const POOLER = 'postgresql://postgres:Harbans_1073@aws-0-us-west-1.pooler.supabase.com:6543/postgres';
+// Direct connection as fallback
+const DIRECT = 'postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres';
 
-  console.log('Connecting to database...');
+async function tryConnect(url, label) {
+  const client = new Client({
+    connectionString: url,
+    ssl: { rejectUnauthorized: false },
+  });
   try {
-    const parsed = new URL(rawUrl.includes('://') ? rawUrl : 'postgresql://' + rawUrl);
-    console.log('Host:', parsed.hostname);
-  } catch(e) { console.log('URL:', rawUrl.slice(0, 40) + '...'); }
-
-  const configs = [
-    // Try pooler first (IPv4, no SSL issues)
-    { connectionString: POOLER_URL, ssl: { rejectUnauthorized: false } },
-    // Then try env var
-    { connectionString: rawUrl, ssl: { rejectUnauthorized: false }, family: 4 },
-    { connectionString: rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'sslmode=require', ssl: { rejectUnauthorized: false }, family: 4 },
-  ];
-
-  let client = null;
-  let lastError = '';
-
-  for (const cfg of configs) {
-    try {
-      client = new Client(cfg);
-      await client.connect();
-      console.log('Connected!');
-      break;
-    } catch (e) {
-      lastError = e.message;
-      console.log('Config failed:', e.message.slice(0, 120));
-      try { await client.end(); } catch {}
-      client = null;
-    }
+    await client.connect();
+    console.log(`Connected via ${label}!`);
+    return client;
+  } catch (e) {
+    console.log(`${label} failed: ${e.message.slice(0, 100)}`);
+    try { await client.end(); } catch {}
+    return null;
   }
+}
 
-  if (!client) {
-    throw new Error('Could not connect to database: ' + lastError);
-  }
+async function main() {
+  console.log('Connecting to Supabase...');
 
-  console.log('Applying schema...');
+  let client = await tryConnect(POOLER, 'Transaction Pooler');
+  if (!client) client = await tryConnect(DIRECT, 'Direct Connection');
+  if (!client) throw new Error('All connection attempts failed');
+
   const sql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
   const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 5 && !s.startsWith('--'));
 
-  let ok = 0, skipped = 0, errors = 0;
+  console.log(`Running ${statements.length} SQL statements...`);
+  let ok = 0, skip = 0, err = 0;
   for (const stmt of statements) {
     try {
       await client.query(stmt);
       ok++;
     } catch (e) {
-      if (e.message.includes('already exists') || e.message.includes('duplicate')) {
-        skipped++;
-      } else {
-        console.error('SQL error:', e.message.slice(0, 150));
-        errors++;
-      }
+      if (e.message.includes('already exists') || e.message.includes('duplicate')) skip++;
+      else { console.error('SQL:', e.message.slice(0, 100), '|', stmt.slice(0, 60)); err++; }
     }
   }
 
-  console.log(`Schema done: ${ok} applied, ${skipped} already existed, ${errors} errors.`);
+  console.log(`Schema done: ${ok} ok, ${skip} skipped, ${err} errors`);
   await client.end();
 }
 
