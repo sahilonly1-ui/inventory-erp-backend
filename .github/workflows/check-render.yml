@@ -1,0 +1,47 @@
+name: Check Render Status
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List all Render services
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          echo "=== All Render Services ==="
+          SERVICES=$(curl -s \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services?limit=20")
+          
+          echo "$SERVICES" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          services = d if isinstance(d, list) else []
+          if not services:
+              print('NO SERVICES FOUND')
+              print('Raw response:', json.dumps(d)[:500])
+          for item in services:
+              s = item.get('service', {})
+              sd = s.get('serviceDetails', {})
+              print('---')
+              print('Name:', s.get('name'))
+              print('ID:', s.get('id'))
+              print('Status:', s.get('suspended'))
+              print('URL:', sd.get('url', 'none'))
+              print('Deploy Status:', sd.get('numInstances'))
+          "
+          
+          echo ""
+          echo "=== Latest Deploy Status ==="
+          echo "$SERVICES" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for item in (d if isinstance(d,list) else []):
+              s = item.get('service',{})
+              if 'inventory' in s.get('name','').lower():
+                  print('Found service:', s.get('id'))
+                  print('Full details:', json.dumps(s, indent=2)[:1000])
+          "
