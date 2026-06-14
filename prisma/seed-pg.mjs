@@ -40,13 +40,13 @@ async function main() {
     await client.query(`INSERT INTO permissions(id,code,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,$1,now(),now()) ON CONFLICT(code) DO NOTHING`, [code]);
   console.log('Permissions seeded.');
 
-  await client.query(`INSERT INTO roles(id,name,description) VALUES(gen_random_uuid()::text,'ADMIN','Full access') ON CONFLICT(name) DO NOTHING`);
-  await client.query(`INSERT INTO roles(id,name,description) VALUES(gen_random_uuid()::text,'STAFF','Read-only') ON CONFLICT(name) DO NOTHING`);
+  await client.query(`INSERT INTO roles(id,name,description,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,'ADMIN','Full access',now(),now()) ON CONFLICT(name) DO NOTHING`);
+  await client.query(`INSERT INTO roles(id,name,description,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,'STAFF','Read-only',now(),now()) ON CONFLICT(name) DO NOTHING`);
   await client.query(`INSERT INTO "_RolePermissions"("A","B") SELECT r.id,p.id FROM roles r,permissions p WHERE r.name='ADMIN' AND p.code='*' ON CONFLICT DO NOTHING`);
   await client.query(`INSERT INTO "_RolePermissions"("A","B") SELECT r.id,p.id FROM roles r,permissions p WHERE r.name='STAFF' AND p.code IN('products.read','vendors.read','warehouses.read','inventory.read','imei.read','marketplace.read') ON CONFLICT DO NOTHING`);
 
   const hash = await argon2.hash(password, { type: argon2.argon2id });
-  await client.query(`INSERT INTO users(id,email,"passwordHash","fullName","isActive") VALUES(gen_random_uuid()::text,$1,$2,'Administrator',true) ON CONFLICT DO NOTHING`, [email, hash]);
+  await client.query(`INSERT INTO users(id,email,"passwordHash","fullName","isActive","createdAt","updatedAt") VALUES(gen_random_uuid()::text,$1,$2,'Administrator',true,now(),now()) ON CONFLICT DO NOTHING`, [email, hash]);
   await client.query(`INSERT INTO "_UserRoles"("A","B") SELECT u.id,r.id FROM users u,roles r WHERE u.email=$1 AND r.name='ADMIN' ON CONFLICT DO NOTHING`, [email]);
 
   console.log(`Admin seeded: ${email}`);
