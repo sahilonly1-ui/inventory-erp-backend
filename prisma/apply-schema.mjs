@@ -12,17 +12,20 @@ dns.setDefaultResultOrder('ipv4first');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function main() {
-  const rawUrl = process.env.DATABASE_URL;
-  if (!rawUrl) throw new Error('DATABASE_URL not set');
+  // Primary: Supabase Session Pooler (always IPv4, works from Render Oregon)
+  const POOLER_URL = 'postgresql://postgres.xukbgkwagjtzxoobcyuk:Harbans_1073@aws-0-us-west-1.pooler.supabase.com:5432/postgres';
+  const rawUrl = process.env.DATABASE_URL || POOLER_URL;
 
-  // Parse and force IPv4 by using the pooler port (6543) or adding sslmode
-  // Supabase pooler: aws-0-us-west-1.pooler.supabase.com:6543
-  // Direct with IPv4 forced via dns.setDefaultResultOrder above
   console.log('Connecting to database...');
-  console.log('Host:', new URL(rawUrl.replace('?', '/?')).hostname);
+  try {
+    const parsed = new URL(rawUrl.includes('://') ? rawUrl : 'postgresql://' + rawUrl);
+    console.log('Host:', parsed.hostname);
+  } catch(e) { console.log('URL:', rawUrl.slice(0, 40) + '...'); }
 
   const configs = [
-    // Try direct connection with IPv4 forced
+    // Try pooler first (IPv4, no SSL issues)
+    { connectionString: POOLER_URL, ssl: { rejectUnauthorized: false } },
+    // Then try env var
     { connectionString: rawUrl, ssl: { rejectUnauthorized: false }, family: 4 },
     { connectionString: rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'sslmode=require', ssl: { rejectUnauthorized: false }, family: 4 },
   ];

@@ -8,11 +8,12 @@ const { Client } = require('pg');
 const argon2 = require('argon2');
 
 async function main() {
-  const url = process.env.DATABASE_URL;
+  const POOLER_URL = 'postgresql://postgres.xukbgkwagjtzxoobcyuk:Harbans_1073@aws-0-us-west-1.pooler.supabase.com:5432/postgres';
+  const url = process.env.DATABASE_URL || POOLER_URL;
   const email = process.env.BOOTSTRAP_ADMIN_EMAIL || 'harbans22@gmail.com';
   const password = process.env.BOOTSTRAP_ADMIN_PASSWORD || 'Harbans@1073';
 
-  const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+  const client = new Client({ connectionString: POOLER_URL, ssl: { rejectUnauthorized: false } });
   await client.connect();
   console.log('Connected. Seeding...');
 
