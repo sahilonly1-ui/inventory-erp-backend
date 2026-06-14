@@ -1,5 +1,8 @@
 // seed-pg.mjs — seeds DB via pg + argon2 (no Prisma client needed)
 import { createRequire } from 'module';
+import dns from 'dns';
+// Force IPv4 — Render Oregon cannot reach Supabase over IPv6
+dns.setDefaultResultOrder('ipv4first');
 const require = createRequire(import.meta.url);
 const { Client } = require('pg');
 const argon2 = require('argon2');
