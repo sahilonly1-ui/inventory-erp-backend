@@ -29,6 +29,11 @@ async function main() {
 
   const client = await connect();
 
+  // Clean junction tables to avoid stale FK references from earlier partial runs
+  await client.query('TRUNCATE TABLE "_RolePermissions" CASCADE').catch(() => {});
+  await client.query('TRUNCATE TABLE "_UserRoles" CASCADE').catch(() => {});
+  console.log('Cleared junction tables.');
+
   const perms = ['*','users.create','users.read','users.update','users.delete','users.restore',
     'roles.manage','products.create','products.read','products.update','products.delete',
     'categories.manage','warehouses.manage','warehouses.read','vendors.manage','vendors.read',
