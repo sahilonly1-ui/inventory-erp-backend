@@ -1,45 +1,20 @@
--- Full schema SQL (generated from schema.prisma — bypasses Prisma engine download in CI)
--- Run with: psql $DATABASE_URL -f prisma/schema.sql
-
+-- Full schema — compatible with Supabase transaction pooler (no dollar-quoting)
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- ENUMS
-DO $$ BEGIN
-  CREATE TYPE "TransactionType" AS ENUM ('OPENING','STOCK_IN','STOCK_OUT','MARKETPLACE_DISPATCH','RETURN','CANCELLATION','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "ImeiStatus" AS ENUM ('IN_STOCK','SOLD','RETURNED','OPEN_BOX','DAMAGED','CANCELLED','BLOCKED');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "Marketplace" AS ENUM ('AMAZON','FLIPKART','JIOMART','PRIME','OTHER');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "MarketplaceOrderStatus" AS ENUM ('PENDING','CONFIRMED','DISPATCHED','DELIVERED','CANCELLED','RETURNED');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "OpenBoxGrade" AS ENUM ('A','B','C','D');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "ReportType" AS ENUM ('STOCK_IN','STOCK_OUT','VENDOR','MARKETPLACE','IMEI','PROFIT','OPEN_BOX','INVENTORY_VALUATION','DEAD_STOCK','LOW_STOCK');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "ReportStatus" AS ENUM ('QUEUED','PROCESSING','COMPLETED','FAILED');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "ImportType" AS ENUM ('STOCK_IN','STOCK_OUT','PRODUCTS','IMEI','VENDORS');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "ImportStatus" AS ENUM ('PENDING','VALIDATING','PARTIAL','COMPLETED','REJECTED');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "AuditAction" AS ENUM ('CREATE','UPDATE','DELETE','RESTORE','LOGIN','EXPORT','IMPORT');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE TYPE "NotificationType" AS ENUM ('LOW_STOCK','DEAD_STOCK','IMPORT_DONE','EXPORT_DONE','SYSTEM');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- ENUMS (simple IF NOT EXISTS via cast trick)
+CREATE TYPE "TransactionType" AS ENUM ('OPENING','STOCK_IN','STOCK_OUT','MARKETPLACE_DISPATCH','RETURN','CANCELLATION','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT');
+CREATE TYPE "ImeiStatus" AS ENUM ('IN_STOCK','SOLD','RETURNED','OPEN_BOX','DAMAGED','CANCELLED','BLOCKED');
+CREATE TYPE "Marketplace" AS ENUM ('AMAZON','FLIPKART','JIOMART','PRIME','OTHER');
+CREATE TYPE "MarketplaceOrderStatus" AS ENUM ('PENDING','CONFIRMED','DISPATCHED','DELIVERED','CANCELLED','RETURNED');
+CREATE TYPE "OpenBoxGrade" AS ENUM ('A','B','C','D');
+CREATE TYPE "ReportType" AS ENUM ('STOCK_IN','STOCK_OUT','VENDOR','MARKETPLACE','IMEI','PROFIT','OPEN_BOX','INVENTORY_VALUATION','DEAD_STOCK','LOW_STOCK');
+CREATE TYPE "ReportStatus" AS ENUM ('QUEUED','PROCESSING','COMPLETED','FAILED');
+CREATE TYPE "ImportType" AS ENUM ('STOCK_IN','STOCK_OUT','PRODUCTS','IMEI','VENDORS');
+CREATE TYPE "ImportStatus" AS ENUM ('PENDING','VALIDATING','PARTIAL','COMPLETED','REJECTED');
+CREATE TYPE "AuditAction" AS ENUM ('CREATE','UPDATE','DELETE','RESTORE','LOGIN','EXPORT','IMPORT');
+CREATE TYPE "NotificationType" AS ENUM ('LOW_STOCK','DEAD_STOCK','IMPORT_DONE','EXPORT_DONE','SYSTEM');
 
--- TABLES (all IF NOT EXISTS so reruns are safe)
-
+-- TABLES
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   email TEXT NOT NULL,
@@ -373,14 +348,13 @@ CREATE INDEX IF NOT EXISTS ix_audit_user ON audit_logs("userId");
 CREATE INDEX IF NOT EXISTS ix_login_email ON login_audits(email);
 CREATE INDEX IF NOT EXISTS ix_notif_user ON notifications("userId","isRead");
 
--- CONSTRAINTS
+-- UNIQUE PARTIAL INDEXES (soft-delete safe)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users(email) WHERE "isDeleted" = false;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_products_ean ON products(ean) WHERE "isDeleted" = false;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_products_sku ON products(sku) WHERE "isDeleted" = false;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_imei_imei1 ON imei_inventory(imei1) WHERE "isDeleted" = false;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_imei_imei2 ON imei_inventory(imei2) WHERE "isDeleted" = false AND imei2 IS NOT NULL;
 
+-- CONSTRAINTS
 ALTER TABLE stock_levels DROP CONSTRAINT IF EXISTS chk_stock_nonneg;
 ALTER TABLE stock_levels ADD CONSTRAINT chk_stock_nonneg CHECK (quantity >= 0);
-
-SELECT 'Schema applied successfully.' AS result;
