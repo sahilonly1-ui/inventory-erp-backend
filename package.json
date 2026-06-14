@@ -5,7 +5,7 @@
   "main": "dist/src/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "prisma generate && tsc -p tsconfig.json",
+    "build": "npx prisma generate && tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
@@ -16,7 +16,8 @@
     "db:constraints": "ts-node prisma/apply-constraints.ts",
     "db:constraints:prod": "node dist/prisma/apply-constraints.js",
     "db:setup": "prisma migrate deploy && node dist/prisma/apply-constraints.js && npm run seed",
-    "apply-schema": "node prisma/apply-schema.mjs"
+    "apply-schema": "node prisma/apply-schema.mjs",
+    "start:prod": "node prisma/apply-schema.mjs && node prisma/seed-pg.mjs && node dist/src/server.js"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

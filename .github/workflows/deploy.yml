@@ -1,4 +1,4 @@
-name: Deploy Backend to Render
+name: Deploy to Render
 
 on:
   push:
@@ -9,62 +9,39 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies (includes pg + argon2)
-        run: npm install
-
-      - name: Apply DB schema
-        run: node prisma/apply-schema.mjs
-        env:
-          DATABASE_URL: "postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres"
-
-      - name: Seed database (permissions + admin user)
-        run: node prisma/seed-pg.mjs
-        env:
-          DATABASE_URL: "postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres"
-          BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
-          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
-
-      - name: Create Render service (or redeploy if exists)
+      - name: Create or redeploy Render service
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
-          # Check existing services
+          echo "Checking for existing Render service..."
           SERVICES=$(curl -s \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services?limit=20")
-
+          
           SERVICE_ID=$(echo "$SERVICES" | python3 -c "
           import sys,json
           try:
-            d=json.load(sys.stdin)
-            for item in (d if isinstance(d,list) else []):
+            for item in json.load(sys.stdin):
               s=item.get('service',{})
               if s.get('name')=='inventory-erp-backend':
                 print(s['id']); break
           except: pass
           " 2>/dev/null || echo "")
-
+          
           if [ -n "$SERVICE_ID" ]; then
-            echo "Redeploying $SERVICE_ID..."
-            curl -s -X POST \
+            echo "Redeploying existing service: $SERVICE_ID"
+            RESULT=$(curl -s -X POST \
               -H "Authorization: Bearer $RENDER_API_KEY" \
               -H "Content-Type: application/json" \
               "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
-              -d '{"clearCache":"do_not_clear"}' | python3 -c "import sys,json; d=json.load(sys.stdin); print('Deploy ID:', d.get('id','?'))"
+              -d '{"clearCache":"do_not_clear"}')
+            echo "Deploy triggered: $(echo $RESULT | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"id\",d))')"
           else
-            OWNER_ID=$(curl -s \
-              -H "Authorization: Bearer $RENDER_API_KEY" \
-              "https://api.render.com/v1/owners?limit=1" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['owner']['id'])")
+            echo "Creating new Render service..."
+            OWNER=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" "https://api.render.com/v1/owners?limit=1")
+            OWNER_ID=$(echo "$OWNER" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['owner']['id'])")
+            echo "Owner: $OWNER_ID"
             
-            echo "Creating Render service (owner: $OWNER_ID)..."
             curl -s -X POST \
               -H "Authorization: Bearer $RENDER_API_KEY" \
               -H "Content-Type: application/json" \
@@ -78,14 +55,14 @@ jobs:
                 \"autoDeploy\":\"yes\",
                 \"serviceDetails\":{
                   \"env\":\"node\",
-                  \"buildCommand\":\"npm install && npx prisma generate && npm run build\",
-                  \"startCommand\":\"npm start\",
+                  \"buildCommand\":\"npm install && npm run build\",
+                  \"startCommand\":\"npm run start:prod\",
                   \"plan\":\"free\",
                   \"region\":\"oregon\",
                   \"envVars\":[
                     {\"key\":\"NODE_ENV\",\"value\":\"production\"},
                     {\"key\":\"PORT\",\"value\":\"8080\"},
-                    {\"key\":\"DATABASE_URL\",\"value\":\"postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres?sslmode=require\"},
+                    {\"key\":\"DATABASE_URL\",\"value\":\"postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres\"},
                     {\"key\":\"JWT_ACCESS_SECRET\",\"value\":\"erp_access_j8kX2mNpQvRtYw3sLhA5cE7uFz9dGbH4iJ6oK0lM1nP\"},
                     {\"key\":\"JWT_REFRESH_SECRET\",\"value\":\"erp_refresh_K9mX3nQpRvSuYw4tLiA6cF8vGz0eHbI5jK1lN2oP7qR\"},
                     {\"key\":\"JWT_ACCESS_TTL\",\"value\":\"15m\"},
@@ -102,25 +79,12 @@ jobs:
           import sys,json
           d=json.load(sys.stdin)
           if 'id' in d:
-            print('Service created:', d['id'])
+            print('SUCCESS: Service', d['id'], 'created')
+            print('URL: https://inventory-erp-backend.onrender.com')
           else:
-            print('Error:', json.dumps(d)[:300])
+            print('RESPONSE:', json.dumps(d,indent=2)[:500])
           "
           fi
-
-      - name: Wait for backend health
-        run: |
-          echo "Waiting for https://inventory-erp-backend.onrender.com/api/v1/health"
-          echo "(Render free tier takes 3-5 min to build + start)"
-          for i in $(seq 1 40); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              https://inventory-erp-backend.onrender.com/api/v1/health 2>/dev/null || echo "000")
-            echo "[$i/40] HTTP $CODE"
-            [ "$CODE" = "200" ] && { echo "BACKEND IS LIVE!"; exit 0; }
-            sleep 15
-          done
-          echo "Still starting — Render is building in background. Check dashboard."
-          exit 0
 
       - name: Update Netlify env var
         env:
@@ -137,9 +101,28 @@ jobs:
                 print(s['id']); break
           except: pass
           " 2>/dev/null || echo "")
-          [ -n "$SITE_ID" ] && curl -s -X PATCH \
-            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
-            -H "Content-Type: application/json" \
-            "https://api.netlify.com/api/v1/sites/$SITE_ID" \
-            -d '{"build_settings":{"env":{"VITE_API_URL":"https://inventory-erp-backend.onrender.com/api/v1"}}}' \
-            && echo "Netlify env updated." || echo "Netlify site not found."
+          
+          if [ -n "$SITE_ID" ]; then
+            curl -s -X PATCH \
+              -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.netlify.com/api/v1/sites/$SITE_ID" \
+              -d '{"build_settings":{"env":{"VITE_API_URL":"https://inventory-erp-backend.onrender.com/api/v1"}}}'
+            echo "Netlify VITE_API_URL set."
+          fi
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "========================================"
+          echo "  DEPLOYMENT TRIGGERED"
+          echo "========================================"
+          echo "  Backend (building on Render):"
+          echo "  https://inventory-erp-backend.onrender.com"
+          echo ""
+          echo "  Frontend (already live):"
+          echo "  https://bespoke-souffle-3c1a0e.netlify.app"
+          echo ""
+          echo "  Login: harbans22@gmail.com / Harbans@1073"
+          echo "  (Render build takes 3-5 min)"
+          echo "========================================"
