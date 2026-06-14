@@ -1,0 +1,159 @@
+name: Deploy Backend to Render
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Run DB migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Apply raw constraints
+        run: npx ts-node prisma/apply-constraints.ts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Seed database (admin user + permissions)
+        run: npx ts-node prisma/seed.ts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+
+      - name: Create/Update Render Service
+        id: render
+        run: |
+          # Check if service exists
+          SERVICES=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services?name=inventory-erp-backend&limit=1")
+          
+          SERVICE_ID=$(echo $SERVICES | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          services = d if isinstance(d, list) else d.get('services', [])
+          print(services[0]['service']['id'] if services else '')
+          " 2>/dev/null || echo "")
+
+          if [ -z "$SERVICE_ID" ]; then
+            echo "Creating new Render service..."
+            # Get owner ID first
+            OWNER=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              "https://api.render.com/v1/owners?limit=1")
+            OWNER_ID=$(echo $OWNER | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['owner']['id'])")
+            
+            RESULT=$(curl -s -X POST \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              https://api.render.com/v1/services \
+              -d "{
+                \"type\": \"web_service\",
+                \"name\": \"inventory-erp-backend\",
+                \"ownerId\": \"$OWNER_ID\",
+                \"repo\": \"https://github.com/sahilonly1-ui/inventory-erp-backend\",
+                \"branch\": \"main\",
+                \"autoDeploy\": \"yes\",
+                \"serviceDetails\": {
+                  \"env\": \"node\",
+                  \"buildCommand\": \"npm ci && npx prisma generate && npm run build\",
+                  \"startCommand\": \"npm start\",
+                  \"plan\": \"free\",
+                  \"region\": \"oregon\",
+                  \"envVars\": [
+                    {\"key\": \"NODE_ENV\", \"value\": \"production\"},
+                    {\"key\": \"PORT\", \"value\": \"8080\"},
+                    {\"key\": \"DATABASE_URL\", \"value\": \"${{ secrets.DATABASE_URL }}\"},
+                    {\"key\": \"JWT_ACCESS_SECRET\", \"value\": \"${{ secrets.JWT_ACCESS_SECRET }}\"},
+                    {\"key\": \"JWT_REFRESH_SECRET\", \"value\": \"${{ secrets.JWT_REFRESH_SECRET }}\"},
+                    {\"key\": \"JWT_ACCESS_TTL\", \"value\": \"15m\"},
+                    {\"key\": \"JWT_REFRESH_TTL_DAYS\", \"value\": \"7\"},
+                    {\"key\": \"PASSWORD_RESET_TTL_MIN\", \"value\": \"30\"},
+                    {\"key\": \"CORS_ORIGINS\", \"value\": \"${{ secrets.CORS_ORIGINS }}\"},
+                    {\"key\": \"RATE_LIMIT_WINDOW_MS\", \"value\": \"60000\"},
+                    {\"key\": \"RATE_LIMIT_MAX\", \"value\": \"200\"},
+                    {\"key\": \"AUTH_RATE_LIMIT_MAX\", \"value\": \"20\"},
+                    {\"key\": \"BOOTSTRAP_ADMIN_EMAIL\", \"value\": \"${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}\"},
+                    {\"key\": \"BOOTSTRAP_ADMIN_PASSWORD\", \"value\": \"${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}\"}
+                  ]
+                }
+              }")
+            SERVICE_ID=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERROR: '+str(d)))")
+            echo "Created service: $SERVICE_ID"
+          else
+            echo "Service exists: $SERVICE_ID — triggering redeploy..."
+            curl -s -X POST \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
+              -d '{"clearCache":"do_not_clear"}'
+          fi
+
+          echo "SERVICE_ID=$SERVICE_ID" >> $GITHUB_OUTPUT
+          echo "RENDER_URL=https://inventory-erp-backend.onrender.com" >> $GITHUB_OUTPUT
+
+      - name: Wait for Render to come up (up to 8 min)
+        run: |
+          echo "Waiting for backend to be healthy..."
+          for i in $(seq 1 48); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://inventory-erp-backend.onrender.com/api/v1/health || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Backend is UP!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Backend may still be starting — check Render dashboard"
+
+      - name: Update Netlify VITE_API_URL
+        run: |
+          # Get Netlify site ID for bespoke-souffle-3c1a0e
+          SITES=$(curl -s -H "Authorization: Bearer ${{ secrets.NETLIFY_AUTH_TOKEN }}" \
+            "https://api.netlify.com/api/v1/sites?filter=all")
+          SITE_ID=$(echo $SITES | python3 -c "
+          import sys, json
+          sites = json.load(sys.stdin)
+          for s in sites:
+              if 'bespoke-souffle' in s.get('name','') or 'bespoke-souffle' in s.get('default_domain',''):
+                  print(s['id'])
+                  break
+          " 2>/dev/null || echo "")
+
+          if [ -n "$SITE_ID" ]; then
+            echo "Updating Netlify site $SITE_ID with backend URL..."
+            curl -s -X PATCH \
+              -H "Authorization: Bearer ${{ secrets.NETLIFY_AUTH_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              "https://api.netlify.com/api/v1/sites/$SITE_ID" \
+              -d '{
+                "build_settings": {
+                  "env": {
+                    "VITE_API_URL": "https://inventory-erp-backend.onrender.com/api/v1"
+                  }
+                }
+              }'
+            echo "Netlify env var updated."
+          else
+            echo "Could not find Netlify site — will be set by frontend workflow"
+          fi
