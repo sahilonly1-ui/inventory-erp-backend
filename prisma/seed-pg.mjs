@@ -9,8 +9,8 @@ const PROJECT  = 'xukbgkwagjtzxoobcyuk';
 const PASSWORD = 'Harbans_1073';
 
 const CONNECTIONS = [
-  { host: 'aws-0-us-west-1.pooler.supabase.com', port: 6543, user: `postgres.${PROJECT}`, password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, label: 'Transaction Pooler' },
-  { host: 'aws-0-us-west-1.pooler.supabase.com', port: 5432, user: `postgres.${PROJECT}`, password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, label: 'Session Pooler' },
+  { host: 'aws-1-ap-northeast-1.pooler.supabase.com', port: 6543, user: `postgres.${PROJECT}`, password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, label: 'Transaction Pooler' },
+  { host: 'aws-1-ap-northeast-1.pooler.supabase.com', port: 5432, user: `postgres.${PROJECT}`, password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, label: 'Session Pooler' },
   { host: `db.${PROJECT}.supabase.co`,            port: 5432, user: 'postgres',             password: PASSWORD, database: 'postgres', ssl: { rejectUnauthorized: false }, family: 4, label: 'Direct IPv4' },
 ];
 

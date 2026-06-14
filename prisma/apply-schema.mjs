@@ -16,7 +16,7 @@ const PASSWORD = 'Harbans_1073';
 const CONNECTIONS = [
   // Transaction pooler (IPv4, port 6543) — project ref in username triggers SNI
   {
-    host: 'aws-0-us-west-1.pooler.supabase.com',
+    host: 'aws-1-ap-northeast-1.pooler.supabase.com',
     port: 6543,
     user: `postgres.${PROJECT}`,
     password: PASSWORD,
@@ -26,7 +26,7 @@ const CONNECTIONS = [
   },
   // Session pooler (IPv4, port 5432)
   {
-    host: 'aws-0-us-west-1.pooler.supabase.com',
+    host: 'aws-1-ap-northeast-1.pooler.supabase.com',
     port: 5432,
     user: `postgres.${PROJECT}`,
     password: PASSWORD,
