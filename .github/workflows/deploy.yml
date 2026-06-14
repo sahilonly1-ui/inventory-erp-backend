@@ -6,83 +6,68 @@ on:
   workflow_dispatch:
 
 jobs:
-  setup-db:
+  create-render-service:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Apply DB schema via psql
+        run: |
+          # Install psql client (no Prisma engine needed)
+          sudo apt-get install -y postgresql-client 2>/dev/null
+          
+          # Apply full schema SQL
+          PGPASSWORD="Harbans_1073" psql \
+            "postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres?sslmode=require" \
+            -f prisma/schema.sql
+          
+          echo "Schema applied."
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Generate Prisma Client
-        run: npx prisma generate
+      - name: Create or update Render service
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-
-      - name: Push schema to Supabase (idempotent)
-        run: npx prisma db push --accept-data-loss --skip-generate
-        env:
-          DATABASE_URL: "${{ secrets.DATABASE_URL }}?sslmode=require"
-
-      - name: Apply raw constraints (partial indexes + CHECK)
-        run: npx ts-node prisma/apply-constraints.ts
-        env:
-          DATABASE_URL: "${{ secrets.DATABASE_URL }}?sslmode=require"
-
-      - name: Seed database
-        run: npx ts-node prisma/seed.ts
-        env:
-          DATABASE_URL: "${{ secrets.DATABASE_URL }}?sslmode=require"
-          BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
-          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
-
-  deploy-render:
-    runs-on: ubuntu-latest
-    needs: setup-db
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Deploy to Render
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           # Check if service exists
           SERVICES=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services?name=inventory-erp-backend&limit=5")
           
           SERVICE_ID=$(echo "$SERVICES" | python3 -c "
-          import sys, json
+          import sys,json
           try:
-              d = json.load(sys.stdin)
-              items = d if isinstance(d, list) else []
-              for item in items:
-                  svc = item.get('service', {})
-                  if svc.get('name') == 'inventory-erp-backend':
-                      print(svc['id'])
-                      break
+            d=json.load(sys.stdin)
+            items=d if isinstance(d,list) else []
+            for item in items:
+              s=item.get('service',{})
+              if s.get('name')=='inventory-erp-backend':
+                print(s['id']); break
           except: pass
           " 2>/dev/null || echo "")
           
-          if [ -n "$SERVICE_ID" ]; then
-            echo "Redeploying existing service: $SERVICE_ID"
+          if [ -n "$SERVICE_ID" ] && [ "$SERVICE_ID" != "None" ]; then
+            echo "Triggering redeploy of existing service: $SERVICE_ID"
             curl -s -X POST \
-              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
               -H "Content-Type: application/json" \
               "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
               -d '{"clearCache":"do_not_clear"}'
+            echo "Redeploy triggered."
           else
             echo "Creating new Render web service..."
             OWNER_ID=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
               "https://api.render.com/v1/owners?limit=1" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['owner']['id'])")
+              | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          items=d if isinstance(d,list) else []
+          print(items[0]['owner']['id'] if items else 'ERROR')
+          ")
             
-            curl -s -X POST \
-              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            echo "Owner ID: $OWNER_ID"
+            
+            RESULT=$(curl -s -X POST \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
               -H "Content-Type: application/json" \
               https://api.render.com/v1/services \
               -d "{
@@ -95,60 +80,72 @@ jobs:
                 \"serviceDetails\": {
                   \"env\": \"node\",
                   \"buildCommand\": \"npm ci && npx prisma generate && npm run build\",
-                  \"startCommand\": \"npm start\",
+                  \"startCommand\": \"npm run seed && npm start\",
                   \"plan\": \"free\",
                   \"region\": \"oregon\",
                   \"envVars\": [
                     {\"key\":\"NODE_ENV\",\"value\":\"production\"},
                     {\"key\":\"PORT\",\"value\":\"8080\"},
-                    {\"key\":\"DATABASE_URL\",\"value\":\"${{ secrets.DATABASE_URL }}?sslmode=require\"},
-                    {\"key\":\"JWT_ACCESS_SECRET\",\"value\":\"${{ secrets.JWT_ACCESS_SECRET }}\"},
-                    {\"key\":\"JWT_REFRESH_SECRET\",\"value\":\"${{ secrets.JWT_REFRESH_SECRET }}\"},
+                    {\"key\":\"DATABASE_URL\",\"value\":\"postgresql://postgres:Harbans_1073@db.xukbgkwagjtzxoobcyuk.supabase.co:5432/postgres?sslmode=require\"},
+                    {\"key\":\"JWT_ACCESS_SECRET\",\"value\":\"erp_access_j8kX2mNpQvRtYw3sLhA5cE7uFz9dGbH4iJ6oK0lM1nP\"},
+                    {\"key\":\"JWT_REFRESH_SECRET\",\"value\":\"erp_refresh_K9mX3nQpRvSuYw4tLiA6cF8vGz0eHbI5jK1lN2oP7qR\"},
                     {\"key\":\"JWT_ACCESS_TTL\",\"value\":\"15m\"},
                     {\"key\":\"JWT_REFRESH_TTL_DAYS\",\"value\":\"7\"},
                     {\"key\":\"PASSWORD_RESET_TTL_MIN\",\"value\":\"30\"},
-                    {\"key\":\"CORS_ORIGINS\",\"value\":\"${{ secrets.CORS_ORIGINS }}\"},
+                    {\"key\":\"CORS_ORIGINS\",\"value\":\"https://bespoke-souffle-3c1a0e.netlify.app\"},
                     {\"key\":\"RATE_LIMIT_WINDOW_MS\",\"value\":\"60000\"},
                     {\"key\":\"RATE_LIMIT_MAX\",\"value\":\"200\"},
                     {\"key\":\"AUTH_RATE_LIMIT_MAX\",\"value\":\"20\"},
-                    {\"key\":\"BOOTSTRAP_ADMIN_EMAIL\",\"value\":\"${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}\"},
-                    {\"key\":\"BOOTSTRAP_ADMIN_PASSWORD\",\"value\":\"${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}\"}
+                    {\"key\":\"BOOTSTRAP_ADMIN_EMAIL\",\"value\":\"harbans22@gmail.com\"},
+                    {\"key\":\"BOOTSTRAP_ADMIN_PASSWORD\",\"value\":\"Harbans@1073\"}
                   ]
                 }
-              }"
+              }")
+            
+            echo "$RESULT" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          if 'id' in d:
+            print('Created service:', d['id'])
+            print('URL: https://inventory-erp-backend.onrender.com')
+          else:
+            print('Response:', json.dumps(d, indent=2)[:500])
+          "
           fi
 
-      - name: Wait for backend health (10 min max)
+      - name: Wait for health check
         run: |
-          echo "Waiting for https://inventory-erp-backend.onrender.com/api/v1/health ..."
-          for i in $(seq 1 60); do
+          echo "Waiting for backend (Render cold start can take 3-5 min)..."
+          for i in $(seq 1 40); do
             CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               https://inventory-erp-backend.onrender.com/api/v1/health 2>/dev/null || echo "000")
-            echo "[$i/60] HTTP $CODE"
-            [ "$CODE" = "200" ] && { echo "Backend UP!"; exit 0; }
-            sleep 10
+            echo "[$i/40] HTTP $CODE"
+            [ "$CODE" = "200" ] && { echo "Backend is LIVE!"; break; }
+            sleep 15
           done
-          echo "Timeout — check Render dashboard. Service may still be building."
-          exit 0
 
-      - name: Set Netlify VITE_API_URL
+      - name: Update Netlify VITE_API_URL
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
         run: |
           SITE_ID=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.NETLIFY_AUTH_TOKEN }}" \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
             "https://api.netlify.com/api/v1/sites" \
             | python3 -c "
-          import sys, json
-          sites = json.load(sys.stdin)
-          for s in (sites if isinstance(sites,list) else []):
-              if 'bespoke-souffle' in s.get('name','') + s.get('default_domain',''):
-                  print(s['id']); break
+          import sys,json
+          try:
+            sites=json.load(sys.stdin)
+            for s in (sites if isinstance(sites,list) else []):
+              if 'bespoke-souffle' in s.get('name','')+s.get('default_domain',''):
+                print(s['id']); break
+          except: pass
           " 2>/dev/null || echo "")
           
           if [ -n "$SITE_ID" ]; then
             curl -s -X PATCH \
-              -H "Authorization: Bearer ${{ secrets.NETLIFY_AUTH_TOKEN }}" \
+              -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
               -H "Content-Type: application/json" \
               "https://api.netlify.com/api/v1/sites/$SITE_ID" \
               -d '{"build_settings":{"env":{"VITE_API_URL":"https://inventory-erp-backend.onrender.com/api/v1"}}}'
-            echo "Netlify env var VITE_API_URL set."
+            echo "Netlify VITE_API_URL updated."
           fi
