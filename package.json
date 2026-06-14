@@ -10,12 +10,13 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "seed": "ts-node prisma/seed.ts",
+    "seed": "node prisma/seed-pg.mjs",
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "db:constraints": "ts-node prisma/apply-constraints.ts",
     "db:constraints:prod": "node dist/prisma/apply-constraints.js",
-    "db:setup": "prisma migrate deploy && node dist/prisma/apply-constraints.js && npm run seed"
+    "db:setup": "prisma migrate deploy && node dist/prisma/apply-constraints.js && npm run seed",
+    "apply-schema": "node prisma/apply-schema.mjs"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -34,7 +35,8 @@
     "zod": "^3.23.8",
     "exceljs": "^4.4.0",
     "multer": "^1.4.5-lts.1",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -46,7 +48,8 @@
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4",
-    "@types/multer": "^1.4.12"
+    "@types/multer": "^1.4.12",
+    "@types/pg": "^8.11.10"
   },
   "engines": {
     "node": ">=20"
