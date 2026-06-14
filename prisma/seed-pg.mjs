@@ -75,7 +75,11 @@ async function main() {
     throw new Error('ADMIN role or wildcard permission missing after insert');
   }
 
-  // 5. Link ADMIN -> wildcard (explicit IDs, no join ambiguity)
+  // 5. Sanity: confirm the role id is actually queryable (detects stale FK target)
+  const roleCheck = await client.query(`SELECT id FROM roles WHERE id=$1`, [adminRole.rows[0].id]);
+  console.log(`[seed] role id re-query found ${roleCheck.rowCount} row(s)`);
+
+  // 5b. Link ADMIN -> wildcard (explicit IDs, no join ambiguity)
   await run(client, 'link ADMIN->*',
     `INSERT INTO "_RolePermissions"("A","B") VALUES($1,$2) ON CONFLICT DO NOTHING`,
     [adminRole.rows[0].id, wildPerm.rows[0].id]);
