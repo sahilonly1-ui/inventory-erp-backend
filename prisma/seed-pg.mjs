@@ -37,7 +37,7 @@ async function main() {
     'marketplace.read','marketplace.manage','reports.export','imports.run'];
 
   for (const code of perms)
-    await client.query(`INSERT INTO permissions(id,code) VALUES(gen_random_uuid()::text,$1) ON CONFLICT(code) DO NOTHING`, [code]);
+    await client.query(`INSERT INTO permissions(id,code,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,$1,now(),now()) ON CONFLICT(code) DO NOTHING`, [code]);
   console.log('Permissions seeded.');
 
   await client.query(`INSERT INTO roles(id,name,description) VALUES(gen_random_uuid()::text,'ADMIN','Full access') ON CONFLICT(name) DO NOTHING`);

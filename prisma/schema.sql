@@ -329,6 +329,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+
+-- Fix permissions table if it was created without updatedAt default (earlier run)
+ALTER TABLE permissions ALTER COLUMN "updatedAt" SET DEFAULT now();
+ALTER TABLE permissions ALTER COLUMN "createdAt" SET DEFAULT now();
+
 -- INDEXES
 CREATE INDEX IF NOT EXISTS ix_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS ix_users_deleted ON users("isDeleted");
