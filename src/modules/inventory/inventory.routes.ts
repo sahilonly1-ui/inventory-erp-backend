@@ -1,4 +1,7 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
+import { asyncHandler } from '../../common/asyncHandler';
+import { ok } from '../../common/apiResponse';
+import { inventoryService } from './inventory.service';
 import { inventoryController } from './inventory.controller';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
