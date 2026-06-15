@@ -119,6 +119,30 @@ export const inventoryService = {
     return result;
   },
 
+  // Opening stock — registers a product in a warehouse without IMEI check.
+  // Used for bulk catalogue mapping. IMEI-tracked phones are registered at
+  // qty 0 (no physical units tracked yet) via a ledger OPENING entry.
+  async openingStock(input: {
+    productId: string; warehouseId: string; quantity: number; unitCost?: number;
+  }, actor: Actor): Promise<MovementResult> {
+    // Skip ensureNonImeiProduct — opening stock works for ALL product types
+    const product = await repo.findActiveProduct(input.productId);
+    if (!product) throw new NotFoundError('Product not found');
+    const result = await prisma.$transaction((tx) =>
+      applyLedgerMovementTx(tx, {
+        productId: input.productId,
+        warehouseId: input.warehouseId,
+        type: TransactionType.OPENING,
+        signedQty: input.quantity,
+        unitCost: input.unitCost ?? null,
+        vendorId: null,
+        remarks: 'Opening stock — warehouse mapping',
+      }, actor),
+    );
+    emitStockChanged({ productId: input.productId, warehouseId: input.warehouseId, quantity: result.newQuantity, type: 'STOCK_IN' });
+    return result;
+  },
+
   // Atomic warehouse transfer = one TRANSFER_OUT + one TRANSFER_IN sharing a
   // transferId. Locks are acquired in a deterministic warehouse order to avoid
   // deadlocks between opposing concurrent transfers.

@@ -5,10 +5,11 @@ import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { PERMISSIONS } from '../../constants/permissions';
 import {
-  stockInSchema, stockOutSchema, adjustSchema, transferSchema,
+  stockInSchema, stockOutSchema, adjustSchema, transferSchema, openingStockSchema,
   stockQuerySchema, ledgerQuerySchema, reconcileSchema, eanLookupSchema,
 } from './inventory.validator';
 
+const actor = (req: Request) => ({ id: req.user!.id, ip: req.ip ?? null });
 const router = Router();
 router.use(authenticate);
 
@@ -22,5 +23,9 @@ router.get('/ledger', authorize(PERMISSIONS.INVENTORY_READ), validate(ledgerQuer
 router.get('/lookup', authorize(PERMISSIONS.INVENTORY_READ), validate(eanLookupSchema, 'query'), inventoryController.lookup);
 
 router.post('/reconcile', authorize(PERMISSIONS.INVENTORY_RECONCILE), validate(reconcileSchema), inventoryController.reconcile);
+
+router.post('/opening-stock', authorize(PERMISSIONS.INVENTORY_STOCK_IN), validate(openingStockSchema), asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await inventoryService.openingStock(req.body, actor(req)), 201);
+}));
 
 export default router;

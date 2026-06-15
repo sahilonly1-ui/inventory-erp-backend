@@ -66,3 +66,10 @@ export const reconcileSchema = z.object({
 });
 
 export const eanLookupSchema = z.object({ ean: z.string().min(6).max(20) });
+
+export const openingStockSchema = z.object({
+  productId: uuid,
+  warehouseId: uuid,
+  quantity: z.coerce.number().int().nonnegative().default(0),
+  unitCost: z.coerce.number().nonnegative().optional(),
+});
