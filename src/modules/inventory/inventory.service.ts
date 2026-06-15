@@ -143,6 +143,16 @@ export const inventoryService = {
     return result;
   },
 
+  // Reset ALL stock levels to zero (for initial setup)
+  async resetAllStock(actor: Actor): Promise<{ reset: number }> {
+    const result = await prisma.stockLevel.updateMany({ data: { quantity: 0 } });
+    await writeAudit(prisma as any, {
+      userId: actor.id, action: 'UPDATE', entityName: 'inventory',
+      entityId: 'all', newValue: { action: 'reset_all_to_zero' }, ipAddress: actor.ip,
+    });
+    return { reset: result.count };
+  },
+
   // Atomic warehouse transfer = one TRANSFER_OUT + one TRANSFER_IN sharing a
   // transferId. Locks are acquired in a deterministic warehouse order to avoid
   // deadlocks between opposing concurrent transfers.
