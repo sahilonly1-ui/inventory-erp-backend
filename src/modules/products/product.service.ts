@@ -182,32 +182,43 @@ export const productService = {
     return { merged: sourceIds.length, into: target.name };
   },
 
-  // Sync brands from product.brand text field into the brands table
+  // Sync brands from product.brand text field — bulk approach (no N+1 queries)
   async syncBrands(actor: Actor) {
-    // Get all unique brand names from products
-    const raw = await prisma.product.findMany({
+    // 1. Get all unique brand names in ONE query
+    const rawBrands = await prisma.product.findMany({
       where: { isDeleted: false, brand: { not: '' } },
       select: { brand: true },
       distinct: ['brand'],
     });
-    let created = 0, skipped = 0;
-    for (const { brand } of raw) {
-      const name = brand.trim();
-      if (!name) continue;
-      const exists = await prisma.brand.findFirst({ where: { name, isDeleted: false } });
-      if (exists) { skipped++; continue; }
-      const b = await prisma.brand.create({ data: { name, createdBy: actor.id } }).catch(() => null);
-      if (b) created++;
+    const uniqueNames = [...new Set(rawBrands.map(r => r.brand.trim()).filter(Boolean))];
+
+    // 2. Get existing brands in ONE query
+    const existing = await prisma.brand.findMany({
+      where: { isDeleted: false },
+      select: { id: true, name: true },
+    });
+    const existingSet = new Set(existing.map(b => b.name));
+
+    // 3. Create missing brands with createMany (single query)
+    const toCreate = uniqueNames.filter(n => !existingSet.has(n)).map(name => ({ name, createdBy: actor.id }));
+    let created = 0;
+    if (toCreate.length > 0) {
+      await prisma.brand.createMany({ data: toCreate, skipDuplicates: true });
+      created = toCreate.length;
     }
-    // Now link products to their brand records
-    const allBrands = await prisma.brand.findMany({ where: { isDeleted: false } });
+    const skipped = uniqueNames.length - toCreate.length;
+
+    // 4. Fetch all brands (including newly created) and link products in bulk
+    const allBrands = await prisma.brand.findMany({ where: { isDeleted: false }, select: { id: true, name: true } });
+    // Use a single raw update per brand — much faster
     for (const brand of allBrands) {
       await prisma.product.updateMany({
         where: { brand: brand.name, brandId: null, isDeleted: false },
         data: { brandId: brand.id },
       });
     }
-    return { created, skipped, total: created + skipped };
+
+    return { created, skipped, total: uniqueNames.length };
   },
 
   // ── CATEGORIES ───────────────────────────────────────────────────────────
