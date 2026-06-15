@@ -90,11 +90,14 @@ export const productRepository = {
 
     const sf = params.sortBy || 'createdAt';
     const sd = params.sortDir || 'desc';
+    // 'stock' cannot be sorted via Prisma relation — fall back to updatedAt
     const orderBy: Prisma.ProductOrderByWithRelationInput =
       sf === 'vendor'   ? { vendor:   { name: sd } } :
       sf === 'category' ? { category: { name: sd } } :
       sf === 'brand'    ? { brand: sd }               :
-      { [sf]: sd };
+      sf === 'stock'    ? { updatedAt: sd }           :
+      ['model','ean','costPrice','sellingPrice','gstRate','createdAt','updatedAt'].includes(sf)
+        ? { [sf]: sd } : { createdAt: sd };
 
     const inc = await safeInclude();
     return prisma.$transaction([

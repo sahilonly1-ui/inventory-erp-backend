@@ -43,6 +43,11 @@ router.delete('/views/:id',  authorize(PERMISSIONS.PRODUCTS_READ),   asyncHandle
 router.get('/stats', authorize(PERMISSIONS.PRODUCTS_READ), asyncHandler(async (_r, res) => ok(res, await productService.getStats())));
 
 // ── BULK (must be before /:id) ────────────────────────────────────────────
+router.post('/bulk-import', authorize(PERMISSIONS.PRODUCTS_CREATE), asyncHandler(async (req, res) => {
+  const { rows } = req.body;
+  if (!Array.isArray(rows)) throw new Error('rows must be an array');
+  ok(res, await productService.bulkImport(rows, actor(req)));
+}));
 router.post('/bulk', authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(bulkUpdateSchema), asyncHandler(async (req, res) => ok(res, await productService.bulkUpdate(req.body.ids, req.body, actor(req)))));
 
 // ── PRODUCT LIST & CREATE ─────────────────────────────────────────────────

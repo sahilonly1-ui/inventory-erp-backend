@@ -26,6 +26,25 @@ export const productService = {
     });
   },
 
+  // Bulk import — upsert by EAN
+  async bulkImport(rows: any[], actor: Actor) {
+    let created = 0, updated = 0, errors: string[] = [];
+    for (const row of rows) {
+      try {
+        if (!row.ean || !row.model) { errors.push(`Row missing EAN or Name`); continue; }
+        const existing = await prisma.product.findFirst({ where: { ean: String(row.ean), isDeleted: false } });
+        if (existing) {
+          await prisma.product.update({ where: { id: existing.id }, data: { ...row, sku: row.ean, updatedBy: actor.id } });
+          updated++;
+        } else {
+          await prisma.product.create({ data: { ...row, sku: row.ean, createdBy: actor.id } });
+          created++;
+        }
+      } catch(e: any) { errors.push(`${row.ean}: ${e.message?.slice(0,60)}`); }
+    }
+    return { created, updated, errors: errors.slice(0, 20), totalErrors: errors.length };
+  },
+
   async list(input: {
     search?: string; brand?: string | string[]; brandId?: string | string[];
     categoryId?: string | string[]; vendorId?: string | string[];
