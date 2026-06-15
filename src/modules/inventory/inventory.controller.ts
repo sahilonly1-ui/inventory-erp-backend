@@ -20,6 +20,10 @@ export const inventoryController = {
   adjust: asyncHandler(async (req: Request, res: Response) => {
     ok(res, await inventoryService.adjust(req.body, actor(req)), 201);
   }),
+
+  openingStock: asyncHandler(async (req: Request, res: Response) => {
+    ok(res, await inventoryService.openingStock(req.body, actor(req)), 201);
+  }),
   transfer: asyncHandler(async (req: Request, res: Response) => {
     ok(res, await inventoryService.transfer(req.body, actor(req)), 201);
   }),
