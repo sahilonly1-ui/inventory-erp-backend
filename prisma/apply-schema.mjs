@@ -67,7 +67,9 @@ async function main() {
   if (!client) throw new Error('All connection attempts failed');
 
   const sql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
-  const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 5 && !s.startsWith('--'));
+  const statements = sql.split(';')
+    .map(s => s.replace(/^(\s*--[^\n]*\n)+/gm, '').trim())
+    .filter(s => s.length > 5 && !s.startsWith('--'));
 
   console.log(`Applying ${statements.length} statements...`);
   let ok = 0, skip = 0, err = 0;
