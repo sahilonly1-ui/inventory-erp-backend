@@ -29,6 +29,7 @@ router.delete('/brands/:id',  authorize(PERMISSIONS.PRODUCTS_DELETE),  asyncHand
 router.get(   '/categories',       authorize(PERMISSIONS.PRODUCTS_READ),    asyncHandler(async (_r, res) => ok(res, await productService.listCategories())));
 router.post(  '/categories',       authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(createCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.createCategory(req.body, actor(req)), 201)));
 router.patch( '/categories/:id',   authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(updateCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.updateCategory(req.params.id, req.body, actor(req)))));
+router.post('/categories/dedup', authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (_r, res) => ok(res, await productService.deduplicateCategories())));
 router.delete('/categories/:id',   authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (req, res) => { await productService.deleteCategory(req.params.id, actor(req)); ok(res, { message: 'Deleted' }); }));
 
 // ── SAVED VIEWS (must be before /:id) ────────────────────────────────────

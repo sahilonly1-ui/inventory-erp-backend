@@ -171,9 +171,30 @@ export const productService = {
   listCategories() {
     return prisma.productCategory.findMany({
       where: { isDeleted: false },
-      include: { children: { where: { isDeleted: false } } },
+      include: { children: { where: { isDeleted: false }, orderBy: { name: 'asc' } } },
       orderBy: { name: 'asc' },
     });
+  },
+
+  // Deduplicate categories — merges duplicates (same name) into one
+  async deduplicateCategories() {
+    const all = await prisma.productCategory.findMany({ where: { isDeleted: false }, orderBy: { createdAt: 'asc' } });
+    const seen = new Map<string, string>(); // name -> first id
+    const toDelete: string[] = [];
+    for (const cat of all) {
+      const key = cat.name.toLowerCase().trim();
+      if (seen.has(key)) {
+        // Move products from duplicate to original
+        await prisma.product.updateMany({ where: { categoryId: cat.id }, data: { categoryId: seen.get(key)! } });
+        toDelete.push(cat.id);
+      } else {
+        seen.set(key, cat.id);
+      }
+    }
+    if (toDelete.length) {
+      await prisma.productCategory.updateMany({ where: { id: { in: toDelete } }, data: { isDeleted: true } });
+    }
+    return { deduplicated: toDelete.length, remaining: seen.size };
   },
 
   async updateCategory(id: string, input: { name: string; parentId?: string }, actor: Actor) {
