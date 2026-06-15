@@ -163,6 +163,34 @@ export const productService = {
     return { merged: sourceIds.length, into: target.name };
   },
 
+  // Sync brands from product.brand text field into the brands table
+  async syncBrands(actor: Actor) {
+    // Get all unique brand names from products
+    const raw = await prisma.product.findMany({
+      where: { isDeleted: false, brand: { not: '' } },
+      select: { brand: true },
+      distinct: ['brand'],
+    });
+    let created = 0, skipped = 0;
+    for (const { brand } of raw) {
+      const name = brand.trim();
+      if (!name) continue;
+      const exists = await prisma.brand.findFirst({ where: { name, isDeleted: false } });
+      if (exists) { skipped++; continue; }
+      const b = await prisma.brand.create({ data: { name, createdBy: actor.id } }).catch(() => null);
+      if (b) created++;
+    }
+    // Now link products to their brand records
+    const allBrands = await prisma.brand.findMany({ where: { isDeleted: false } });
+    for (const brand of allBrands) {
+      await prisma.product.updateMany({
+        where: { brand: brand.name, brandId: null, isDeleted: false },
+        data: { brandId: brand.id },
+      });
+    }
+    return { created, skipped, total: created + skipped };
+  },
+
   // ── CATEGORIES ───────────────────────────────────────────────────────────
   createCategory(input: { name: string; parentId?: string }, actor: Actor) {
     return prisma.productCategory.create({ data: { ...input, createdBy: actor.id } });
