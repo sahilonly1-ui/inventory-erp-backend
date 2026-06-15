@@ -369,3 +369,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_imei_imei2 ON imei_inventory(imei2) WHERE "
 -- CONSTRAINTS
 ALTER TABLE stock_levels DROP CONSTRAINT IF EXISTS chk_stock_nonneg;
 ALTER TABLE stock_levels ADD CONSTRAINT chk_stock_nonneg CHECK (quantity >= 0);
+
+-- ProductStatus enum
+CREATE TYPE "ProductStatus" AS ENUM ('ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED');
+
+-- Brand master table
+CREATE TABLE IF NOT EXISTS brands (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  name TEXT NOT NULL UNIQUE,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "createdBy" TEXT,
+  "updatedBy" TEXT,
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "deletedAt" TIMESTAMPTZ,
+  "deletedBy" TEXT
+);
+
+-- Product attributes (dynamic key-value)
+CREATE TABLE IF NOT EXISTS product_attributes (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "productId" TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE("productId", key)
+);
+
+-- Saved views
+CREATE TABLE IF NOT EXISTS saved_views (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "userId" TEXT NOT NULL,
+  name TEXT NOT NULL,
+  filters JSONB NOT NULL DEFAULT '{}',
+  columns JSONB NOT NULL DEFAULT '[]',
+  "sortBy" TEXT,
+  "sortDir" TEXT,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Add new columns to products table
+ALTER TABLE products ADD COLUMN IF NOT EXISTS "brandId" TEXT REFERENCES brands(id);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS status "ProductStatus" NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{}';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS "minStock" INTEGER NOT NULL DEFAULT 0;
+
+-- New indexes
+CREATE INDEX IF NOT EXISTS ix_products_brandid ON products("brandId");
+CREATE INDEX IF NOT EXISTS ix_products_status ON products(status);
+CREATE INDEX IF NOT EXISTS ix_brands_name ON brands(name);
+CREATE INDEX IF NOT EXISTS ix_product_attrs ON product_attributes("productId");

@@ -7,25 +7,34 @@ import { productRepository } from './product.repository';
 interface Actor { id: string; ip: string | null; }
 
 export const productService = {
-  async create(input: Prisma.ProductUncheckedCreateInput, actor: Actor) {
+  // ── PRODUCTS ─────────────────────────────────────────────────────────────
+  async create(input: any, actor: Actor) {
     const dup = await prisma.product.findFirst({
-      where: { isDeleted: false, OR: [{ ean: input.ean }, { sku: input.sku }] },
+      where: { isDeleted: false, ean: input.ean },
     });
-    if (dup) throw new ConflictError('A product with this EAN or SKU already exists');
-
+    if (dup) throw new ConflictError('A product with this EAN already exists');
     return prisma.$transaction(async (tx) => {
-      const product = await tx.product.create({ data: { ...input, createdBy: actor.id } });
+      const product = await tx.product.create({
+        data: { ...input, sku: input.ean, createdBy: actor.id },
+      });
       await writeAudit(tx, {
-        userId: actor.id, action: 'CREATE', entityName: 'products', entityId: product.id,
-        newValue: { ean: product.ean, sku: product.sku, model: product.model }, ipAddress: actor.ip,
+        userId: actor.id, action: 'CREATE', entityName: 'products',
+        entityId: product.id, newValue: { ean: product.ean, model: product.model },
+        ipAddress: actor.ip,
       });
       return product;
     });
   },
 
   async list(input: {
-    search?: string; brand?: string; categoryId?: string; vendorId?: string;
-    imeiRequired?: boolean; page: number; limit: number;
+    search?: string; brand?: string | string[]; brandId?: string | string[];
+    categoryId?: string | string[]; vendorId?: string | string[];
+    warehouseId?: string; imeiRequired?: boolean; status?: string | string[];
+    costPriceMin?: number; costPriceMax?: number;
+    sellingPriceMin?: number; sellingPriceMax?: number;
+    createdFrom?: string; createdTo?: string;
+    lowStock?: boolean; outOfStock?: boolean;
+    page: number; limit: number; sortBy?: string; sortDir?: 'asc' | 'desc';
   }) {
     const [items, total] = await productRepository.list({
       ...input, skip: (input.page - 1) * input.limit, take: input.limit,
@@ -36,20 +45,52 @@ export const productService = {
   async get(id: string) {
     const product = await productRepository.findById(id);
     if (!product) throw new NotFoundError('Product not found');
-    return product;
+    // enrich with audit history
+    const history = await prisma.auditLog.findMany({
+      where: { entityName: 'products', entityId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    return { ...product, history };
   },
 
-  async update(id: string, input: Prisma.ProductUncheckedUpdateInput, actor: Actor) {
+  async update(id: string, input: any, actor: Actor) {
     const existing = await productRepository.findById(id);
     if (!existing) throw new NotFoundError('Product not found');
     return prisma.$transaction(async (tx) => {
-      const product = await tx.product.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
+      // handle attributes separately
+      const { attributes, ...productData } = input;
+      const product = await tx.product.update({
+        where: { id }, data: { ...productData, updatedBy: actor.id },
+      });
+      if (attributes) {
+        for (const attr of attributes) {
+          await tx.productAttribute.upsert({
+            where: { productId_key: { productId: id, key: attr.key } },
+            update: { value: attr.value, updatedAt: new Date() },
+            create: { productId: id, key: attr.key, value: attr.value },
+          });
+        }
+      }
       await writeAudit(tx, {
         userId: actor.id, action: 'UPDATE', entityName: 'products', entityId: id,
-        oldValue: { ean: existing.ean, sku: existing.sku }, newValue: input, ipAddress: actor.ip,
+        oldValue: { brand: existing.brand, costPrice: existing.costPrice, sellingPrice: existing.sellingPrice },
+        newValue: productData, ipAddress: actor.ip,
       });
       return product;
     });
+  },
+
+  async bulkUpdate(ids: string[], data: any, actor: Actor) {
+    const { attributes, ...productData } = data;
+    await productRepository.bulkUpdate(ids, { ...productData, updatedBy: actor.id });
+    for (const id of ids) {
+      await writeAudit(prisma as any, {
+        userId: actor.id, action: 'UPDATE', entityName: 'products', entityId: id,
+        newValue: { bulk: true, ...productData }, ipAddress: actor.ip,
+      });
+    }
+    return { updated: ids.length };
   },
 
   async remove(id: string, actor: Actor) {
@@ -75,11 +116,106 @@ export const productService = {
     });
   },
 
-  // minimal category management
+  async getStats() {
+    return productRepository.getStats();
+  },
+
+  // ── BRANDS ───────────────────────────────────────────────────────────────
+  async createBrand(input: { name: string }, actor: Actor) {
+    const existing = await prisma.brand.findFirst({ where: { name: input.name, isDeleted: false } });
+    if (existing) throw new ConflictError('Brand already exists');
+    return prisma.brand.create({ data: { ...input, createdBy: actor.id } });
+  },
+
+  listBrands() {
+    return prisma.brand.findMany({ where: { isDeleted: false }, orderBy: { name: 'asc' } });
+  },
+
+  async updateBrand(id: string, input: { name: string }, actor: Actor) {
+    return prisma.brand.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
+  },
+
+  async deleteBrand(id: string, actor: Actor) {
+    return prisma.brand.update({
+      where: { id }, data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+    });
+  },
+
+  async mergeBrands(sourceIds: string[], targetId: string, actor: Actor) {
+    // Move all products from source brands to target brand
+    const target = await prisma.brand.findUnique({ where: { id: targetId } });
+    if (!target) throw new NotFoundError('Target brand not found');
+    await prisma.$transaction(async (tx) => {
+      // Update products brand text + brandId
+      for (const sourceId of sourceIds) {
+        const source = await tx.brand.findUnique({ where: { id: sourceId } });
+        if (!source) continue;
+        await tx.product.updateMany({
+          where: { brandId: sourceId },
+          data: { brandId: targetId, brand: target.name, updatedBy: actor.id },
+        });
+        await tx.brand.update({
+          where: { id: sourceId },
+          data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+        });
+      }
+    });
+    return { merged: sourceIds.length, into: target.name };
+  },
+
+  // ── CATEGORIES ───────────────────────────────────────────────────────────
   createCategory(input: { name: string; parentId?: string }, actor: Actor) {
     return prisma.productCategory.create({ data: { ...input, createdBy: actor.id } });
   },
+
   listCategories() {
-    return prisma.productCategory.findMany({ where: { isDeleted: false }, orderBy: { name: 'asc' } });
+    return prisma.productCategory.findMany({
+      where: { isDeleted: false },
+      include: { children: { where: { isDeleted: false } } },
+      orderBy: { name: 'asc' },
+    });
+  },
+
+  async updateCategory(id: string, input: { name: string; parentId?: string }, actor: Actor) {
+    return prisma.productCategory.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
+  },
+
+  async deleteCategory(id: string, actor: Actor) {
+    return prisma.productCategory.update({
+      where: { id }, data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+    });
+  },
+
+  // ── ATTRIBUTES ───────────────────────────────────────────────────────────
+  async setAttributes(productId: string, attributes: { key: string; value: string }[], actor: Actor) {
+    const product = await productRepository.findById(productId);
+    if (!product) throw new NotFoundError('Product not found');
+    return prisma.$transaction(async (tx) => {
+      for (const attr of attributes) {
+        await tx.productAttribute.upsert({
+          where: { productId_key: { productId, key: attr.key } },
+          update: { value: attr.value, updatedAt: new Date() },
+          create: { productId, key: attr.key, value: attr.value },
+        });
+      }
+      return tx.productAttribute.findMany({ where: { productId } });
+    });
+  },
+
+  // ── SAVED VIEWS ──────────────────────────────────────────────────────────
+  listSavedViews(userId: string) {
+    return prisma.savedView.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } });
+  },
+
+  createSavedView(userId: string, input: { name: string; filters: any; columns: any; sortBy?: string; sortDir?: string }) {
+    return prisma.savedView.create({ data: { userId, ...input } });
+  },
+
+  updateSavedView(id: string, userId: string, input: any) {
+    return prisma.savedView.update({ where: { id }, data: { ...input, updatedAt: new Date() } });
+  },
+
+  deleteSavedView(id: string, userId: string) {
+    return prisma.savedView.delete({ where: { id } });
   },
 };

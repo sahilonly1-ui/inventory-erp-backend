@@ -237,13 +237,17 @@ model ProductCategory {
 
 model Product {
   id          String           @id @default(uuid())
-  ean         String // partial-unique WHERE is_deleted=false (migration)
-  sku         String // partial-unique WHERE is_deleted=false (migration)
+  ean         String
   model       String
   brand       String
+  brandId     String?
+  brandRef    Brand?           @relation(fields: [brandId], references: [id])
   categoryId  String?
   category    ProductCategory? @relation(fields: [categoryId], references: [id])
   description String?
+  status      ProductStatus    @default(ACTIVE)
+  images      String[]         @default([])
+  minStock    Int              @default(0)
 
   costPrice    Decimal @db.Decimal(12, 2)
   sellingPrice Decimal @db.Decimal(12, 2)
@@ -253,7 +257,6 @@ model Product {
   vendorId String?
   vendor   Vendor? @relation(fields: [vendorId], references: [id])
 
-  // accessories are simply products with imeiRequired = false (single engine)
   imeiRequired   Boolean @default(false)
   serialRequired Boolean @default(false)
 
@@ -261,6 +264,7 @@ model Product {
   stockLevels  StockLevel[]
   imeiUnits    ImeiInventory[]
   openBoxUnits OpenBoxInventory[]
+  attributes   ProductAttribute[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -271,9 +275,10 @@ model Product {
   deletedBy String?
 
   @@index([ean])
-  @@index([sku])
   @@index([brand])
+  @@index([brandId])
   @@index([categoryId])
+  @@index([status])
   @@index([isDeleted])
   @@map("products")
 }
@@ -588,3 +593,53 @@ model Notification {
 //   CREATE UNIQUE INDEX uq_imei_imei2    ON imei_inventory(imei2)   WHERE "isDeleted" = false AND imei2 IS NOT NULL;
 //   ALTER TABLE stock_levels ADD CONSTRAINT chk_stock_nonneg CHECK (quantity >= 0);
 // =============================================================================
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+  OPEN_BOX_ONLY
+  BLOCKED
+}
+
+model Brand {
+  id        String    @id @default(uuid())
+  name      String    @unique
+  products  Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  createdBy String?
+  updatedBy String?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+  deletedBy String?
+
+  @@map("brands")
+}
+
+model ProductAttribute {
+  id        String   @id @default(uuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  key       String
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, key])
+  @@map("product_attributes")
+}
+
+model SavedView {
+  id         String   @id @default(uuid())
+  userId     String
+  name       String
+  filters    Json
+  columns    Json
+  sortBy     String?
+  sortDir    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("saved_views")
+}
