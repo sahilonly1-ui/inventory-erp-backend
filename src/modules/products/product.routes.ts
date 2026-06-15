@@ -20,6 +20,11 @@ const actor = (req: Request) => ({ id: req.user!.id, ip: req.ip ?? null });
 
 // ── BRANDS (must be before /:id) ──────────────────────────────────────────
 router.get( '/brands/list',   authorize(PERMISSIONS.PRODUCTS_READ),   asyncHandler(async (_r, res) => ok(res, await productService.listBrands())));
+router.post('/brands/bulk-import', authorize(PERMISSIONS.PRODUCTS_CREATE), asyncHandler(async (req, res) => {
+  const { rows } = req.body;
+  if(!Array.isArray(rows)) throw new Error('rows must be an array');
+  ok(res, await productService.bulkImportBrands(rows, actor(req)));
+}));
 router.post('/brands/sync',  authorize(PERMISSIONS.PRODUCTS_CREATE), asyncHandler(async (req, res) => ok(res, await productService.syncBrands(actor(req)))));
 router.post('/brands/merge',  authorize(PERMISSIONS.PRODUCTS_UPDATE),  validate(mergeBrandsSchema), asyncHandler(async (req, res) => ok(res, await productService.mergeBrands(req.body.sourceIds, req.body.targetId, actor(req)))));
 router.post('/brands',        authorize(PERMISSIONS.PRODUCTS_CREATE),  validate(createBrandSchema), asyncHandler(async (req, res) => ok(res, await productService.createBrand(req.body, actor(req)), 201)));
