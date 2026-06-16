@@ -238,6 +238,7 @@ model ProductCategory {
 model Product {
   id          String           @id @default(uuid())
   ean         String
+  sku         String   @default("")
   model       String
   brand       String
   brandId     String?
