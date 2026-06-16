@@ -62,6 +62,13 @@ router.post('/', authorize(PERMISSIONS.PRODUCTS_CREATE), validate(createProductS
 // ── SINGLE PRODUCT by ID (must be LAST among GETs) ───────────────────────
 router.get(   '/:id',              authorize(PERMISSIONS.PRODUCTS_READ),   validate(idParamSchema, 'params'),  asyncHandler(async (req, res) => ok(res, await productService.get(req.params.id))));
 router.patch( '/:id',              authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(idParamSchema, 'params'), validate(updateProductSchema), asyncHandler(async (req, res) => ok(res, await productService.update(req.params.id, req.body, actor(req)))));
+router.delete('/bulk-delete', authorize(PERMISSIONS.PRODUCTS_DELETE), asyncHandler(async (req, res) => {
+  const { ids } = req.body as { ids: string[] };
+  if (!Array.isArray(ids) || !ids.length) throw new Error('ids array required');
+  const result = await productService.bulkDelete(ids, actor(req));
+  ok(res, result);
+}));
+
 router.delete('/:id',              authorize(PERMISSIONS.PRODUCTS_DELETE), validate(idParamSchema, 'params'),  asyncHandler(async (req, res) => { await productService.remove(req.params.id, actor(req)); ok(res, { message: 'Deleted' }); }));
 router.post(  '/:id/restore',      authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(idParamSchema, 'params'),  asyncHandler(async (req, res) => ok(res, await productService.restore(req.params.id, actor(req)))));
 router.post(  '/:id/attributes',   authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(idParamSchema, 'params'), validate(setAttributesSchema), asyncHandler(async (req, res) => ok(res, await productService.setAttributes(req.params.id, req.body.attributes, actor(req)))));
