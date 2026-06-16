@@ -105,16 +105,16 @@ export const productService = {
         const updatedByParam = `$${params.length}`;
         const sql = `
           UPDATE products SET
-            model         = v.model,
-            brand         = v.brand,
-            cost_price    = v.cp,
-            selling_price = v.sp,
-            gst_rate      = v.gst,
-            hsn_code      = v.hsn,
-            min_stock     = v.ms,
-            is_deleted    = false,
-            updated_at    = NOW(),
-            updated_by    = ${updatedByParam}
+            "model"        = v.model,
+            "brand"        = v.brand,
+            "costPrice"    = v.cp,
+            "sellingPrice" = v.sp,
+            "gstRate"      = v.gst,
+            "hsnCode"      = v.hsn,
+            "minStock"     = v.ms,
+            "isDeleted"    = false,
+            "updatedAt"    = NOW(),
+            "updatedBy"    = ${updatedByParam}
           FROM (VALUES ${valuesClauses.join(',')})
             AS v(ean, model, brand, cp, sp, gst, hsn, ms)
           WHERE products.ean = v.ean
