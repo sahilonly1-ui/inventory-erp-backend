@@ -26,7 +26,17 @@ export const productService = {
     });
   },
 
-  // Bulk import — 2 queries total: createMany for new + one raw SQL UPDATE for existing
+  // Bulk delete — soft-delete by ID list
+  async bulkDelete(ids: string[], actor: Actor) {
+    if (!ids?.length) return { deleted: 0 };
+    const result = await prisma.product.updateMany({
+      where: { id: { in: ids }, isDeleted: false },
+      data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
+    });
+    return { deleted: result.count };
+  },
+
+    // Bulk import — 2 queries total: createMany for new + one raw SQL UPDATE for existing
   async bulkImport(rows: any[], actor: Actor) {
     const VALID_STATUS = new Set(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']);
 
