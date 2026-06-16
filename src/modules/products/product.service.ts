@@ -62,11 +62,20 @@ export const productService = {
       try {
         const res = await prisma.product.createMany({
           data: toCreate.map(r => ({
-            ean: r.ean, sku: r.ean, model: r.model, brand: r.brand,
-            status: r.status as any,
-            costPrice: r.costPrice, sellingPrice: r.sellingPrice,
-            gstRate: r.gstRate, hsnCode: r.hsnCode, minStock: r.minStock,
-            isDeleted: false, createdBy: actor.id,
+            ean:          r.ean,
+            sku:          r.ean,
+            model:        r.model,
+            brand:        r.brand,
+            status:       r.status as any,
+            costPrice:    Number(r.costPrice)    || 0,
+            sellingPrice: Number(r.sellingPrice) || 0,
+            gstRate:      Number(r.gstRate)      || 18,
+            hsnCode:      r.hsnCode || undefined,
+            minStock:     Number(r.minStock)     || 0,
+            isDeleted:    false,
+            imeiRequired: false,
+            serialRequired: false,
+            createdBy:    actor.id,
           })),
           skipDuplicates: true,
         });
