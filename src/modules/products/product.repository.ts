@@ -100,6 +100,29 @@ export const productRepository = {
         ? { [sf]: sd } : { createdAt: sd };
 
     const inc = await safeInclude();
+
+    // Stock sort requires in-memory sort (Prisma can't SUM a relation in orderBy)
+    if (sf === 'stock') {
+      const [allItems, total] = await prisma.$transaction([
+        prisma.product.findMany({
+          where,
+          select: { id: true, stockLevels: { select: { quantity: true } } },
+        }),
+        prisma.product.count({ where }),
+      ]);
+      const sorted = allItems
+        .map(p => ({ id: p.id, qty: p.stockLevels.reduce((s: number, l: any) => s + l.quantity, 0) }))
+        .sort((a, b) => sd === 'desc' ? b.qty - a.qty : a.qty - b.qty);
+      const pageIds = sorted.slice(params.skip, params.skip + params.take).map(p => p.id);
+      const fullItems = await prisma.product.findMany({
+        where: { id: { in: pageIds } },
+        include: inc as any,
+      });
+      // Preserve sort order
+      const ordered = pageIds.map(id => fullItems.find((p: any) => p.id === id)).filter(Boolean);
+      return [ordered, total] as any;
+    }
+
     return prisma.$transaction([
       prisma.product.findMany({ where, orderBy, skip: params.skip, take: params.take, include: inc as any }),
       prisma.product.count({ where }),
