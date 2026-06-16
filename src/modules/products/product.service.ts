@@ -63,7 +63,6 @@ export const productService = {
         const res = await prisma.product.createMany({
           data: toCreate.map(r => ({
             ean:          r.ean,
-            sku:          r.ean,
             model:        r.model,
             brand:        r.brand,
             status:       r.status as any,
