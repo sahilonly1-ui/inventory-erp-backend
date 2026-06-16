@@ -26,7 +26,7 @@ export const productService = {
     });
   },
 
-  // Bulk import — upsert by EAN: new products added, existing updated
+  // Bulk import — 2 queries total: createMany for new + one raw SQL UPDATE for existing
   async bulkImport(rows: any[], actor: Actor) {
     const VALID_STATUS = new Set(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']);
 
@@ -34,58 +34,87 @@ export const productService = {
       ean:          String(r.ean   || '').trim(),
       model:        String(r.model || '').trim(),
       brand:        String(r.brand || ''),
-      categoryId:   r.categoryId || null,
-      status:       (VALID_STATUS.has(String(r.status || '').toUpperCase())
-                    ? String(r.status).toUpperCase() : 'ACTIVE') as any,
+      status:       VALID_STATUS.has(String(r.status||'').toUpperCase()) ? String(r.status).toUpperCase() : 'ACTIVE',
       costPrice:    Number(r.costPrice)    || 0,
       sellingPrice: Number(r.sellingPrice) || 0,
       gstRate:      Number(r.gstRate)      || 18,
-      hsnCode:      String(r.hsnCode || '') || undefined,
+      hsnCode:      String(r.hsnCode || ''),
       minStock:     Number(r.minStock)     || 0,
     }));
 
     if (!validRows.length) return { created: 0, updated: 0, errors: ['No valid rows'], totalErrors: 1 };
 
-    // Step 1: find all existing EANs in one query
+    // Step 1: find existing EANs in ONE query
     const allEans = validRows.map(r => r.ean);
     const existing = await prisma.product.findMany({
       where: { ean: { in: allEans } },
-      select: { id: true, ean: true },
+      select: { ean: true },
     });
-    const existingMap = new Map(existing.map(p => [p.ean, p.id]));
-    const toCreate = validRows.filter(r => !existingMap.has(r.ean));
-    const toUpdate = validRows.filter(r =>  existingMap.has(r.ean));
+    const existingSet = new Set(existing.map(p => p.ean));
+    const toCreate = validRows.filter(r => !existingSet.has(r.ean));
+    const toUpdate = validRows.filter(r =>  existingSet.has(r.ean));
 
-    let created = 0, updated = 0, errors: string[] = [];
+    let created = 0, updated = 0;
+    const errors: string[] = [];
 
-    // Step 2: createMany for all NEW products (one query)
+    // Step 2: createMany for ALL new products — one query
     if (toCreate.length > 0) {
       try {
         const res = await prisma.product.createMany({
-          data: toCreate.map(r => ({ ...r, sku: r.ean, isDeleted: false, createdBy: actor.id })),
+          data: toCreate.map(r => ({
+            ean: r.ean, sku: r.ean, model: r.model, brand: r.brand,
+            status: r.status as any,
+            costPrice: r.costPrice, sellingPrice: r.sellingPrice,
+            gstRate: r.gstRate, hsnCode: r.hsnCode, minStock: r.minStock,
+            isDeleted: false, createdBy: actor.id,
+          })),
           skipDuplicates: true,
         });
         created = res.count;
-      } catch(e: any) { errors.push('Create error: ' + String(e.message).slice(0,120)); }
+      } catch(e: any) { errors.push('Create error: ' + String(e.message).slice(0,150)); }
     }
 
-    // Step 3: parallel upserts for EXISTING products (50 concurrent at a time)
-    const CONCURRENCY = 50;
-    for (let i = 0; i < toUpdate.length; i += CONCURRENCY) {
-      const batch = toUpdate.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(row => {
-          const id = existingMap.get(row.ean)!;
-          const { ean, ...data } = row;
-          return prisma.product.update({
-            where: { id },
-            data: { ...data, isDeleted: false, updatedBy: actor.id },
-          });
-        })
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') updated++;
-        else errors.push(String((r as any).reason?.message || '').slice(0,80));
+    // Step 3: ONE raw SQL UPDATE for all existing products
+    if (toUpdate.length > 0) {
+      try {
+        // Build parameterized VALUES: ($1,$2,$3,$4::decimal,$5::decimal,$6::decimal,$7,$8::int)
+        const params: any[] = [];
+        const valuesClauses: string[] = [];
+        const FIELDS = 8; // ean,model,brand,costPrice,sellingPrice,gstRate,hsnCode,minStock
+
+        toUpdate.forEach(r => {
+          const base = params.length;
+          params.push(r.ean, r.model, r.brand,
+            r.costPrice, r.sellingPrice, r.gstRate,
+            r.hsnCode, r.minStock);
+          valuesClauses.push(
+            `($${base+1},$${base+2},$${base+3},$${base+4}::decimal,$${base+5}::decimal,$${base+6}::decimal,$${base+7},$${base+8}::int)`
+          );
+        });
+        params.push(actor.id); // last param = updatedBy
+
+        const updatedByParam = `$${params.length}`;
+        const sql = `
+          UPDATE products SET
+            model         = v.model,
+            brand         = v.brand,
+            cost_price    = v.cp,
+            selling_price = v.sp,
+            gst_rate      = v.gst,
+            hsn_code      = v.hsn,
+            min_stock     = v.ms,
+            is_deleted    = false,
+            updated_at    = NOW(),
+            updated_by    = ${updatedByParam}
+          FROM (VALUES ${valuesClauses.join(',')})
+            AS v(ean, model, brand, cp, sp, gst, hsn, ms)
+          WHERE products.ean = v.ean
+        `;
+
+        await prisma.$executeRawUnsafe(sql, ...params);
+        updated = toUpdate.length;
+      } catch(e: any) {
+        errors.push('Update error: ' + String(e.message).slice(0,150));
       }
     }
 
