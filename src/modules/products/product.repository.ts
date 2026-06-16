@@ -67,11 +67,11 @@ export const productRepository = {
     const where: Prisma.ProductWhereInput = {
       isDeleted: false,
       ...(blankBrand
-        ? { OR: [{ brand: '' }, { brand: null as any }] }
+        ? { brand: '' }
         : realBrands?.length ? { brand: { in: realBrands } } : {}),
       ...(brandIds?.length  ? { brandId:    { in: brandIds }            } : {}),
       ...(blankCat
-        ? { categoryId: null }
+        ? { categoryId: { equals: null } }
         : realCatIds?.length ? { categoryId: { in: realCatIds } } : {}),
       ...(vendorIds?.length ? { vendorId:   { in: vendorIds }           } : {}),
       ...(statuses?.length  ? { status:     { in: statuses as any }     } : {}),
