@@ -77,8 +77,8 @@ export const productService = {
       }
     }
 
-    // Step 3: Batch UPDATE in chunks of 200 using $transaction
-    const CHUNK = 200;
+    // Step 3: Batch UPDATE in chunks of 50 (faster per chunk, more reliable)
+    const CHUNK = 50;
     for (let i = 0; i < toUpdate.length; i += CHUNK) {
       const chunk = toUpdate.slice(i, i + CHUNK);
       try {
@@ -87,11 +87,22 @@ export const productService = {
             const id = existingMap.get(row.ean)!;
             const { ean, ...data } = row;
             return prisma.product.update({ where: { id }, data: { ...data, updatedBy: actor.id } });
-          })
+          }),
+          { timeout: 25000 } // 25s timeout per chunk
         );
         updated += chunk.length;
       } catch(e: any) {
-        errors.push(`Update chunk ${i}-${i+chunk.length}: ${String(e.message).slice(0, 100)}`);
+        // If chunk fails, try individually
+        for (const row of chunk) {
+          try {
+            const id = existingMap.get(row.ean)!;
+            const { ean, ...data } = row;
+            await prisma.product.update({ where: { id }, data: { ...data, updatedBy: actor.id } });
+            updated++;
+          } catch(e2: any) {
+            errors.push(`${row.ean}: ${String(e2.message).slice(0, 60)}`);
+          }
+        }
       }
     }
 
