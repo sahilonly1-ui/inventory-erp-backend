@@ -34,6 +34,7 @@ export const productService = {
       ean:          String(r.ean   || '').trim(),
       model:        String(r.model || '').trim(),
       brand:        String(r.brand || ''),
+      categoryId:   r.categoryId   || null,   // from CSV category→ID mapping
       status:       VALID_STATUS.has(String(r.status||'').toUpperCase()) ? String(r.status).toUpperCase() : 'ACTIVE',
       costPrice:    Number(r.costPrice)    || 0,
       sellingPrice: Number(r.sellingPrice) || 0,
@@ -66,6 +67,7 @@ export const productService = {
             sku:          r.ean,
             model:        r.model,
             brand:        r.brand,
+            categoryId:   r.categoryId || undefined,
             status:       r.status as any,
             costPrice:    Number(r.costPrice)    || 0,
             sellingPrice: Number(r.sellingPrice) || 0,
@@ -107,6 +109,7 @@ export const productService = {
           UPDATE products SET
             "model"        = v.model,
             "brand"        = v.brand,
+            "categoryId"   = v.cat_id,
             "costPrice"    = v.cp,
             "sellingPrice" = v.sp,
             "gstRate"      = v.gst,
@@ -116,7 +119,7 @@ export const productService = {
             "updatedAt"    = NOW(),
             "updatedBy"    = ${updatedByParam}
           FROM (VALUES ${valuesClauses.join(',')})
-            AS v(ean, model, brand, cp, sp, gst, hsn, ms)
+            AS v(ean, model, brand, cat_id, cp, sp, gst, hsn, ms)
           WHERE products.ean = v.ean
         `;
 
