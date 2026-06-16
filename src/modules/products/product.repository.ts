@@ -58,11 +58,21 @@ export const productRepository = {
     const vendorIds = toArr(params.vendorId);
     const statuses  = toArr(params.status);
 
+    // '__blank__' is a special filter value meaning "no brand" or "no category"
+    const blankBrand = brands?.includes('__blank__');
+    const blankCat   = catIds?.includes('__blank__');
+    const realBrands = brands?.filter(b => b !== '__blank__');
+    const realCatIds = catIds?.filter(c => c !== '__blank__');
+
     const where: Prisma.ProductWhereInput = {
       isDeleted: false,
-      ...(brands?.length    ? { brand:      { in: brands }              } : {}),
+      ...(blankBrand
+        ? { OR: [{ brand: '' }, { brand: null as any }] }
+        : realBrands?.length ? { brand: { in: realBrands } } : {}),
       ...(brandIds?.length  ? { brandId:    { in: brandIds }            } : {}),
-      ...(catIds?.length    ? { categoryId: { in: catIds }              } : {}),
+      ...(blankCat
+        ? { categoryId: null }
+        : realCatIds?.length ? { categoryId: { in: realCatIds } } : {}),
       ...(vendorIds?.length ? { vendorId:   { in: vendorIds }           } : {}),
       ...(statuses?.length  ? { status:     { in: statuses as any }     } : {}),
       ...(params.imeiRequired !== undefined ? { imeiRequired: params.imeiRequired } : {}),
