@@ -26,22 +26,75 @@ export const productService = {
     });
   },
 
-  // Bulk import — upsert by EAN
+  // Bulk import — high-performance batch upsert by EAN
   async bulkImport(rows: any[], actor: Actor) {
-    let created = 0, updated = 0, errors: string[] = [];
-    for (const row of rows) {
-      try {
-        if (!row.ean || !row.model) { errors.push(`Row missing EAN or Name`); continue; }
-        const existing = await prisma.product.findFirst({ where: { ean: String(row.ean), isDeleted: false } });
-        if (existing) {
-          await prisma.product.update({ where: { id: existing.id }, data: { ...row, sku: row.ean, updatedBy: actor.id } });
-          updated++;
-        } else {
-          await prisma.product.create({ data: { ...row, sku: row.ean, createdBy: actor.id } });
-          created++;
+    // Only keep valid Prisma Product fields — strip frontend-only fields (_category, _orig, etc.)
+    const ALLOWED = new Set(['ean','model','brand','brandId','categoryId','vendorId',
+      'status','costPrice','sellingPrice','gstRate','hsnCode','description',
+      'imeiRequired','serialRequired','minStock']);
+
+    const sanitize = (row: any) => {
+      const clean: any = {};
+      for (const key of ALLOWED) {
+        if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
+          clean[key] = row[key];
         }
-      } catch(e: any) { errors.push(`${row.ean}: ${e.message?.slice(0,60)}`); }
+      }
+      return clean;
+    };
+
+    // Filter valid rows
+    const validRows = rows
+      .filter(r => r.ean && r.model)
+      .map(r => ({ ...sanitize(r), ean: String(r.ean).trim(), model: String(r.model).trim() }));
+
+    if (!validRows.length) return { created: 0, updated: 0, errors: ['No valid rows'], totalErrors: 1 };
+
+    const errors: string[] = [];
+    let created = 0, updated = 0;
+
+    // Step 1: Find all existing products by EAN in ONE query
+    const allEans = validRows.map(r => r.ean);
+    const existing = await prisma.product.findMany({
+      where: { ean: { in: allEans }, isDeleted: false },
+      select: { id: true, ean: true },
+    });
+    const existingMap = new Map(existing.map(p => [p.ean, p.id]));
+
+    const toCreate = validRows.filter(r => !existingMap.has(r.ean));
+    const toUpdate = validRows.filter(r =>  existingMap.has(r.ean));
+
+    // Step 2: Batch CREATE with createMany
+    if (toCreate.length > 0) {
+      try {
+        const result = await prisma.product.createMany({
+          data: toCreate.map(r => ({ ...r, sku: r.ean, createdBy: actor.id })),
+          skipDuplicates: true,
+        });
+        created = result.count;
+      } catch(e: any) {
+        errors.push('Create batch error: ' + String(e.message).slice(0, 120));
+      }
     }
+
+    // Step 3: Batch UPDATE in chunks of 200 using $transaction
+    const CHUNK = 200;
+    for (let i = 0; i < toUpdate.length; i += CHUNK) {
+      const chunk = toUpdate.slice(i, i + CHUNK);
+      try {
+        await prisma.$transaction(
+          chunk.map(row => {
+            const id = existingMap.get(row.ean)!;
+            const { ean, ...data } = row;
+            return prisma.product.update({ where: { id }, data: { ...data, updatedBy: actor.id } });
+          })
+        );
+        updated += chunk.length;
+      } catch(e: any) {
+        errors.push(`Update chunk ${i}-${i+chunk.length}: ${String(e.message).slice(0, 100)}`);
+      }
+    }
+
     return { created, updated, errors: errors.slice(0, 20), totalErrors: errors.length };
   },
 
