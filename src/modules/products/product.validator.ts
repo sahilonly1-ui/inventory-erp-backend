@@ -46,7 +46,7 @@ export const listProductsSchema = z.object({
   search:          z.string().max(120).optional(),
   brand:           arr(z.string()),
   brandId:         arr(uuid),
-  categoryId:      arr(uuid),
+  categoryId:      arr(z.union([uuid, z.literal('__blank__')])),
   vendorId:        arr(uuid),
   warehouseId:     uuid.optional(),
   imeiRequired:    booleanish.optional(),
