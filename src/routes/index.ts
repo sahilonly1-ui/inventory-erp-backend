@@ -3,6 +3,7 @@ import { prisma } from '../config/prisma';
 import authRoutes from '../modules/auth/auth.routes';
 import userRoutes from '../modules/users/user.routes';
 import productRoutes from '../modules/products/product.routes';
+import auditRoutes from '../modules/audit/audit.routes';
 import warehouseRoutes from '../modules/warehouses/warehouse.module';
 import vendorRoutes from '../modules/vendors/vendor.routes';
 import inventoryRoutes from '../modules/inventory/inventory.routes';
@@ -25,6 +26,7 @@ router.get('/health', async (_req: Request, res: Response) => {
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/products', productRoutes);
+router.use('/audit', auditRoutes);
 router.use('/warehouses', warehouseRoutes);
 router.use('/vendors', vendorRoutes);
 router.use('/inventory', inventoryRoutes);

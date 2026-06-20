@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { prisma } from '../../config/prisma';
 import { ConflictError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
@@ -73,14 +74,26 @@ export const productService = {
 
     const toDelete = await prisma.product.findMany({
       where: { id: { in: ids }, isDeleted: false },
-      select: { brand: true, categoryId: true },
+      select: { id: true, ean: true, model: true, brand: true, categoryId: true },
     });
+    if (!toDelete.length) return { deleted: 0, brandsRemoved: 0, categoriesRemoved: 0 };
+
     const brandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))] as string[];
     const categoryIds = [...new Set(toDelete.map(p => p.categoryId).filter(Boolean))] as string[];
 
     const result = await prisma.product.updateMany({
       where: { id: { in: ids }, isDeleted: false },
       data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
+    });
+
+    const batchId = randomUUID();
+    await prisma.auditLog.createMany({
+      data: toDelete.map(p => ({
+        userId: actor.id, action: 'DELETE' as const, entityName: 'products', entityId: p.id,
+        oldValue: { ean: p.ean, model: p.model, brand: p.brand, isDeleted: false },
+        newValue: { isDeleted: true, batchId, batchLabel: 'Bulk Delete' },
+        ipAddress: actor.ip,
+      })),
     });
 
     const cascade = await cascadeCleanup(brandNames, categoryIds, actor);
@@ -91,7 +104,7 @@ export const productService = {
   async deleteAllProducts(actor: Actor) {
     const active = await prisma.product.findMany({
       where: { isDeleted: false },
-      select: { brand: true, categoryId: true },
+      select: { id: true, ean: true, model: true, brand: true, categoryId: true },
     });
     if (!active.length) return { deleted: 0, brandsRemoved: 0, categoriesRemoved: 0 };
 
@@ -101,6 +114,16 @@ export const productService = {
     const result = await prisma.product.updateMany({
       where: { isDeleted: false },
       data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
+    });
+
+    const batchId = randomUUID();
+    await prisma.auditLog.createMany({
+      data: active.map(p => ({
+        userId: actor.id, action: 'DELETE' as const, entityName: 'products', entityId: p.id,
+        oldValue: { ean: p.ean, model: p.model, brand: p.brand, isDeleted: false },
+        newValue: { isDeleted: true, batchId, batchLabel: 'Delete ALL Products' },
+        ipAddress: actor.ip,
+      })),
     });
 
     const cascade = await cascadeCleanup(brandNames, categoryIds, actor);
@@ -126,6 +149,8 @@ export const productService = {
       minStock:     Number(r.minStock)     || 0,
     }));
 
+    const batchId = randomUUID(); // groups every audit entry from this single import call
+
     // ── DELETE rows: soft-delete by EAN, then cascade-clean empty brands/categories ──
     const deleteRows = normalized.filter(r => r.action === 'DELETE');
     let deletedCount = 0, brandsRemoved = 0, categoriesRemoved = 0;
@@ -133,7 +158,7 @@ export const productService = {
       const delEans = deleteRows.map(r => r.ean);
       const toDelete = await prisma.product.findMany({
         where: { ean: { in: delEans }, isDeleted: false },
-        select: { id: true, brand: true, categoryId: true },
+        select: { id: true, ean: true, model: true, brand: true, categoryId: true },
       });
       if (toDelete.length) {
         const delIds = toDelete.map(p => p.id);
@@ -147,6 +172,15 @@ export const productService = {
         const cascade = await cascadeCleanup(delBrandNames, delCategoryIds, actor);
         brandsRemoved = cascade.brandsRemoved;
         categoriesRemoved = cascade.categoriesRemoved;
+
+        await prisma.auditLog.createMany({
+          data: toDelete.map(p => ({
+            userId: actor.id, action: 'DELETE' as const, entityName: 'products', entityId: p.id,
+            oldValue: { ean: p.ean, model: p.model, brand: p.brand, isDeleted: false },
+            newValue: { isDeleted: true, batchId, batchLabel: 'Bulk Import — Delete' },
+            ipAddress: actor.ip,
+          })),
+        });
       }
     }
 
@@ -222,13 +256,15 @@ export const productService = {
       }
     }
 
-    // Step 1: find existing EANs in ONE query
+    // Step 1: find existing EANs in ONE query — capture full snapshot for audit diffs
     const allEans = validRows.map(r => r.ean);
     const existing = await prisma.product.findMany({
       where: { ean: { in: allEans } },
-      select: { ean: true },
+      select: { id: true, ean: true, model: true, brand: true, categoryId: true, status: true,
+                costPrice: true, sellingPrice: true, gstRate: true, hsnCode: true, minStock: true },
     });
     const existingSet = new Set(existing.map(p => p.ean));
+    const existingByEan = new Map(existing.map(p => [p.ean, p]));
     const toCreate = validRows.filter(r => !existingSet.has(r.ean));
     const toUpdate = validRows.filter(r =>  existingSet.has(r.ean));
 
@@ -259,6 +295,24 @@ export const productService = {
           skipDuplicates: true,
         });
         created = res.count;
+
+        // Audit each newly-created product (batched insert, fast even for thousands of rows)
+        if (created > 0) {
+          const createdEans = toCreate.map(r => r.ean);
+          const createdProducts = await prisma.product.findMany({
+            where: { ean: { in: createdEans }, isDeleted: false },
+            select: { id: true, ean: true, model: true, brand: true, categoryId: true, status: true, costPrice: true, sellingPrice: true },
+          });
+          await prisma.auditLog.createMany({
+            data: createdProducts.map(p => ({
+              userId: actor.id, action: 'CREATE' as const, entityName: 'products', entityId: p.id,
+              newValue: { ean: p.ean, model: p.model, brand: p.brand, categoryId: p.categoryId,
+                          status: p.status, costPrice: p.costPrice, sellingPrice: p.sellingPrice,
+                          batchId, batchLabel: 'Bulk Import' },
+              ipAddress: actor.ip,
+            })),
+          });
+        }
       } catch(e: any) { errors.push('Create error: ' + String(e.message).slice(0,150)); }
     }
 
@@ -310,6 +364,34 @@ export const productService = {
 
         await prisma.$executeRawUnsafe(sql, ...params);
         updated = toUpdate.length;
+
+        // Audit each updated product with a true before/after diff (batched insert)
+        const auditRows = toUpdate
+          .map(r => {
+            const before = existingByEan.get(r.ean);
+            if (!before) return null;
+            const oldValue: Record<string, any> = {};
+            const newValue: Record<string, any> = { batchId, batchLabel: 'Bulk Import' };
+            const fieldPairs: [string, any, any][] = [
+              ['model', before.model, r.model],
+              ['brand', before.brand, r.brand],
+              ['categoryId', before.categoryId, r.categoryId || null],
+              ['status', before.status, r.status],
+              ['costPrice', Number(before.costPrice), r.costPrice],
+              ['sellingPrice', Number(before.sellingPrice), r.sellingPrice],
+            ];
+            for (const [key, oldV, newV] of fieldPairs) {
+              if (String(oldV) !== String(newV)) { oldValue[key] = oldV; newValue[key] = newV; }
+            }
+            if (!Object.keys(newValue).length || (Object.keys(newValue).length === 2 && newValue.batchId)) return null; // nothing actually changed
+            return {
+              userId: actor.id, action: 'UPDATE' as const, entityName: 'products', entityId: before.id,
+              oldValue, newValue, ipAddress: actor.ip,
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        if (auditRows.length) await prisma.auditLog.createMany({ data: auditRows });
       } catch(e: any) {
         errors.push('Update error: ' + String(e.message).slice(0,200));
       }
