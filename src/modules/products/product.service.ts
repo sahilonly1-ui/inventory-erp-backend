@@ -115,8 +115,9 @@ export const productService = {
       ean:          String(r.ean   || '').trim(),
       action:       String(r.action || 'UPDATE').trim().toUpperCase(), // UPDATE | DELETE
       model:        String(r.model || '').trim(),
-      brand:        String(r.brand || ''),
-      categoryId:   r.categoryId   || null,   // from CSV category→ID mapping
+      brand:        String(r.brand || '').trim(),
+      categoryId:   r.categoryId   || null,                                  // matched on frontend, may be empty
+      categoryName: String(r.categoryName || r._category || '').trim() || null, // raw CSV text — used to auto-create if no match
       status:       VALID_STATUS.has(String(r.status||'').toUpperCase()) ? String(r.status).toUpperCase() : 'ACTIVE',
       costPrice:    Number(r.costPrice)    || 0,
       sellingPrice: Number(r.sellingPrice) || 0,
@@ -153,7 +154,72 @@ export const productService = {
     const validRows = normalized.filter(r => r.action !== 'DELETE' && r.model);
 
     if (!validRows.length) {
-      return { created: 0, updated: 0, deleted: deletedCount, brandsRemoved, categoriesRemoved, errors: deleteRows.length ? [] : ['No valid rows'], totalErrors: deleteRows.length ? 0 : 1 };
+      return { created: 0, updated: 0, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated: 0, categoriesCreated: 0, errors: deleteRows.length ? [] : ['No valid rows'], totalErrors: deleteRows.length ? 0 : 1 };
+    }
+
+    // ── Auto-create Brand master entries for any brand name not seen before ──
+    let brandsCreated = 0;
+    const brandNamesNeeded = [...new Set(validRows.map(r => r.brand).filter(Boolean))] as string[];
+    if (brandNamesNeeded.length) {
+      const existingBrands = await prisma.brand.findMany({
+        where: { name: { in: brandNamesNeeded } }, select: { name: true, isDeleted: true },
+      });
+      const existingNameSet = new Set(existingBrands.map(b => b.name));
+      const newBrandNames = brandNamesNeeded.filter(n => !existingNameSet.has(n));
+      if (newBrandNames.length) {
+        const res = await prisma.brand.createMany({
+          data: newBrandNames.map(name => ({ name, createdBy: actor.id })),
+          skipDuplicates: true,
+        });
+        brandsCreated = res.count;
+      }
+      // Revive any brand that was previously cascade-deleted (now back in use)
+      const deletedButReused = existingBrands.filter(b => b.isDeleted).map(b => b.name);
+      if (deletedButReused.length) {
+        await prisma.brand.updateMany({
+          where: { name: { in: deletedButReused } },
+          data: { isDeleted: false, deletedAt: null, deletedBy: null, updatedBy: actor.id },
+        });
+      }
+    }
+
+    // ── Auto-create Category entries for any category name not matched to an ID ──
+    let categoriesCreated = 0;
+    const catNamesNeeded = [...new Set(
+      validRows.filter(r => !r.categoryId && r.categoryName).map(r => r.categoryName as string)
+    )];
+    const catNameToId = new Map<string, string>();
+    if (catNamesNeeded.length) {
+      const existingCats = await prisma.productCategory.findMany({
+        where: { name: { in: catNamesNeeded } }, select: { id: true, name: true, isDeleted: true },
+      });
+      for (const c of existingCats) catNameToId.set(c.name, c.id);
+      const toCreateCats = catNamesNeeded.filter(n => !catNameToId.has(n));
+      if (toCreateCats.length) {
+        await prisma.productCategory.createMany({
+          data: toCreateCats.map(name => ({ name, createdBy: actor.id })),
+          skipDuplicates: true,
+        });
+        categoriesCreated = toCreateCats.length;
+        const justCreated = await prisma.productCategory.findMany({
+          where: { name: { in: toCreateCats } }, select: { id: true, name: true },
+        });
+        for (const c of justCreated) catNameToId.set(c.name, c.id);
+      }
+      // Revive any category that was previously cascade-deleted (now back in use)
+      const deletedCatNames = existingCats.filter(c => c.isDeleted).map(c => c.name);
+      if (deletedCatNames.length) {
+        await prisma.productCategory.updateMany({
+          where: { name: { in: deletedCatNames } },
+          data: { isDeleted: false, deletedAt: null, deletedBy: null, updatedBy: actor.id },
+        });
+      }
+    }
+    // Backfill resolved categoryId onto rows that didn't have one
+    for (const r of validRows) {
+      if (!r.categoryId && r.categoryName && catNameToId.has(r.categoryName)) {
+        (r as any).categoryId = catNameToId.get(r.categoryName);
+      }
     }
 
     // Step 1: find existing EANs in ONE query
@@ -249,7 +315,7 @@ export const productService = {
       }
     }
 
-    return { created, updated, deleted: deletedCount, brandsRemoved, categoriesRemoved, errors: errors.slice(0,20), totalErrors: errors.length };
+    return { created, updated, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated, categoriesCreated, errors: errors.slice(0,20), totalErrors: errors.length };
   },
 
   async list(input: {
