@@ -75,7 +75,7 @@ export const productService = {
       where: { id: { in: ids }, isDeleted: false },
       select: { brand: true, categoryId: true },
     });
-    const brandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))];
+    const brandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))] as string[];
     const categoryIds = [...new Set(toDelete.map(p => p.categoryId).filter(Boolean))] as string[];
 
     const result = await prisma.product.updateMany({
@@ -95,7 +95,7 @@ export const productService = {
     });
     if (!active.length) return { deleted: 0, brandsRemoved: 0, categoriesRemoved: 0 };
 
-    const brandNames  = [...new Set(active.map(p => p.brand).filter(Boolean))];
+    const brandNames  = [...new Set(active.map(p => p.brand).filter(Boolean))] as string[];
     const categoryIds = [...new Set(active.map(p => p.categoryId).filter(Boolean))] as string[];
 
     const result = await prisma.product.updateMany({
@@ -136,7 +136,7 @@ export const productService = {
       });
       if (toDelete.length) {
         const delIds = toDelete.map(p => p.id);
-        const delBrandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))];
+        const delBrandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))] as string[];
         const delCategoryIds = [...new Set(toDelete.map(p => p.categoryId).filter(Boolean))] as string[];
         await prisma.product.updateMany({
           where: { id: { in: delIds } },
