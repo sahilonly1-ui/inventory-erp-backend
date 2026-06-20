@@ -298,10 +298,26 @@ export const productService = {
           });
         }
       }
+      // Capture the BEFORE value for every field actually being changed —
+      // not just a hardcoded subset — so history can show a true diff.
+      const changedKeys = Object.keys(productData);
+      const oldValue: Record<string, any> = {};
+      for (const k of changedKeys) oldValue[k] = (existing as any)[k];
+
+      // Resolve category name for both old and new categoryId so the
+      // frontend can render a readable label without a second lookup.
+      if (changedKeys.includes('categoryId')) {
+        const [oldCat, newCat] = await Promise.all([
+          oldValue.categoryId ? tx.productCategory.findUnique({ where: { id: oldValue.categoryId }, select: { name: true } }) : null,
+          productData.categoryId ? tx.productCategory.findUnique({ where: { id: productData.categoryId }, select: { name: true } }) : null,
+        ]);
+        oldValue.categoryName = oldCat?.name ?? null;
+        (productData as any).categoryName = newCat?.name ?? null;
+      }
+
       await writeAudit(tx, {
         userId: actor.id, action: 'UPDATE', entityName: 'products', entityId: id,
-        oldValue: { brand: existing.brand, costPrice: existing.costPrice, sellingPrice: existing.sellingPrice },
-        newValue: productData, ipAddress: actor.ip,
+        oldValue, newValue: productData, ipAddress: actor.ip,
       });
       return product;
     });
