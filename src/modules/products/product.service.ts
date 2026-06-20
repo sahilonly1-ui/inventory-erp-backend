@@ -151,6 +151,12 @@ export const productService = {
 
     const batchId = randomUUID(); // groups every audit entry from this single import call
 
+    // Self-heal: merge any pre-existing duplicate-named categories before matching/creating
+    // new ones. This is what actually fixes "category created multiple times" — without
+    // this, a stale frontend categories list (or repeated retries) can keep matching nothing
+    // and creating fresh rows for a name that already exists.
+    await this.deduplicateCategories();
+
     // ── DELETE rows: soft-delete by EAN, then cascade-clean empty brands/categories ──
     const deleteRows = normalized.filter(r => r.action === 'DELETE');
     let deletedCount = 0, brandsRemoved = 0, categoriesRemoved = 0;
@@ -218,41 +224,58 @@ export const productService = {
     }
 
     // ── Auto-create Category entries for any category name not matched to an ID ──
+    // Matching is case-insensitive + trimmed so "NeckBands" / "Neckbands " / " neckbands"
+    // all resolve to ONE category instead of spawning near-duplicates.
     let categoriesCreated = 0;
     const catNamesNeeded = [...new Set(
-      validRows.filter(r => !r.categoryId && r.categoryName).map(r => r.categoryName as string)
-    )];
+      validRows.filter(r => !r.categoryId && r.categoryName).map(r => (r.categoryName as string).trim())
+    )].filter(Boolean);
     const catNameToId = new Map<string, string>();
     if (catNamesNeeded.length) {
-      const existingCats = await prisma.productCategory.findMany({
-        where: { name: { in: catNamesNeeded } }, select: { id: true, name: true, isDeleted: true },
-      });
-      for (const c of existingCats) catNameToId.set(c.name, c.id);
-      const toCreateCats = catNamesNeeded.filter(n => !catNameToId.has(n));
-      if (toCreateCats.length) {
+      // Fetch ALL categories once (active + soft-deleted) — counts are small, exact-IN with
+      // case folding isn't reliably supported across DB collations, so match in JS instead.
+      const allCats = await prisma.productCategory.findMany({ select: { id: true, name: true, isDeleted: true } });
+      const byLowerName = new Map<string, { id: string; name: string; isDeleted: boolean }>();
+      for (const c of allCats) {
+        const key = c.name.trim().toLowerCase();
+        if (!byLowerName.has(key)) byLowerName.set(key, c); // first wins if somehow still duplicated
+      }
+
+      const toCreateNames: string[] = [];
+      const toRevive: string[] = [];
+      for (const name of catNamesNeeded) {
+        const match = byLowerName.get(name.toLowerCase());
+        if (match) {
+          catNameToId.set(name, match.id);
+          if (match.isDeleted) toRevive.push(match.id);
+        } else {
+          toCreateNames.push(name);
+        }
+      }
+
+      if (toCreateNames.length) {
         await prisma.productCategory.createMany({
-          data: toCreateCats.map(name => ({ name, createdBy: actor.id })),
+          data: toCreateNames.map(name => ({ name, createdBy: actor.id })),
           skipDuplicates: true,
         });
-        categoriesCreated = toCreateCats.length;
+        categoriesCreated = toCreateNames.length;
         const justCreated = await prisma.productCategory.findMany({
-          where: { name: { in: toCreateCats } }, select: { id: true, name: true },
+          where: { name: { in: toCreateNames } }, select: { id: true, name: true },
         });
         for (const c of justCreated) catNameToId.set(c.name, c.id);
       }
-      // Revive any category that was previously cascade-deleted (now back in use)
-      const deletedCatNames = existingCats.filter(c => c.isDeleted).map(c => c.name);
-      if (deletedCatNames.length) {
+      if (toRevive.length) {
         await prisma.productCategory.updateMany({
-          where: { name: { in: deletedCatNames } },
+          where: { id: { in: toRevive } },
           data: { isDeleted: false, deletedAt: null, deletedBy: null, updatedBy: actor.id },
         });
       }
     }
-    // Backfill resolved categoryId onto rows that didn't have one
+    // Backfill resolved categoryId onto rows that didn't have one (match trimmed, same as lookup build)
     for (const r of validRows) {
-      if (!r.categoryId && r.categoryName && catNameToId.has(r.categoryName)) {
-        (r as any).categoryId = catNameToId.get(r.categoryName);
+      const trimmedName = r.categoryName ? (r.categoryName as string).trim() : '';
+      if (!r.categoryId && trimmedName && catNameToId.has(trimmedName)) {
+        (r as any).categoryId = catNameToId.get(trimmedName);
       }
     }
 
@@ -316,84 +339,90 @@ export const productService = {
       } catch(e: any) { errors.push('Create error: ' + String(e.message).slice(0,150)); }
     }
 
-    // Step 3: ONE raw SQL UPDATE for all existing products — every CSV column included
+    // Step 3: raw SQL UPDATE for all existing products, CHUNKED to stay under
+    // PostgreSQL's 32,767 bind-parameter limit (10 params/row → max ~3000 rows/stmt;
+    // we use 1500 for a safe margin).
     if (toUpdate.length > 0) {
-      try {
-        const params: any[] = [];
-        const valuesClauses: string[] = [];
+      const UPDATE_CHUNK = 1500;
+      for (let ci = 0; ci < toUpdate.length; ci += UPDATE_CHUNK) {
+        const chunk = toUpdate.slice(ci, ci + UPDATE_CHUNK);
+        try {
+          const params: any[] = [];
+          const valuesClauses: string[] = [];
 
-        toUpdate.forEach(r => {
-          const base = params.length;
-          params.push(
-            r.ean,                 // $1  ean (join key)
-            r.model,                // $2  model
-            r.brand,                 // $3  brand
-            r.categoryId || null,    // $4  categoryId
-            r.status,                // $5  status
-            r.costPrice,              // $6  costPrice
-            r.sellingPrice,            // $7  sellingPrice
-            r.gstRate,                  // $8  gstRate
-            r.hsnCode,                   // $9  hsnCode
-            r.minStock,                   // $10 minStock
-          );
-          valuesClauses.push(
-            `($${base+1},$${base+2},$${base+3},$${base+4}::text,$${base+5}::text,$${base+6}::numeric,$${base+7}::numeric,$${base+8}::numeric,$${base+9},$${base+10}::int)`
-          );
-        });
-        params.push(actor.id); // last param = updatedBy
+          chunk.forEach(r => {
+            const base = params.length;
+            params.push(
+              r.ean,                 // ean (join key)
+              r.model,                // model
+              r.brand,                 // brand
+              r.categoryId || null,    // categoryId
+              r.status,                // status
+              r.costPrice,              // costPrice
+              r.sellingPrice,            // sellingPrice
+              r.gstRate,                  // gstRate
+              r.hsnCode,                   // hsnCode
+              r.minStock,                   // minStock
+            );
+            valuesClauses.push(
+              `($${base+1},$${base+2},$${base+3},$${base+4}::text,$${base+5}::text,$${base+6}::numeric,$${base+7}::numeric,$${base+8}::numeric,$${base+9},$${base+10}::int)`
+            );
+          });
+          params.push(actor.id); // last param = updatedBy
 
-        const updatedByParam = `$${params.length}`;
-        const sql = `
-          UPDATE products SET
-            "model"        = v.model,
-            "brand"        = v.brand,
-            "categoryId"   = v.cat_id,
-            "status"       = v.st::"ProductStatus",
-            "costPrice"    = v.cp,
-            "sellingPrice" = v.sp,
-            "gstRate"      = v.gst,
-            "hsnCode"      = v.hsn,
-            "minStock"     = v.ms,
-            "isDeleted"    = false,
-            "updatedAt"    = NOW(),
-            "updatedBy"    = ${updatedByParam}
-          FROM (VALUES ${valuesClauses.join(',')})
-            AS v(ean, model, brand, cat_id, st, cp, sp, gst, hsn, ms)
-          WHERE products.ean = v.ean
-        `;
+          const updatedByParam = `$${params.length}`;
+          const sql = `
+            UPDATE products SET
+              "model"        = v.model,
+              "brand"        = v.brand,
+              "categoryId"   = v.cat_id,
+              "status"       = v.st::"ProductStatus",
+              "costPrice"    = v.cp,
+              "sellingPrice" = v.sp,
+              "gstRate"      = v.gst,
+              "hsnCode"      = v.hsn,
+              "minStock"     = v.ms,
+              "isDeleted"    = false,
+              "updatedAt"    = NOW(),
+              "updatedBy"    = ${updatedByParam}
+            FROM (VALUES ${valuesClauses.join(',')})
+              AS v(ean, model, brand, cat_id, st, cp, sp, gst, hsn, ms)
+            WHERE products.ean = v.ean
+          `;
 
-        await prisma.$executeRawUnsafe(sql, ...params);
-        updated = toUpdate.length;
+          await prisma.$executeRawUnsafe(sql, ...params);
+          updated += chunk.length;
 
-        // Audit each updated product with a true before/after diff (batched insert)
-        const auditRows = toUpdate
-          .map(r => {
-            const before = existingByEan.get(r.ean);
-            if (!before) return null;
-            const oldValue: Record<string, any> = {};
-            const newValue: Record<string, any> = { batchId, batchLabel: 'Bulk Import' };
-            const fieldPairs: [string, any, any][] = [
-              ['model', before.model, r.model],
-              ['brand', before.brand, r.brand],
-              ['categoryId', before.categoryId, r.categoryId || null],
-              ['status', before.status, r.status],
-              ['costPrice', Number(before.costPrice), r.costPrice],
-              ['sellingPrice', Number(before.sellingPrice), r.sellingPrice],
-            ];
-            for (const [key, oldV, newV] of fieldPairs) {
-              if (String(oldV) !== String(newV)) { oldValue[key] = oldV; newValue[key] = newV; }
-            }
-            if (!Object.keys(newValue).length || (Object.keys(newValue).length === 2 && newValue.batchId)) return null; // nothing actually changed
-            return {
-              userId: actor.id, action: 'UPDATE' as const, entityName: 'products', entityId: before.id,
-              oldValue, newValue, ipAddress: actor.ip,
-            };
-          })
-          .filter((x): x is NonNullable<typeof x> => x !== null);
+          // Audit each updated product with a true before/after diff (batched insert)
+          const auditRows = chunk
+            .map(r => {
+              const before = existingByEan.get(r.ean);
+              if (!before) return null;
+              const oldValue: Record<string, any> = {};
+              const newValue: Record<string, any> = { batchId, batchLabel: 'Bulk Import' };
+              const fieldPairs: [string, any, any][] = [
+                ['model', before.model, r.model],
+                ['brand', before.brand, r.brand],
+                ['categoryId', before.categoryId, r.categoryId || null],
+                ['status', before.status, r.status],
+                ['costPrice', Number(before.costPrice), r.costPrice],
+                ['sellingPrice', Number(before.sellingPrice), r.sellingPrice],
+              ];
+              for (const [key, oldV, newV] of fieldPairs) {
+                if (String(oldV) !== String(newV)) { oldValue[key] = oldV; newValue[key] = newV; }
+              }
+              if (!Object.keys(newValue).length || (Object.keys(newValue).length === 2 && newValue.batchId)) return null;
+              return {
+                userId: actor.id, action: 'UPDATE' as const, entityName: 'products', entityId: before.id,
+                oldValue, newValue, ipAddress: actor.ip,
+              };
+            })
+            .filter((x): x is NonNullable<typeof x> => x !== null);
 
-        if (auditRows.length) await prisma.auditLog.createMany({ data: auditRows });
-      } catch(e: any) {
-        errors.push('Update error: ' + String(e.message).slice(0,200));
+          if (auditRows.length) await prisma.auditLog.createMany({ data: auditRows });
+        } catch(e: any) {
+          errors.push(`Update chunk ${ci}-${ci+chunk.length} error: ` + String(e.message).slice(0,180));
+        }
       }
     }
 
@@ -492,6 +521,9 @@ export const productService = {
       });
       await writeAudit(tx, { userId: actor.id, action: 'DELETE', entityName: 'products', entityId: id, ipAddress: actor.ip });
     });
+    // Same cascade rule as bulk delete: if this was the LAST active product
+    // using this brand/category, remove the now-empty brand/category too.
+    await cascadeCleanup(existing.brand ? [existing.brand] : [], existing.categoryId ? [existing.categoryId] : [], actor);
   },
 
   async restore(id: string, actor: Actor) {
