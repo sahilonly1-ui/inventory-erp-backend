@@ -134,7 +134,7 @@ export const productService = {
   async bulkImport(rows: any[], actor: Actor) {
     const VALID_STATUS = new Set(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']);
 
-    const normalized = rows.filter(r => r.ean).map(r => ({
+    const normalizedAll = rows.filter(r => r.ean).map(r => ({
       ean:          String(r.ean   || '').trim(),
       action:       String(r.action || 'UPDATE').trim().toUpperCase(), // UPDATE | DELETE
       model:        String(r.model || '').trim(),
@@ -149,6 +149,18 @@ export const productService = {
       minStock:     Number(r.minStock)     || 0,
     }));
 
+    // De-duplicate WITHIN the uploaded file itself: EAN is the single source of truth for
+    // identity, so if the same EAN appears more than once in this CSV, keep only the LAST
+    // occurrence (the most likely "final" value if someone edited a row further down) and
+    // drop the earlier ones. Prevents one file from ever producing duplicate EANs.
+    const dedupMap = new Map<string, typeof normalizedAll[number]>();
+    let inFileDuplicates = 0;
+    for (const r of normalizedAll) {
+      if (dedupMap.has(r.ean)) inFileDuplicates++;
+      dedupMap.set(r.ean, r); // later occurrence overwrites earlier one
+    }
+    const normalized = [...dedupMap.values()];
+
     const batchId = randomUUID(); // groups every audit entry from this single import call
 
     // Self-heal: merge any pre-existing duplicate-named categories before matching/creating
@@ -156,6 +168,12 @@ export const productService = {
     // this, a stale frontend categories list (or repeated retries) can keep matching nothing
     // and creating fresh rows for a name that already exists.
     await this.deduplicateCategories();
+
+    // Self-heal: merge any leftover duplicate PRODUCT rows sharing an EAN (e.g. soft-deleted
+    // "ghosts" left over from earlier bugs). Without this, the update step below can match
+    // and revive ALL rows sharing an EAN — including dead ones — which looks like the import
+    // "duplicated products".
+    await this.deduplicateProductsByEan(actor);
 
     // ── DELETE rows: soft-delete by EAN, then cascade-clean empty brands/categories ──
     const deleteRows = normalized.filter(r => r.action === 'DELETE');
@@ -194,7 +212,7 @@ export const productService = {
     const validRows = normalized.filter(r => r.action !== 'DELETE' && r.model);
 
     if (!validRows.length) {
-      return { created: 0, updated: 0, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated: 0, categoriesCreated: 0, errors: deleteRows.length ? [] : ['No valid rows'], totalErrors: deleteRows.length ? 0 : 1 };
+      return { created: 0, updated: 0, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated: 0, categoriesCreated: 0, inFileDuplicates, errors: deleteRows.length ? [] : ['No valid rows'], totalErrors: deleteRows.length ? 0 : 1 };
     }
 
     // ── Auto-create Brand master entries for any brand name not seen before ──
@@ -279,10 +297,13 @@ export const productService = {
       }
     }
 
-    // Step 1: find existing EANs in ONE query — capture full snapshot for audit diffs
+    // Step 1: find existing EANs in ONE query — capture full snapshot for audit diffs.
+    // CRITICAL: isDeleted:false here — without it, soft-deleted ghost rows count as
+    // "existing", which both skips creating a fresh active row AND lets the later
+    // raw-SQL update revive the dead row instead (the actual cause of "duplicated products").
     const allEans = validRows.map(r => r.ean);
     const existing = await prisma.product.findMany({
-      where: { ean: { in: allEans } },
+      where: { ean: { in: allEans }, isDeleted: false },
       select: { id: true, ean: true, model: true, brand: true, categoryId: true, status: true,
                 costPrice: true, sellingPrice: true, gstRate: true, hsnCode: true, minStock: true },
     });
@@ -387,7 +408,7 @@ export const productService = {
               "updatedBy"    = ${updatedByParam}
             FROM (VALUES ${valuesClauses.join(',')})
               AS v(ean, model, brand, cat_id, st, cp, sp, gst, hsn, ms)
-            WHERE products.ean = v.ean
+            WHERE products.ean = v.ean AND products."isDeleted" = false
           `;
 
           await prisma.$executeRawUnsafe(sql, ...params);
@@ -426,7 +447,7 @@ export const productService = {
       }
     }
 
-    return { created, updated, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated, categoriesCreated, errors: errors.slice(0,20), totalErrors: errors.length };
+    return { created, updated, deleted: deletedCount, brandsRemoved, categoriesRemoved, brandsCreated, categoriesCreated, inFileDuplicates, errors: errors.slice(0,20), totalErrors: errors.length };
   },
 
   async list(input: {
@@ -657,6 +678,38 @@ export const productService = {
       include: { children: { where: { isDeleted: false }, orderBy: { name: 'asc' } } },
       orderBy: { name: 'asc' },
     });
+  },
+
+  // Deduplicate PRODUCTS by EAN — merges leftover duplicate rows (e.g. from
+  // earlier bugs where the same EAN ended up as 2+ rows, including soft-deleted
+  // "ghosts"). Keeps the most-recently-updated ACTIVE row per EAN; soft-deletes
+  // the rest. Safe to run repeatedly — it's a no-op once data is clean.
+  async deduplicateProductsByEan(actor: Actor) {
+    const all = await prisma.product.findMany({
+      select: { id: true, ean: true, isDeleted: true, updatedAt: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const byEan = new Map<string, typeof all>();
+    for (const p of all) {
+      const key = p.ean.trim();
+      if (!key) continue;
+      if (!byEan.has(key)) byEan.set(key, []);
+      byEan.get(key)!.push(p);
+    }
+    const toDeleteIds: string[] = [];
+    for (const group of byEan.values()) {
+      if (group.length <= 1) continue;
+      const active = group.filter(g => !g.isDeleted);
+      const keep = (active.length ? active : group)[0]; // list is already sorted by updatedAt desc
+      for (const g of group) if (g.id !== keep.id) toDeleteIds.push(g.id);
+    }
+    if (toDeleteIds.length) {
+      await prisma.product.updateMany({
+        where: { id: { in: toDeleteIds } },
+        data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+      });
+    }
+    return { merged: toDeleteIds.length };
   },
 
   // Deduplicate categories — merges duplicates (same name) into one
