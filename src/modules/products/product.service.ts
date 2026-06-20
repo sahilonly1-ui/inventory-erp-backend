@@ -95,21 +95,28 @@ export const productService = {
       } catch(e: any) { errors.push('Create error: ' + String(e.message).slice(0,150)); }
     }
 
-    // Step 3: ONE raw SQL UPDATE for all existing products
+    // Step 3: ONE raw SQL UPDATE for all existing products — every CSV column included
     if (toUpdate.length > 0) {
       try {
-        // Build parameterized VALUES: ($1,$2,$3,$4::decimal,$5::decimal,$6::decimal,$7,$8::int)
         const params: any[] = [];
         const valuesClauses: string[] = [];
-        const FIELDS = 8; // ean,model,brand,costPrice,sellingPrice,gstRate,hsnCode,minStock
 
         toUpdate.forEach(r => {
           const base = params.length;
-          params.push(r.ean, r.model, r.brand,
-            r.costPrice, r.sellingPrice, r.gstRate,
-            r.hsnCode, r.minStock);
+          params.push(
+            r.ean,                 // $1  ean (join key)
+            r.model,                // $2  model
+            r.brand,                 // $3  brand
+            r.categoryId || null,    // $4  categoryId
+            r.status,                // $5  status
+            r.costPrice,              // $6  costPrice
+            r.sellingPrice,            // $7  sellingPrice
+            r.gstRate,                  // $8  gstRate
+            r.hsnCode,                   // $9  hsnCode
+            r.minStock,                   // $10 minStock
+          );
           valuesClauses.push(
-            `($${base+1},$${base+2},$${base+3},$${base+4}::decimal,$${base+5}::decimal,$${base+6}::decimal,$${base+7},$${base+8}::int)`
+            `($${base+1},$${base+2},$${base+3},$${base+4}::text,$${base+5}::text,$${base+6}::numeric,$${base+7}::numeric,$${base+8}::numeric,$${base+9},$${base+10}::int)`
           );
         });
         params.push(actor.id); // last param = updatedBy
@@ -120,6 +127,7 @@ export const productService = {
             "model"        = v.model,
             "brand"        = v.brand,
             "categoryId"   = v.cat_id,
+            "status"       = v.st::"ProductStatus",
             "costPrice"    = v.cp,
             "sellingPrice" = v.sp,
             "gstRate"      = v.gst,
@@ -129,14 +137,14 @@ export const productService = {
             "updatedAt"    = NOW(),
             "updatedBy"    = ${updatedByParam}
           FROM (VALUES ${valuesClauses.join(',')})
-            AS v(ean, model, brand, cat_id, cp, sp, gst, hsn, ms)
+            AS v(ean, model, brand, cat_id, st, cp, sp, gst, hsn, ms)
           WHERE products.ean = v.ean
         `;
 
         await prisma.$executeRawUnsafe(sql, ...params);
         updated = toUpdate.length;
       } catch(e: any) {
-        errors.push('Update error: ' + String(e.message).slice(0,150));
+        errors.push('Update error: ' + String(e.message).slice(0,200));
       }
     }
 
