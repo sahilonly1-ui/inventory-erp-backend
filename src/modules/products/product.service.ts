@@ -6,6 +6,47 @@ import { productRepository } from './product.repository';
 
 interface Actor { id: string; ip: string | null; }
 
+// Soft-delete brands/categories that no longer have ANY active product referencing them.
+// Categories are cleaned up in passes so a parent becomes eligible once its
+// now-empty children are removed first.
+async function cascadeCleanup(brandNames: string[], categoryIds: string[], actor: Actor) {
+  let brandsRemoved = 0, categoriesRemoved = 0;
+
+  for (const brandName of brandNames) {
+    if (!brandName) continue;
+    const remaining = await prisma.product.count({ where: { brand: brandName, isDeleted: false } });
+    if (remaining === 0) {
+      const r = await prisma.brand.updateMany({
+        where: { name: brandName, isDeleted: false },
+        data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+      });
+      brandsRemoved += r.count;
+    }
+  }
+
+  let pending = new Set(categoryIds.filter(Boolean));
+  for (let pass = 0; pass < 6 && pending.size > 0; pass++) {
+    const removable: string[] = [];
+    for (const catId of pending) {
+      const remainingProducts = await prisma.product.count({ where: { categoryId: catId, isDeleted: false } });
+      const childCount = await prisma.productCategory.count({ where: { parentId: catId, isDeleted: false } });
+      if (remainingProducts === 0 && childCount === 0) removable.push(catId);
+    }
+    if (!removable.length) break;
+    await prisma.productCategory.updateMany({
+      where: { id: { in: removable } },
+      data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+    });
+    categoriesRemoved += removable.length;
+    const parents = await prisma.productCategory.findMany({
+      where: { id: { in: removable } }, select: { parentId: true },
+    });
+    pending = new Set(parents.map(p => p.parentId).filter(Boolean) as string[]);
+  }
+
+  return { brandsRemoved, categoriesRemoved };
+}
+
 export const productService = {
   // ── PRODUCTS ─────────────────────────────────────────────────────────────
   async create(input: any, actor: Actor) {
@@ -26,22 +67,53 @@ export const productService = {
     });
   },
 
-  // Bulk delete — soft-delete by ID list
+  // Bulk delete — soft-delete by ID list, then cascade-clean empty brands/categories
   async bulkDelete(ids: string[], actor: Actor) {
-    if (!ids?.length) return { deleted: 0 };
+    if (!ids?.length) return { deleted: 0, brandsRemoved: 0, categoriesRemoved: 0 };
+
+    const toDelete = await prisma.product.findMany({
+      where: { id: { in: ids }, isDeleted: false },
+      select: { brand: true, categoryId: true },
+    });
+    const brandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))];
+    const categoryIds = [...new Set(toDelete.map(p => p.categoryId).filter(Boolean))] as string[];
+
     const result = await prisma.product.updateMany({
       where: { id: { in: ids }, isDeleted: false },
       data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
     });
-    return { deleted: result.count };
+
+    const cascade = await cascadeCleanup(brandNames, categoryIds, actor);
+    return { deleted: result.count, ...cascade };
   },
 
-    // Bulk import — 2 queries total: createMany for new + one raw SQL UPDATE for existing
+  // Delete ALL active products at once — cascades to empty brands/categories too
+  async deleteAllProducts(actor: Actor) {
+    const active = await prisma.product.findMany({
+      where: { isDeleted: false },
+      select: { brand: true, categoryId: true },
+    });
+    if (!active.length) return { deleted: 0, brandsRemoved: 0, categoriesRemoved: 0 };
+
+    const brandNames  = [...new Set(active.map(p => p.brand).filter(Boolean))];
+    const categoryIds = [...new Set(active.map(p => p.categoryId).filter(Boolean))] as string[];
+
+    const result = await prisma.product.updateMany({
+      where: { isDeleted: false },
+      data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
+    });
+
+    const cascade = await cascadeCleanup(brandNames, categoryIds, actor);
+    return { deleted: result.count, ...cascade };
+  },
+
+    // Bulk import — supports Action column: UPDATE (default, upsert) or DELETE
   async bulkImport(rows: any[], actor: Actor) {
     const VALID_STATUS = new Set(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']);
 
-    const validRows = rows.filter(r => r.ean && r.model).map(r => ({
+    const normalized = rows.filter(r => r.ean).map(r => ({
       ean:          String(r.ean   || '').trim(),
+      action:       String(r.action || 'UPDATE').trim().toUpperCase(), // UPDATE | DELETE
       model:        String(r.model || '').trim(),
       brand:        String(r.brand || ''),
       categoryId:   r.categoryId   || null,   // from CSV category→ID mapping
@@ -53,7 +125,36 @@ export const productService = {
       minStock:     Number(r.minStock)     || 0,
     }));
 
-    if (!validRows.length) return { created: 0, updated: 0, errors: ['No valid rows'], totalErrors: 1 };
+    // ── DELETE rows: soft-delete by EAN, then cascade-clean empty brands/categories ──
+    const deleteRows = normalized.filter(r => r.action === 'DELETE');
+    let deletedCount = 0, brandsRemoved = 0, categoriesRemoved = 0;
+    if (deleteRows.length) {
+      const delEans = deleteRows.map(r => r.ean);
+      const toDelete = await prisma.product.findMany({
+        where: { ean: { in: delEans }, isDeleted: false },
+        select: { id: true, brand: true, categoryId: true },
+      });
+      if (toDelete.length) {
+        const delIds = toDelete.map(p => p.id);
+        const delBrandNames  = [...new Set(toDelete.map(p => p.brand).filter(Boolean))];
+        const delCategoryIds = [...new Set(toDelete.map(p => p.categoryId).filter(Boolean))] as string[];
+        await prisma.product.updateMany({
+          where: { id: { in: delIds } },
+          data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id, updatedBy: actor.id },
+        });
+        deletedCount = delIds.length;
+        const cascade = await cascadeCleanup(delBrandNames, delCategoryIds, actor);
+        brandsRemoved = cascade.brandsRemoved;
+        categoriesRemoved = cascade.categoriesRemoved;
+      }
+    }
+
+    // ── UPDATE rows (default action): upsert by EAN — requires model too ──
+    const validRows = normalized.filter(r => r.action !== 'DELETE' && r.model);
+
+    if (!validRows.length) {
+      return { created: 0, updated: 0, deleted: deletedCount, brandsRemoved, categoriesRemoved, errors: deleteRows.length ? [] : ['No valid rows'], totalErrors: deleteRows.length ? 0 : 1 };
+    }
 
     // Step 1: find existing EANs in ONE query
     const allEans = validRows.map(r => r.ean);
@@ -148,7 +249,7 @@ export const productService = {
       }
     }
 
-    return { created, updated, errors: errors.slice(0,20), totalErrors: errors.length };
+    return { created, updated, deleted: deletedCount, brandsRemoved, categoriesRemoved, errors: errors.slice(0,20), totalErrors: errors.length };
   },
 
   async list(input: {

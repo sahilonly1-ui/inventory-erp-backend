@@ -69,6 +69,11 @@ router.delete('/bulk-delete', authorize(PERMISSIONS.PRODUCTS_DELETE), asyncHandl
   ok(res, result);
 }));
 
+router.delete('/delete-all', authorize(PERMISSIONS.PRODUCTS_DELETE), asyncHandler(async (req, res) => {
+  const result = await productService.deleteAllProducts(actor(req));
+  ok(res, result);
+}));
+
 router.delete('/:id',              authorize(PERMISSIONS.PRODUCTS_DELETE), validate(idParamSchema, 'params'),  asyncHandler(async (req, res) => { await productService.remove(req.params.id, actor(req)); ok(res, { message: 'Deleted' }); }));
 router.post(  '/:id/restore',      authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(idParamSchema, 'params'),  asyncHandler(async (req, res) => ok(res, await productService.restore(req.params.id, actor(req)))));
 router.post(  '/:id/attributes',   authorize(PERMISSIONS.PRODUCTS_UPDATE), validate(idParamSchema, 'params'), validate(setAttributesSchema), asyncHandler(async (req, res) => ok(res, await productService.setAttributes(req.params.id, req.body.attributes, actor(req)))));
