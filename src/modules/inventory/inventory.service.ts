@@ -39,6 +39,16 @@ export async function applyLedgerMovementTx(
 ): Promise<MovementResult> {
   const newQuantity = await repo.lockAndApplyDelta(tx, params.productId, params.warehouseId, params.signedQty);
   const txn = await repo.recordTransaction(tx, { ...params, createdBy: actor.id });
+
+  // Auto-activate: if stock just came IN and the product was sitting INACTIVE,
+  // bring it back to ACTIVE automatically — no point keeping a stocked item hidden.
+  if (INBOUND.has(params.type) && newQuantity > 0) {
+    await tx.product.updateMany({
+      where: { id: params.productId, status: 'INACTIVE' },
+      data: { status: 'ACTIVE', updatedBy: actor.id, updatedAt: new Date() },
+    });
+  }
+
   await writeAudit(tx, {
     userId: actor.id,
     action: 'CREATE',
