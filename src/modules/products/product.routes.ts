@@ -33,6 +33,11 @@ router.delete('/brands/:id',  authorize(PERMISSIONS.PRODUCTS_DELETE),  asyncHand
 
 // ── CATEGORIES (must be before /:id) ──────────────────────────────────────
 router.get(   '/categories',       authorize(PERMISSIONS.PRODUCTS_READ),    asyncHandler(async (_r, res) => ok(res, await productService.listCategories())));
+router.post('/categories/bulk-import', authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (req, res) => {
+  const { rows } = req.body;
+  if(!Array.isArray(rows)) throw new Error('rows must be an array');
+  ok(res, await productService.bulkImportCategories(rows, actor(req)));
+}));
 router.post(  '/categories',       authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(createCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.createCategory(req.body, actor(req)), 201)));
 router.patch( '/categories/:id',   authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(updateCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.updateCategory(req.params.id, req.body, actor(req)))));
 router.post('/categories/dedup', authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (_r, res) => ok(res, await productService.deduplicateCategories())));

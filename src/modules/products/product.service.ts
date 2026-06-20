@@ -684,6 +684,45 @@ export const productService = {
     return prisma.productCategory.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
   },
 
+  // CSV bulk import for categories — same ADD/UPDATE/DELETE Action convention as brands.
+  // Matching is case-insensitive + trimmed to avoid spawning near-duplicates.
+  async bulkImportCategories(rows: { name: string; action?: string }[], actor: Actor) {
+    let created = 0, updated = 0, deleted = 0;
+    const errors: string[] = [];
+
+    for (const row of rows) {
+      const name = (row.name || '').trim();
+      if (!name) { errors.push('Empty name skipped'); continue; }
+      const action = (row.action || 'ADD').toUpperCase().trim();
+      try {
+        const existing = await prisma.productCategory.findFirst({
+          where: { name: { equals: name, mode: 'insensitive' }, isDeleted: false },
+        });
+        if (action === 'DELETE') {
+          if (existing) {
+            await prisma.productCategory.update({
+              where: { id: existing.id },
+              data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            });
+            deleted++;
+          }
+        } else if (action === 'UPDATE' || existing) {
+          if (existing) {
+            await prisma.productCategory.update({ where: { id: existing.id }, data: { name, updatedBy: actor.id } });
+            updated++;
+          } else {
+            await prisma.productCategory.create({ data: { name, createdBy: actor.id } });
+            created++;
+          }
+        } else {
+          await prisma.productCategory.create({ data: { name, createdBy: actor.id } });
+          created++;
+        }
+      } catch (e: any) { errors.push(`${name}: ${e.message?.slice(0, 50)}`); }
+    }
+    return { created, updated, deleted, errors: errors.slice(0, 20), totalErrors: errors.length };
+  },
+
   async deleteCategory(id: string, actor: Actor) {
     return prisma.productCategory.update({
       where: { id }, data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
