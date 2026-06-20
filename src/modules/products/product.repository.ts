@@ -101,13 +101,23 @@ export const productRepository = {
     const sf = params.sortBy || 'createdAt';
     const sd = params.sortDir || 'desc';
     // 'stock' cannot be sorted via Prisma relation — fall back to updatedAt
-    const orderBy: Prisma.ProductOrderByWithRelationInput =
+    const primaryOrderBy: Prisma.ProductOrderByWithRelationInput =
       sf === 'vendor'   ? { vendor:   { name: sd } } :
       sf === 'category' ? { category: { name: sd } } :
       sf === 'brand'    ? { brand: sd }               :
       sf === 'stock'    ? { updatedAt: sd }           :
       ['model','ean','costPrice','sellingPrice','gstRate','createdAt','updatedAt'].includes(sf)
         ? { [sf]: sd } : { createdAt: sd };
+
+    // CRITICAL: add 'id' as a deterministic secondary sort key. Bulk operations
+    // (import, bulk update) set updatedAt/createdAt to the exact same timestamp
+    // for thousands of rows in one statement. Sorting on that field ALONE gives
+    // Postgres no stable tie-break order — paginating with skip/take across
+    // separate requests (as CSV export does) can then return the same tied row
+    // on two different pages while skipping another entirely. 'id' is unique,
+    // so appending it as a tie-breaker makes the full ordering deterministic
+    // and pagination/export 100% reliable regardless of how many rows tie.
+    const orderBy: Prisma.ProductOrderByWithRelationInput[] = [primaryOrderBy, { id: 'asc' }];
 
     const inc = await safeInclude();
 
@@ -116,6 +126,10 @@ export const productRepository = {
       const [allItems, total] = await prisma.$transaction([
         prisma.product.findMany({
           where,
+          orderBy: { id: 'asc' }, // stable base order before the in-memory qty sort below —
+                                    // without this, Postgres can return rows in a different
+                                    // order on each separate call, shuffling tied-quantity rows
+                                    // across export pages (same bug class as the main sort fix).
           select: { id: true, stockLevels: { select: { quantity: true } } },
         }),
         prisma.product.count({ where }),
