@@ -1,0 +1,26 @@
+name: Keep Backend Alive
+
+on:
+  schedule:
+    # Every 14 minutes — keeps the Render free tier from sleeping (sleep threshold = 15 min)
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            "https://inventory-erp-backend-iplr.onrender.com/api/v1/health" \
+            || echo "000")
+          echo "Backend ping status: $STATUS"
+          if [ "$STATUS" = "000" ]; then
+            echo "Backend may be waking up — this is normal on first ping"
+          elif [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 500 ]; then
+            echo "Backend is alive ✓"
+          else
+            echo "Backend returned unexpected status $STATUS"
+          fi
