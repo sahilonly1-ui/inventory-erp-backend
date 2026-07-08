@@ -28,3 +28,49 @@ router.get('/ledger', authorize(PERMISSIONS.INVENTORY_READ), validate(ledgerQuer
 router.get('/lookup', authorize(PERMISSIONS.INVENTORY_READ), validate(eanLookupSchema,   'query'), inventoryController.lookup);
 
 export default router;
+
+// ── Session-based scanning endpoints ─────────────────────────────────────────
+// A "session" is a single stock-in or stock-out document (SIN/SOUT).
+// The frontend creates a session, scans products/IMEIs into it, then commits.
+
+router.post('/sessions', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const { type, warehouseId, vendorId, remarks } = req.body;
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  ok(res, await inventoryService.createSession({ type, warehouseId, vendorId, remarks }, actor), 201);
+}));
+
+router.get('/sessions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  const limit = Math.min(100, parseInt(String(req.query.limit || '30')) || 30);
+  const type = req.query.type ? String(req.query.type) : undefined;
+  ok(res, await inventoryService.listSessions({ limit, type }));
+}));
+
+router.get('/sessions/:id', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await inventoryService.getSession(req.params.id));
+}));
+
+router.post('/sessions/:id/lines', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  ok(res, await inventoryService.addSessionLine(req.params.id, req.body, actor));
+}));
+
+router.post('/sessions/:id/commit', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  ok(res, await inventoryService.commitSession(req.params.id, actor));
+}));
+
+router.delete('/sessions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  ok(res, await inventoryService.cancelSession(req.params.id, actor));
+}));
+
+// ── Daily Summary ─────────────────────────────────────────────────────────────
+router.get('/daily-summary', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  const date = req.query.date ? String(req.query.date) : new Date().toISOString().slice(0, 10);
+  ok(res, await inventoryService.dailySummary(date));
+}));
+
+// ── Enhanced dashboard stats ──────────────────────────────────────────────────
+router.get('/dashboard-stats', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await inventoryService.dashboardStats());
+}));

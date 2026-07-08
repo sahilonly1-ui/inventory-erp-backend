@@ -267,3 +267,246 @@ export const inventoryService = {
     };
   },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION-BASED SCANNING
+// Each session = one SIN/SOUT document. Lines are added via scan, then committed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function genDocNumber(prefix: 'SIN' | 'SOUT'): string {
+  const d = new Date();
+  const ymd = d.toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.floor(Math.random() * 9000) + 1000;
+  return `${prefix}-${ymd}-${rand}`;
+}
+
+// In-memory session store (sufficient for single-server Render free tier)
+// Survives within a single request cycle; persist to DB on commit.
+const SESSIONS = new Map<string, {
+  id: string;
+  docNumber: string;
+  type: 'STOCK_IN' | 'STOCK_OUT';
+  warehouseId: string;
+  vendorId?: string;
+  remarks?: string;
+  createdBy: string;
+  createdAt: string;
+  lines: { productId: string; ean: string; model: string; imeis: string[]; qty: number; unitCost?: number }[];
+  status: 'OPEN' | 'COMMITTED' | 'CANCELLED';
+}>();
+
+const inventoryServiceExtensions = {
+  async createSession(input: { type: 'STOCK_IN' | 'STOCK_OUT'; warehouseId: string; vendorId?: string; remarks?: string }, actor: { id: string; ip: string | null }) {
+    // validate warehouse
+    const wh = await prisma.warehouse.findFirst({ where: { id: input.warehouseId, isDeleted: false } });
+    if (!wh) throw new BadRequestError('Warehouse not found');
+    const id = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const prefix = input.type === 'STOCK_IN' ? 'SIN' : 'SOUT';
+    const session = {
+      id, docNumber: genDocNumber(prefix),
+      type: input.type, warehouseId: input.warehouseId,
+      vendorId: input.vendorId, remarks: input.remarks,
+      createdBy: actor.id, createdAt: new Date().toISOString(),
+      lines: [], status: 'OPEN' as const,
+    };
+    SESSIONS.set(id, session);
+    return session;
+  },
+
+  listSessions({ limit = 30, type }: { limit?: number; type?: string }) {
+    const all = [...SESSIONS.values()];
+    const filtered = type ? all.filter(s => s.type === type) : all;
+    return filtered.slice(-limit).reverse();
+  },
+
+  getSession(id: string) {
+    const s = SESSIONS.get(id);
+    if (!s) throw new BadRequestError('Session not found or expired');
+    return s;
+  },
+
+  async addSessionLine(sessionId: string, input: { ean?: string; productId?: string; imei?: string; qty?: number; unitCost?: number }, actor: { id: string; ip: string | null }) {
+    const session = SESSIONS.get(sessionId);
+    if (!session || session.status !== 'OPEN') throw new BadRequestError('Session is not open');
+
+    // Lookup product by EAN or productId
+    const product = await prisma.product.findFirst({
+      where: {
+        ...(input.productId ? { id: input.productId } : { ean: input.ean }),
+        isDeleted: false,
+      },
+    });
+    if (!product) return { found: false, ean: input.ean };
+
+    if (product.imeiRequired && input.imei) {
+      // IMEI scan — check for duplicate
+      const existing = await prisma.imeiInventory.findFirst({ where: { imei: input.imei, isDeleted: false } });
+      if (existing && session.type === 'STOCK_IN') {
+        // Return duplicate details for popup
+        const lastTxn = await prisma.inventoryTransaction.findFirst({
+          where: { productId: existing.productId },
+          include: { vendor: { select: { name: true } } },
+          orderBy: { createdAt: 'desc' },
+        });
+        return {
+          duplicate: true,
+          imei: input.imei,
+          productId: existing.productId,
+          status: existing.status,
+          lastVendor: lastTxn?.vendor?.name ?? null,
+          lastDate: lastTxn?.createdAt?.toISOString() ?? null,
+        };
+      }
+
+      let line = session.lines.find(l => l.productId === product.id);
+      if (!line) {
+        line = { productId: product.id, ean: product.ean, model: product.model, imeis: [], qty: 0, unitCost: input.unitCost };
+        session.lines.push(line);
+      }
+      if (!line.imeis.includes(input.imei)) {
+        line.imeis.push(input.imei);
+        line.qty = line.imeis.length;
+      }
+    } else {
+      // Non-IMEI: just set/increment quantity
+      const qty = Math.max(1, Number(input.qty) || 1);
+      let line = session.lines.find(l => l.productId === product.id);
+      if (!line) {
+        line = { productId: product.id, ean: product.ean, model: product.model, imeis: [], qty: 0, unitCost: input.unitCost };
+        session.lines.push(line);
+      }
+      line.qty += qty;
+      if (input.unitCost) line.unitCost = input.unitCost;
+    }
+
+    return { found: true, product: { id: product.id, ean: product.ean, model: product.model, imeiRequired: product.imeiRequired }, session };
+  },
+
+  async commitSession(sessionId: string, actor: { id: string; ip: string | null }) {
+    const session = SESSIONS.get(sessionId);
+    if (!session || session.status !== 'OPEN') throw new BadRequestError('Session not open');
+    if (!session.lines.length) throw new BadRequestError('No lines to commit');
+
+    const txType: TransactionType = session.type === 'STOCK_IN' ? TransactionType.STOCK_IN : TransactionType.STOCK_OUT;
+    const results = [];
+
+    for (const line of session.lines) {
+      const signedQty = session.type === 'STOCK_IN' ? line.qty : -line.qty;
+      const result = await prisma.$transaction(async (tx) => {
+        const r = await applyLedgerMovementTx(tx, {
+          productId: line.productId, warehouseId: session.warehouseId,
+          type: txType, signedQty,
+          unitCost: line.unitCost ?? null,
+          vendorId: session.vendorId ?? null,
+          referenceType: 'session', referenceId: session.id,
+          remarks: session.docNumber,
+        }, actor);
+
+        // Handle IMEIs
+        if (line.imeis.length) {
+          for (const imei of line.imeis) {
+            if (session.type === 'STOCK_IN') {
+              await tx.imeiInventory.upsert({
+                where: { imei },
+                create: { imei, productId: line.productId, warehouseId: session.warehouseId, status: 'IN_STOCK', createdBy: actor.id },
+                update: { status: 'IN_STOCK', warehouseId: session.warehouseId, updatedBy: actor.id, isDeleted: false, deletedAt: null },
+              });
+            } else {
+              await tx.imeiInventory.updateMany({ where: { imei }, data: { status: 'SOLD', updatedBy: actor.id } });
+            }
+          }
+        }
+        return r;
+      });
+      results.push({ ...line, ...result });
+    }
+
+    session.status = 'COMMITTED';
+    return { docNumber: session.docNumber, lines: results, total: results.length };
+  },
+
+  cancelSession(sessionId: string, _actor: { id: string; ip: string | null }) {
+    const session = SESSIONS.get(sessionId);
+    if (!session) throw new BadRequestError('Session not found');
+    session.status = 'CANCELLED';
+    return { cancelled: true, docNumber: session.docNumber };
+  },
+
+  async dailySummary(dateStr: string) {
+    const from = new Date(dateStr + 'T00:00:00.000Z');
+    const to   = new Date(dateStr + 'T23:59:59.999Z');
+    const txns = await prisma.inventoryTransaction.findMany({
+      where: { createdAt: { gte: from, lte: to } },
+      include: {
+        product: { select: { ean: true, model: true, brand: true, categoryId: true } },
+        vendor:  { select: { name: true } },
+        warehouse: { select: { name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const stockIn  = txns.filter(t => t.quantity > 0);
+    const stockOut = txns.filter(t => t.quantity < 0);
+
+    const byProduct = new Map<string, { ean: string; model: string; brand: string; inQty: number; outQty: number; vendors: Set<string> }>();
+    for (const t of txns) {
+      const key = t.productId;
+      if (!byProduct.has(key)) byProduct.set(key, { ean: t.product.ean, model: t.product.model, brand: t.product.brand, inQty: 0, outQty: 0, vendors: new Set() });
+      const row = byProduct.get(key)!;
+      if (t.quantity > 0) row.inQty += t.quantity;
+      else row.outQty += Math.abs(t.quantity);
+      if (t.vendor) row.vendors.add(t.vendor.name);
+    }
+
+    const imeiIn  = await prisma.imeiInventory.count({ where: { createdAt: { gte: from, lte: to }, status: 'IN_STOCK' } });
+    const imeiOut = await prisma.imeiInventory.count({ where: { updatedAt: { gte: from, lte: to }, status: 'SOLD' } });
+
+    return {
+      date: dateStr,
+      totals: {
+        stockInTxns: stockIn.length,
+        stockOutTxns: stockOut.length,
+        stockInUnits: stockIn.reduce((s, t) => s + t.quantity, 0),
+        stockOutUnits: stockOut.reduce((s, t) => s + Math.abs(t.quantity), 0),
+        imeiIn, imeiOut,
+      },
+      byProduct: [...byProduct.entries()].map(([id, v]) => ({
+        productId: id, ...v, vendors: [...v.vendors],
+      })),
+      recentTxns: txns.slice(0, 50).map(t => ({
+        id: t.id, type: t.type, qty: t.quantity,
+        product: `${t.product.model} (${t.product.ean})`,
+        vendor: t.vendor?.name, warehouse: t.warehouse.name,
+        createdAt: t.createdAt,
+      })),
+    };
+  },
+
+  async dashboardStats() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [products, activeProducts, vendors, categories, brands, todayIn, todayOut, imeiToday] = await Promise.all([
+      prisma.product.count({ where: { isDeleted: false } }),
+      prisma.product.count({ where: { isDeleted: false, status: 'ACTIVE' } }),
+      prisma.vendor.count({ where: { isDeleted: false } }),
+      prisma.productCategory.count({ where: { isDeleted: false } }),
+      prisma.brand.count({ where: { isDeleted: false } }),
+      prisma.inventoryTransaction.aggregate({ where: { type: TransactionType.STOCK_IN, createdAt: { gte: todayStart } }, _sum: { quantity: true } }),
+      prisma.inventoryTransaction.aggregate({ where: { type: TransactionType.STOCK_OUT, createdAt: { gte: todayStart } }, _sum: { quantity: true } }),
+      prisma.imeiInventory.count({ where: { createdAt: { gte: todayStart } } }),
+    ]);
+
+    return {
+      products, activeProducts, vendors, categories, brands,
+      today: {
+        stockIn:  todayIn._sum.quantity  ?? 0,
+        stockOut: todayOut._sum.quantity ?? 0,
+        imeiScanned: imeiToday,
+      },
+    };
+  },
+};
+
+// Merge into the existing inventoryService export
+Object.assign(inventoryService, inventoryServiceExtensions);
