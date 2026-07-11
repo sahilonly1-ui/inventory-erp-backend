@@ -286,17 +286,21 @@ model Product {
 
 // --------------------------------------------------------------------------- VENDORS
 model Vendor {
-  id            String  @id @default(uuid())
-  name          String
-  code          String  @unique
-  contactPerson String?
-  phone         String?
-  email         String?
-  gstin         String?
-  address       String?
+  id              String  @id @default(uuid())
+  name            String
+  code            String  @unique
+  normalizedName  String? // lowercase + no-spaces, used for dedup matching
+  state           String? // mandatory on new creation
+  contactPerson   String?
+  phone           String?
+  email           String?
+  gstin           String?
+  address         String?
+  notes           String?
 
   products     Product[]
   transactions InventoryTransaction[]
+  imeiUnits    ImeiInventory[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -401,6 +405,12 @@ model ImeiInventory {
   imei1       String // partial-unique WHERE is_deleted=false (migration)
   imei2       String? // partial-unique WHERE is_deleted=false AND imei2 IS NOT NULL
   status      ImeiStatus @default(IN_STOCK)
+  imeiType    String @default("NIL") // NIL | OPEN_BOX | DEMO | SECOND_IMEI
+  swiped      Boolean @default(false)
+  supplierId  String?
+  supplier    Vendor? @relation(fields: [supplierId], references: [id])
+  purchaseDate DateTime?
+  invoiceNo   String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt

@@ -76,12 +76,21 @@ export const imeiRepository = {
       ...(params.productId ? { productId: params.productId } : {}),
       ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
       ...(params.search
-        ? { OR: [{ imei1: { contains: params.search } }, { imei2: { contains: params.search } }] }
-        : {}),
+        ? { OR: [
+            { imei1: { contains: params.search } },
+            { imei2: { contains: params.search } },
+            { product: { model: { contains: params.search, mode: 'insensitive' } } },
+          ]} : {}),
+      ...(params.imeiType ? { imeiType: params.imeiType } : {}),
+      ...(params.swiped !== undefined ? { swiped: params.swiped === 'true' } : {}),
     };
     return prisma.$transaction([
       prisma.imeiInventory.findMany({
         where,
+        include: {
+          product: { select: { ean: true, model: true, brand: true, categoryId: true } },
+          warehouse: { select: { name: true } },
+        },
         orderBy: { createdAt: 'desc' },
         skip: params.skip,
         take: params.take,

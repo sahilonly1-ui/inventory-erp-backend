@@ -5,13 +5,28 @@ import { writeAudit } from '../../common/audit.service';
 
 interface Actor { id: string; ip: string | null; }
 
+// ── Name helpers ─────────────────────────────────────────────────────────────
+// Title-case: "nalanda enterprises" → "Nalanda Enterprises"
+export function toTitleCase(name: string): string {
+  return name.trim().replace(/\b\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+}
+// Normalize for dedup: trim, lowercase, remove all whitespace
+export function normalizeName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, '');
+}
+
 export const vendorService = {
-  async create(input: Prisma.VendorUncheckedCreateInput, actor: Actor) {
-    const dup = await prisma.vendor.findFirst({ where: { code: input.code, isDeleted: false } });
-    if (dup) throw new ConflictError('Vendor code already exists');
+  // Standard CRUD ─────────────────────────────────────────────────────────────
+  async create(input: any, actor: Actor) {
+    const displayName = toTitleCase(input.name || '');
+    const norm = normalizeName(displayName);
+    const dup = await prisma.vendor.findFirst({ where: { normalizedName: norm, isDeleted: false } });
+    if (dup) throw new ConflictError(`Supplier "${displayName}" already exists`);
+    // Generate a code that won't conflict (no longer user-visible)
+    const code = norm.slice(0, 10).toUpperCase() + Date.now().toString().slice(-6);
     return prisma.$transaction(async (tx) => {
-      const vendor = await tx.vendor.create({ data: { ...input, createdBy: actor.id } });
-      await writeAudit(tx, { userId: actor.id, action: 'CREATE', entityName: 'vendors', entityId: vendor.id, newValue: { code: vendor.code, name: vendor.name }, ipAddress: actor.ip });
+      const vendor = await tx.vendor.create({ data: { ...input, name: displayName, code, normalizedName: norm, createdBy: actor.id } });
+      await writeAudit(tx, { userId: actor.id, action: 'CREATE', entityName: 'vendors', entityId: vendor.id, newValue: { name: vendor.name, state: (vendor as any).state }, ipAddress: actor.ip });
       return vendor;
     });
   },
@@ -21,64 +36,77 @@ export const vendorService = {
   },
 
   async get(id: string) {
-    const vendor = await prisma.vendor.findFirst({ where: { id, isDeleted: false } });
-    if (!vendor) throw new NotFoundError('Vendor not found');
-    return vendor;
+    const v = await prisma.vendor.findFirst({ where: { id, isDeleted: false } });
+    if (!v) throw new NotFoundError('Supplier not found');
+    return v;
   },
 
-  async update(id: string, input: Prisma.VendorUncheckedUpdateInput, actor: Actor) {
+  async update(id: string, input: any, actor: Actor) {
     const existing = await prisma.vendor.findFirst({ where: { id, isDeleted: false } });
-    if (!existing) throw new NotFoundError('Vendor not found');
+    if (!existing) throw new NotFoundError('Supplier not found');
+    const patch: any = { ...input, updatedBy: actor.id };
+    if (input.name) { patch.name = toTitleCase(input.name); patch.normalizedName = normalizeName(patch.name); }
     return prisma.$transaction(async (tx) => {
-      const vendor = await tx.vendor.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
-      await writeAudit(tx, { userId: actor.id, action: 'UPDATE', entityName: 'vendors', entityId: id, newValue: input, ipAddress: actor.ip });
+      const vendor = await tx.vendor.update({ where: { id }, data: patch });
+      await writeAudit(tx, { userId: actor.id, action: 'UPDATE', entityName: 'vendors', entityId: id, oldValue: { name: existing.name }, newValue: patch, ipAddress: actor.ip });
       return vendor;
     });
   },
 
   async remove(id: string, actor: Actor) {
     const existing = await prisma.vendor.findFirst({ where: { id, isDeleted: false } });
-    if (!existing) throw new NotFoundError('Vendor not found');
+    if (!existing) throw new NotFoundError('Supplier not found');
     await prisma.$transaction(async (tx) => {
       await tx.vendor.update({ where: { id }, data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id } });
       await writeAudit(tx, { userId: actor.id, action: 'DELETE', entityName: 'vendors', entityId: id, ipAddress: actor.ip });
     });
   },
 
-  // Current stock of products belonging to this vendor, per product + total.
-  async vendorStock(vendorId: string) {
-    const products = await prisma.product.findMany({
-      where: { vendorId, isDeleted: false },
-      select: { id: true, ean: true, sku: true, model: true, stockLevels: { select: { warehouseId: true, quantity: true } } },
+  // ── Smart find-or-create (used by Stock In/Out) ───────────────────────────
+  // Returns { vendor, created: boolean, needsState: boolean }
+  async findOrCreate(name: string, state: string | undefined, actor: Actor) {
+    const displayName = toTitleCase(name);
+    const norm = normalizeName(displayName);
+
+    const existing = await prisma.vendor.findFirst({ where: { normalizedName: norm, isDeleted: false } });
+    if (existing) return { vendor: existing, created: false, needsState: false };
+
+    if (!state) return { vendor: null, created: false, needsState: true, suggestedName: displayName };
+
+    const code = norm.slice(0, 10).toUpperCase() + Date.now().toString().slice(-6);
+    const vendor = await prisma.$transaction(async (tx) => {
+      const v = await tx.vendor.create({ data: { name: displayName, code, normalizedName: norm, state, createdBy: actor.id } });
+      await writeAudit(tx, { userId: actor.id, action: 'CREATE', entityName: 'vendors', entityId: v.id, newValue: { name: v.name, state, autoCreated: true }, ipAddress: actor.ip });
+      return v;
     });
-    const rows = products.map((p) => {
-      const quantity = p.stockLevels.reduce((s, l) => s + l.quantity, 0);
-      return { productId: p.id, ean: p.ean, sku: p.sku, model: p.model, quantity };
-    });
-    return { vendorId, totalUnits: rows.reduce((s, r) => s + r.quantity, 0), products: rows };
+    return { vendor, created: true, needsState: false };
   },
 
-  // Aging of vendor-attributed inbound stock, bucketed by receipt age.
-  async vendorAging(vendorId: string) {
-    const rows = await prisma.$queryRaw<
-      { bucket_0_30: bigint; bucket_31_60: bigint; bucket_61_90: bigint; bucket_90_plus: bigint }[]
-    >`
-      SELECT
-        COALESCE(SUM(CASE WHEN now() - "createdAt" <= interval '30 days' THEN quantity ELSE 0 END), 0) AS bucket_0_30,
-        COALESCE(SUM(CASE WHEN now() - "createdAt" > interval '30 days' AND now() - "createdAt" <= interval '60 days' THEN quantity ELSE 0 END), 0) AS bucket_31_60,
-        COALESCE(SUM(CASE WHEN now() - "createdAt" > interval '60 days' AND now() - "createdAt" <= interval '90 days' THEN quantity ELSE 0 END), 0) AS bucket_61_90,
-        COALESCE(SUM(CASE WHEN now() - "createdAt" > interval '90 days' THEN quantity ELSE 0 END), 0) AS bucket_90_plus
-      FROM inventory_transactions
-      WHERE "vendorId" = ${vendorId} AND quantity > 0`;
-    const r = rows[0];
-    return {
-      vendorId,
-      aging: {
-        '0-30': Number(r.bucket_0_30),
-        '31-60': Number(r.bucket_31_60),
-        '61-90': Number(r.bucket_61_90),
-        '90+': Number(r.bucket_90_plus),
-      },
-    };
+  // ── Bulk clear (preserves historical references) ──────────────────────────
+  async clearAll(actor: Actor) {
+    const all = await prisma.vendor.findMany({ where: { isDeleted: false }, select: { id: true, name: true } });
+    if (!all.length) return { deleted: 0 };
+    const now = new Date();
+    await prisma.vendor.updateMany({
+      where: { isDeleted: false },
+      data: { isDeleted: true, deletedAt: now, deletedBy: actor.id },
+    });
+    await writeAudit(prisma, { userId: actor.id, action: 'DELETE', entityName: 'vendors', entityId: 'BULK', newValue: { count: all.length, note: 'Supplier Master reset' }, ipAddress: actor.ip });
+    return { deleted: all.length };
+  },
+
+  // ── Autocomplete search ────────────────────────────────────────────────────
+  async search(q: string, limit = 15) {
+    if (!q.trim()) return prisma.vendor.findMany({ where: { isDeleted: false }, orderBy: { name: 'asc' }, take: limit });
+    return prisma.vendor.findMany({
+      where: { isDeleted: false, name: { contains: q.trim(), mode: 'insensitive' } },
+      orderBy: { name: 'asc' }, take: limit,
+    });
+  },
+
+  async vendorStock(vendorId: string) {
+    const products = await prisma.product.findMany({ where: { vendorId, isDeleted: false }, select: { id: true, ean: true, sku: true, model: true, stockLevels: { select: { warehouseId: true, quantity: true } } } });
+    const rows = products.map(p => { const quantity = p.stockLevels.reduce((s, l) => s + l.quantity, 0); return { productId: p.id, ean: p.ean, sku: p.sku, model: p.model, quantity }; });
+    return { vendorId, totalUnits: rows.reduce((s, r) => s + r.quantity, 0), products: rows };
   },
 };
