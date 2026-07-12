@@ -64,6 +64,12 @@ router.delete('/sessions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHan
   ok(res, await inventoryService.cancelSession(req.params.id, actor));
 }));
 
+// ── Reverse / delete a stock transaction ─────────────────────────────────────
+router.delete('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  ok(res, await inventoryService.reverseTransaction(req.params.id, actor));
+}));
+
 // ── Daily Summary ─────────────────────────────────────────────────────────────
 router.get('/daily-summary', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
   const date = req.query.date ? String(req.query.date) : new Date().toISOString().slice(0, 10);

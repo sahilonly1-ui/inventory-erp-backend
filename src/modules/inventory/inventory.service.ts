@@ -510,3 +510,65 @@ const inventoryServiceExtensions = {
 
 // Merge into the existing inventoryService export
 Object.assign(inventoryService, inventoryServiceExtensions);
+
+// ── Reverse a stock transaction (admin delete/undo) ───────────────────────────
+// Creates an offsetting ADJUSTMENT, updates stock levels, writes audit.
+// For IMEI products: attempts to reset the IMEI status if the original was STOCK_IN.
+Object.assign(inventoryService, {
+  async reverseTransaction(txnId: string, actor: { id: string; ip: string | null }) {
+    const txn = await prisma.inventoryTransaction.findUnique({
+      where: { id: txnId },
+      include: { product: { select: { id: true, model: true, imeiRequired: true } } },
+    });
+    if (!txn) throw new BadRequestError('Transaction not found');
+    if (txn.quantity === 0) throw new BadRequestError('Cannot reverse a zero-quantity transaction');
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Create offsetting ledger movement
+      const r = await applyLedgerMovementTx(tx, {
+        productId: txn.productId,
+        warehouseId: txn.warehouseId,
+        type: TransactionType.ADJUSTMENT,
+        signedQty: -txn.quantity,
+        vendorId: txn.vendorId ?? null,
+        remarks: `REVERSAL of transaction ${txnId.slice(0, 8)}…`,
+      }, actor);
+
+      // If the original was a STOCK_IN for an IMEI product, try to mark those IMEIs as non-stock
+      if (txn.quantity > 0 && txn.product.imeiRequired) {
+        // Find IMEI records created around the same time for this product
+        const window = new Date(txn.createdAt.getTime() + 60_000); // ±1 min window
+        const since = new Date(txn.createdAt.getTime() - 60_000);
+        await tx.imeiInventory.updateMany({
+          where: {
+            productId: txn.productId,
+            warehouseId: txn.warehouseId,
+            status: 'IN_STOCK',
+            createdAt: { gte: since, lte: window },
+          },
+          data: { status: 'RETURNED', updatedBy: actor.id },
+        });
+      }
+
+      await writeAudit(tx, {
+        userId: actor.id,
+        action: 'DELETE',
+        entityName: 'inventory_transactions',
+        entityId: txnId,
+        oldValue: { qty: txn.quantity, type: txn.type, product: txn.product.model },
+        newValue: { reversed: true, reversalBy: actor.id },
+        ipAddress: actor.ip,
+      });
+
+      return r;
+    });
+
+    return {
+      reversed: true,
+      originalTxnId: txnId,
+      productId: txn.productId,
+      reversalQty: -txn.quantity,
+      newStockLevel: result.newQuantity,
+    };
+  },
+});
