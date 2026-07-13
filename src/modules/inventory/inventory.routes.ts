@@ -77,6 +77,44 @@ router.patch('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), async
   ok(res, txn);
 }));
 
+// ── Restore a deleted stock transaction from audit log ───────────────────────
+router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const auditLog = await prisma.auditLog.findUnique({ where: { id: req.params.auditId } });
+  if (!auditLog || auditLog.action !== 'DELETE' || auditLog.entityName !== 'inventory_transactions') {
+    throw new BadRequestError('Audit log not found or is not a transaction deletion');
+  }
+  const old = auditLog.oldValue as any;
+  if (!old?.productId || !old?.warehouseId) {
+    throw new BadRequestError('Insufficient data to restore — transaction was deleted before restore feature was enabled');
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Re-create the inventory transaction
+    const restored = await tx.inventoryTransaction.create({
+      data: {
+        productId: old.productId, warehouseId: old.warehouseId,
+        type: old.type as TransactionType, quantity: Number(old.quantity),
+        vendorId: old.vendorId ?? null,
+        remarks: `RESTORED — ${old.remarks ?? ''} (audit: ${auditLog.id.slice(0, 8)})`,
+        createdBy: actor.id,
+      }
+    });
+    // Restore the stock level
+    await tx.stockLevel.updateMany({
+      where: { productId: old.productId, warehouseId: old.warehouseId },
+      data: { quantity: { increment: Number(old.quantity) } },
+    });
+    // Write restore audit
+    await writeAudit(tx, {
+      userId: actor.id, action: 'CREATE', entityName: 'inventory_transactions', entityId: restored.id,
+      oldValue: { restoredFromAuditId: auditLog.id }, newValue: { restored: true, product: old.product },
+      ipAddress: actor.ip,
+    });
+  });
+  ok(res, { restored: true, auditId: req.params.auditId });
+}));
+
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
 router.delete('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   const actor = { id: req.user!.id, ip: req.ip ?? null };

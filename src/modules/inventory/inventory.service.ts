@@ -520,7 +520,7 @@ Object.assign(inventoryService, {
   async reverseTransaction(txnId: string, actor: { id: string; ip: string | null }) {
     const txn = await prisma.inventoryTransaction.findUnique({
       where: { id: txnId },
-      include: { product: { select: { id: true, model: true, imeiRequired: true } } },
+      include: { product: { select: { id: true, model: true, imeiRequired: true } }, vendor: { select: { name: true } } },
     });
     if (!txn) throw new BadRequestError('Transaction not found');
 
@@ -528,37 +528,36 @@ Object.assign(inventoryService, {
       // 1. Directly undo the stock level effect (no new transaction logged)
       await tx.stockLevel.updateMany({
         where: { productId: txn.productId, warehouseId: txn.warehouseId },
-        data: { quantity: { decrement: txn.quantity } }, // Undo: inbound was +qty, so remove it
+        data: { quantity: { decrement: txn.quantity } },
       });
 
-      // 2. For IMEI stock-ins, delete the IMEI records created within ±5 min
+      // 2. For IMEI stock-ins, soft-delete the IMEI records created within ±5 min
       if (txn.quantity > 0 && txn.product.imeiRequired) {
         const since = new Date(txn.createdAt.getTime() - 5 * 60_000);
         const until = new Date(txn.createdAt.getTime() + 5 * 60_000);
         await tx.imeiInventory.updateMany({
-          where: {
-            productId: txn.productId,
-            warehouseId: txn.warehouseId,
-            status: { in: ['IN_STOCK', 'RETURNED'] },
-            isDeleted: false,
-            createdAt: { gte: since, lte: until },
-          },
+          where: { productId: txn.productId, warehouseId: txn.warehouseId, status: { in: ['IN_STOCK', 'RETURNED'] }, isDeleted: false, createdAt: { gte: since, lte: until } },
           data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
         });
       }
 
-      // 3. Write audit log BEFORE deleting (preserves history)
+      // 3. Write audit log with FULL data (needed for restore)
       await writeAudit(tx, {
-        userId: actor.id,
-        action: 'DELETE',
-        entityName: 'inventory_transactions',
-        entityId: txnId,
-        oldValue: { qty: txn.quantity, type: txn.type, product: txn.product.model },
+        userId: actor.id, action: 'DELETE',
+        entityName: 'inventory_transactions', entityId: txnId,
+        oldValue: {
+          // Full transaction data for restore
+          productId: txn.productId, warehouseId: txn.warehouseId,
+          type: txn.type, quantity: txn.quantity,
+          vendorId: txn.vendorId ?? null, remarks: txn.remarks ?? null,
+          createdAt: txn.createdAt.toISOString(),
+          product: txn.product.model, vendor: txn.vendor?.name ?? null,
+          imeiRequired: txn.product.imeiRequired,
+        },
         newValue: { fullyDeleted: true, reason: 'Deleted by admin — scan error' },
         ipAddress: actor.ip,
       });
 
-      // 4. Hard-delete the transaction record so it never shows in any report
       await tx.inventoryTransaction.delete({ where: { id: txnId } });
     });
 

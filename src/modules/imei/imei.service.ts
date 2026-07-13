@@ -22,7 +22,7 @@ export const imeiService = {
   async receive(input: ReceiveImeiInput, actor: Actor) {
     const product = await inventoryRepository.findActiveProduct(input.productId);
     if (!product) throw new NotFoundError('Product not found');
-    if (!product.imeiRequired) {
+    if (!product.imeiRequired && !(input as any).force) {
       throw new BadRequestError('Product is not IMEI-tracked; use /inventory/stock-in');
     }
 

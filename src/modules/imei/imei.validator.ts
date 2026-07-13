@@ -16,6 +16,7 @@ export const receiveImeiSchema = z.object({
     .max(2000),
   vendorId: z.string().uuid().optional(),
   remarks: z.string().max(500).optional(),
+  force: z.boolean().optional(), // bypass imeiRequired check (user explicitly chose IMEI column)
 });
 
 export const dispatchImeiSchema = z.object({
