@@ -1,3 +1,4 @@
+import { prisma } from '../../config/prisma';
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
@@ -62,6 +63,18 @@ router.post('/sessions/:id/commit', authorize(PERMISSIONS.INVENTORY_STOCK_IN), a
 router.delete('/sessions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   const actor = { id: req.user!.id, ip: req.ip ?? null };
   ok(res, await inventoryService.cancelSession(req.params.id, actor));
+}));
+
+// ── Edit a stock transaction (update vendor/remarks) ─────────────────────────
+router.patch('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const { vendorId, remarks } = req.body;
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const patch: any = {};
+  if (vendorId !== undefined) patch.vendorId = vendorId || null;
+  if (remarks !== undefined) patch.remarks = remarks;
+  const txn = await prisma.inventoryTransaction.update({ where: { id: req.params.id }, data: patch });
+  await writeAudit(prisma, { userId: actor.id, action: 'UPDATE', entityName: 'inventory_transactions', entityId: req.params.id, newValue: patch, ipAddress: actor.ip });
+  ok(res, txn);
 }));
 
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
