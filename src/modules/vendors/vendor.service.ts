@@ -98,8 +98,12 @@ export const vendorService = {
   // ── Autocomplete search ────────────────────────────────────────────────────
   async search(q: string, limit = 15) {
     if (!q.trim()) return prisma.vendor.findMany({ where: { isDeleted: false }, orderBy: { name: 'asc' }, take: limit });
+    const words = q.trim().split(/\s+/).filter(Boolean);
+    const where: any = words.length <= 1
+      ? { isDeleted: false, name: { contains: q.trim(), mode: 'insensitive' } }
+      : { isDeleted: false, AND: words.map((w: string) => ({ name: { contains: w, mode: 'insensitive' } })) };
     return prisma.vendor.findMany({
-      where: { isDeleted: false, name: { contains: q.trim(), mode: 'insensitive' } },
+      where,
       orderBy: { name: 'asc' }, take: limit,
     });
   },
