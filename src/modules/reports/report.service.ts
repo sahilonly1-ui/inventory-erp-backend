@@ -45,23 +45,51 @@ async function ledgerDataset(p: ReportParams, types: TransactionType[], sheet: s
   };
 }
 
-async function imeiDataset(): Promise<Dataset> {
+async function imeiDataset(imeiType?: string, swiped?: string): Promise<Dataset> {
+  const where: any = { isDeleted: false };
+  if (imeiType) where.imeiType = imeiType;
+  if (swiped === 'true') where.swiped = true;
+  if (swiped === 'false') where.swiped = false;
   const rows = await prisma.imeiInventory.findMany({
-    where: { isDeleted: false },
-    include: { product: { select: { ean: true, model: true, brand: true } }, warehouse: { select: { name: true } } },
-    take: 50000,
+    where,
+    include: {
+      product: { select: { ean: true, model: true, brand: true } },
+      warehouse: { select: { name: true } },
+      supplier: { select: { name: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 100000,
   });
+  const typeLabel = imeiType ? imeiType.replace(/_/g, ' ') : 'All';
   return {
-    sheet: 'IMEI',
+    sheet: `IMEI ${typeLabel}`,
     columns: [
-      { header: 'IMEI1', key: 'imei1', width: 20 }, { header: 'IMEI2', key: 'imei2', width: 20 },
-      { header: 'EAN', key: 'ean', width: 16 }, { header: 'Model', key: 'model', width: 24 },
-      { header: 'Brand', key: 'brand', width: 16 }, { header: 'Warehouse', key: 'warehouse', width: 18 },
-      { header: 'Status', key: 'status', width: 14 }, { header: 'Received', key: 'received', width: 22 },
+      { header: 'IMEI 1', key: 'imei1', width: 20 },
+      { header: 'IMEI 2', key: 'imei2', width: 20 },
+      { header: 'EAN', key: 'ean', width: 16 },
+      { header: 'Model', key: 'model', width: 30 },
+      { header: 'Brand', key: 'brand', width: 16 },
+      { header: 'Type', key: 'imeiType', width: 14 },
+      { header: 'Status', key: 'status', width: 14 },
+      { header: 'Swiped', key: 'swiped', width: 10 },
+      { header: 'Supplier', key: 'supplier', width: 22 },
+      { header: 'Warehouse', key: 'warehouse', width: 18 },
+      { header: 'Stock In Date', key: 'stockIn', width: 22 },
+      { header: 'Last Updated', key: 'updated', width: 22 },
     ],
     rows: rows.map((r) => ({
-      imei1: r.imei1, imei2: r.imei2 ?? '', ean: r.product.ean, model: r.product.model,
-      brand: r.product.brand, warehouse: r.warehouse.name, status: r.status, received: r.createdAt.toISOString(),
+      imei1: r.imei1,
+      imei2: (r as any).imei2 ?? '',
+      ean: r.product.ean,
+      model: r.product.model,
+      brand: r.product.brand,
+      imeiType: (r as any).imeiType ?? 'NIL',
+      status: r.status,
+      swiped: (r as any).swiped ? 'Yes' : 'No',
+      supplier: (r as any).supplier?.name ?? '',
+      warehouse: r.warehouse.name,
+      stockIn: r.createdAt.toISOString().slice(0, 10),
+      updated: r.updatedAt.toISOString().slice(0, 10),
     })),
   };
 }
@@ -209,6 +237,7 @@ async function buildDataset(type: ReportType, p: ReportParams): Promise<Dataset>
     case ReportType.STOCK_IN: return ledgerDataset(p, [TransactionType.STOCK_IN, TransactionType.OPENING], 'Stock In');
     case ReportType.STOCK_OUT: return ledgerDataset(p, [TransactionType.STOCK_OUT, TransactionType.MARKETPLACE_DISPATCH, TransactionType.TRANSFER_OUT], 'Stock Out');
     case ReportType.IMEI: return imeiDataset();
+    // Enhanced IMEI type reports (use custom string type routing below)
     case ReportType.INVENTORY_VALUATION: return valuationDataset(p);
     case ReportType.LOW_STOCK: return lowStockDataset(p);
     case ReportType.DEAD_STOCK: return deadStockDataset(p);

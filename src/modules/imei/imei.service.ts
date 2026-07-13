@@ -27,7 +27,7 @@ export const imeiService = {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      await imeiRepository.createReceived(tx, input.productId, input.warehouseId, input.imeis, actor.id);
+      await imeiRepository.createReceived(tx, input.productId, input.warehouseId, input.imeis, actor.id, (input as any).vendorId);
       const move = await applyLedgerMovementTx(tx, {
         productId: input.productId,
         warehouseId: input.warehouseId,

@@ -15,8 +15,9 @@ export const imeiRepository = {
     tx: Prisma.TransactionClient,
     productId: string,
     warehouseId: string,
-    imeis: { imei1: string; imei2?: string | null }[],
+    imeis: { imei1: string; imei2?: string | null; imeiType?: string }[],
     createdBy: string,
+    vendorId?: string,
   ) {
     return tx.imeiInventory.createMany({
       data: imeis.map((i) => ({
@@ -24,7 +25,9 @@ export const imeiRepository = {
         warehouseId,
         imei1: i.imei1,
         imei2: i.imei2 ?? null,
+        imeiType: i.imeiType ?? 'NIL',
         status: ImeiStatus.IN_STOCK,
+        supplierId: vendorId ?? null,
         createdBy,
       })),
     });
@@ -75,12 +78,24 @@ export const imeiRepository = {
       ...(params.status ? { status: params.status } : {}),
       ...(params.productId ? { productId: params.productId } : {}),
       ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
-      ...(params.search
-        ? { OR: [
+      ...(params.search ? (() => {
+        const words = params.search.trim().split(/\s+/).filter(Boolean);
+        if (words.length <= 1) {
+          return { OR: [
             { imei1: { contains: params.search } },
             { imei2: { contains: params.search } },
             { product: { model: { contains: params.search, mode: 'insensitive' } } },
-          ]} : {}),
+            { product: { brand: { contains: params.search, mode: 'insensitive' } } },
+          ]};
+        }
+        // Multi-word: product model must contain ALL words
+        return { AND: words.map((w: string) => ({ OR: [
+          { imei1: { contains: w } },
+          { imei2: { contains: w } },
+          { product: { model: { contains: w, mode: 'insensitive' } } },
+          { product: { brand: { contains: w, mode: 'insensitive' } } },
+        ]}))};
+      })() : {}),
       ...(params.imeiType ? { imeiType: params.imeiType } : {}),
       ...(params.swiped !== undefined ? { swiped: params.swiped === 'true' } : {}),
     };
@@ -90,6 +105,7 @@ export const imeiRepository = {
         include: {
           product: { select: { ean: true, model: true, brand: true, categoryId: true } },
           warehouse: { select: { name: true } },
+          supplier: { select: { name: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip: params.skip,

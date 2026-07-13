@@ -85,15 +85,29 @@ export const productRepository = {
             gte: params.createdFrom ? new Date(params.createdFrom) : undefined,
             lte: params.createdTo   ? new Date(params.createdTo)   : undefined,
           }} : {}),
-      ...(params.search ? { OR: [
-        { ean:   { contains: params.search }                              },
-        { model: { contains: params.search, mode: 'insensitive' }        },
-        { brand: { contains: params.search, mode: 'insensitive' }        },
-        { description: { contains: params.search, mode: 'insensitive' }  },
-        { vendor:   { name: { contains: params.search, mode: 'insensitive' } } },
-        { category: { name: { contains: params.search, mode: 'insensitive' } } },
-        { imeiUnits: { some: { imei1: { contains: params.search } } }    },
-      ]} : {}),
+      ...(params.search ? (() => {
+        const words = params.search.trim().split(/\s+/).filter(Boolean);
+        if (words.length <= 1) {
+          return { OR: [
+            { ean:   { contains: params.search } },
+            { model: { contains: params.search, mode: 'insensitive' } },
+            { brand: { contains: params.search, mode: 'insensitive' } },
+            { description: { contains: params.search, mode: 'insensitive' } },
+            { vendor:   { name: { contains: params.search, mode: 'insensitive' } } },
+            { category: { name: { contains: params.search, mode: 'insensitive' } } },
+            { imeiUnits: { some: { imei1: { contains: params.search } } } },
+          ]};
+        }
+        // Multi-word: ALL words must match somewhere in the product fields
+        return { AND: words.map((w: string) => ({ OR: [
+          { ean:   { contains: w } },
+          { model: { contains: w, mode: 'insensitive' } },
+          { brand: { contains: w, mode: 'insensitive' } },
+          { description: { contains: w, mode: 'insensitive' } },
+          { vendor:   { name: { contains: w, mode: 'insensitive' } } },
+          { category: { name: { contains: w, mode: 'insensitive' } } },
+        ]}))};
+      })() : {}),
       ...(params.outOfStock ? { stockLevels: { none:  { quantity: { gt: 0 } } } } : {}),
       ...(params.warehouseId ? { stockLevels: { some: { warehouseId: params.warehouseId } } } : {}),
     };

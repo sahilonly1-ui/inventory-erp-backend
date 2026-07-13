@@ -7,9 +7,14 @@ export const receiveImeiSchema = z.object({
   productId: z.string().uuid(),
   warehouseId: z.string().uuid(),
   imeis: z
-    .array(z.object({ imei1: imei, imei2: imei.optional() }))
+    .array(z.object({
+      imei1: imei,
+      imei2: imei.optional(),
+      imeiType: z.enum(['NIL','OPEN_BOX','DEMO','SECOND_IMEI']).default('NIL'),
+    }))
     .min(1)
     .max(2000),
+  vendorId: z.string().uuid().optional(),
   remarks: z.string().max(500).optional(),
 });
 
