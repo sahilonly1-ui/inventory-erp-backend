@@ -511,9 +511,11 @@ const inventoryServiceExtensions = {
 // Merge into the existing inventoryService export
 Object.assign(inventoryService, inventoryServiceExtensions);
 
-// ── Reverse a stock transaction (admin delete/undo) ───────────────────────────
-// Creates an offsetting ADJUSTMENT, updates stock levels, writes audit.
-// For IMEI products: attempts to reset the IMEI status if the original was STOCK_IN.
+// ── Fully delete a stock transaction (dashboard "delete as if never happened") ─
+// 1. Directly adjusts StockLevel (no new transaction created)
+// 2. Removes IMEI records from that time window
+// 3. Hard-deletes the transaction record
+// 4. Writes to Version History (audit)
 Object.assign(inventoryService, {
   async reverseTransaction(txnId: string, actor: { id: string; ip: string | null }) {
     const txn = await prisma.inventoryTransaction.findUnique({
@@ -521,54 +523,45 @@ Object.assign(inventoryService, {
       include: { product: { select: { id: true, model: true, imeiRequired: true } } },
     });
     if (!txn) throw new BadRequestError('Transaction not found');
-    if (txn.quantity === 0) throw new BadRequestError('Cannot reverse a zero-quantity transaction');
 
-    const result = await prisma.$transaction(async (tx) => {
-      // Create offsetting ledger movement
-      const r = await applyLedgerMovementTx(tx, {
-        productId: txn.productId,
-        warehouseId: txn.warehouseId,
-        type: TransactionType.ADJUSTMENT,
-        signedQty: -txn.quantity,
-        vendorId: txn.vendorId ?? null,
-        remarks: `REVERSAL of transaction ${txnId.slice(0, 8)}…`,
-      }, actor);
+    await prisma.$transaction(async (tx) => {
+      // 1. Directly undo the stock level effect (no new transaction logged)
+      await tx.stockLevel.updateMany({
+        where: { productId: txn.productId, warehouseId: txn.warehouseId },
+        data: { quantity: { decrement: txn.quantity } }, // Undo: inbound was +qty, so remove it
+      });
 
-      // If the original was a STOCK_IN for an IMEI product, try to mark those IMEIs as non-stock
+      // 2. For IMEI stock-ins, delete the IMEI records created within ±5 min
       if (txn.quantity > 0 && txn.product.imeiRequired) {
-        // Find IMEI records created around the same time for this product
-        const window = new Date(txn.createdAt.getTime() + 60_000); // ±1 min window
-        const since = new Date(txn.createdAt.getTime() - 60_000);
+        const since = new Date(txn.createdAt.getTime() - 5 * 60_000);
+        const until = new Date(txn.createdAt.getTime() + 5 * 60_000);
         await tx.imeiInventory.updateMany({
           where: {
             productId: txn.productId,
             warehouseId: txn.warehouseId,
-            status: 'IN_STOCK',
-            createdAt: { gte: since, lte: window },
+            status: { in: ['IN_STOCK', 'RETURNED'] },
+            isDeleted: false,
+            createdAt: { gte: since, lte: until },
           },
-          data: { status: 'RETURNED', updatedBy: actor.id },
+          data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
         });
       }
 
+      // 3. Write audit log BEFORE deleting (preserves history)
       await writeAudit(tx, {
         userId: actor.id,
         action: 'DELETE',
         entityName: 'inventory_transactions',
         entityId: txnId,
         oldValue: { qty: txn.quantity, type: txn.type, product: txn.product.model },
-        newValue: { reversed: true, reversalBy: actor.id },
+        newValue: { fullyDeleted: true, reason: 'Deleted by admin — scan error' },
         ipAddress: actor.ip,
       });
 
-      return r;
+      // 4. Hard-delete the transaction record so it never shows in any report
+      await tx.inventoryTransaction.delete({ where: { id: txnId } });
     });
 
-    return {
-      reversed: true,
-      originalTxnId: txnId,
-      productId: txn.productId,
-      reversalQty: -txn.quantity,
-      newStockLevel: result.newQuantity,
-    };
+    return { deleted: true, txnId, productId: txn.productId };
   },
 });
