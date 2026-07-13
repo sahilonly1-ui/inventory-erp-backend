@@ -421,3 +421,30 @@ CREATE INDEX IF NOT EXISTS ix_products_brandid ON products("brandId");
 CREATE INDEX IF NOT EXISTS ix_products_status ON products(status);
 CREATE INDEX IF NOT EXISTS ix_brands_name ON brands(name);
 CREATE INDEX IF NOT EXISTS ix_product_attrs ON product_attributes("productId");
+
+
+-- ════════════════════════════════════════════════════════════════
+-- ADD MISSING COLUMNS (safe to re-run — IF NOT EXISTS prevents errors)
+-- ════════════════════════════════════════════════════════════════
+
+-- Vendor: normalizedName (dedup key), state, notes
+ALTER TABLE vendors ADD COLUMN IF NOT EXISTS "normalizedName" TEXT;
+ALTER TABLE vendors ADD COLUMN IF NOT EXISTS state TEXT;
+ALTER TABLE vendors ADD COLUMN IF NOT EXISTS notes TEXT;
+
+-- IMEI Inventory: type tracking, swiped flag, supplier link
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "imeiType" TEXT NOT NULL DEFAULT 'NIL';
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS swiped BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "supplierId" TEXT;
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "purchaseDate" TIMESTAMPTZ;
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "invoiceNo" TEXT;
+
+-- inventory_transactions: soft-delete columns (for dashboard delete)
+ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "isDeleted" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMPTZ;
+ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "deletedBy" TEXT;
+
+-- Backfill: set normalizedName for existing vendors where it is null
+UPDATE vendors 
+SET "normalizedName" = lower(regexp_replace(trim(name), '\s+', '', 'g'))
+WHERE "normalizedName" IS NULL;
