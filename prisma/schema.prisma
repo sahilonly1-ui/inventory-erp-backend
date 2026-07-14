@@ -618,6 +618,8 @@ enum ProductStatus {
 model Brand {
   id        String    @id @default(uuid())
   name      String    @unique
+  imeiRequired  Boolean   @default(false)
+  srnoRequired  Boolean   @default(false)
   products  Product[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
