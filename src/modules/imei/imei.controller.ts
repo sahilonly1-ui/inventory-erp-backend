@@ -17,7 +17,7 @@ export const imeiController = {
     ok(res, await imeiService.dispatch(req.body, actor(req)), 201);
   }),
   changeStatus: asyncHandler(async (req: Request, res: Response) => {
-    ok(res, await imeiService.changeStatus(req.params.imei, req.body.status, req.body.reason, actor(req)));
+    ok(res, await imeiService.changeStatus(req.params.imei, req.body.status, req.body.reason, actor(req), req.body.swiped));
   }),
   lookup: asyncHandler(async (req: Request, res: Response) => {
     ok(res, await imeiService.lookup(req.params.imei));
