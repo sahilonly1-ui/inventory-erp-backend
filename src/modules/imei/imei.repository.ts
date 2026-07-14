@@ -18,6 +18,7 @@ export const imeiRepository = {
     imeis: { imei1: string; imei2?: string | null; imeiType?: string }[],
     createdBy: string,
     vendorId?: string,
+    stockInTxnId?: string,
   ) {
     return tx.imeiInventory.createMany({
       data: imeis.map((i) => ({
@@ -28,6 +29,7 @@ export const imeiRepository = {
         imeiType: i.imeiType ?? 'NIL',
         status: ImeiStatus.IN_STOCK,
         supplierId: vendorId ?? null,
+        stockInTxnId: stockInTxnId ?? null,
         createdBy,
       })),
     });
