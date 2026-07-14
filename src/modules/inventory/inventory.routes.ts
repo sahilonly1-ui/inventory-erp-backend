@@ -131,20 +131,17 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
     orderBy: { createdAt: 'asc' },
   });
 
-  // For each transaction, fetch its IMEIs using the permanent stockInTxnId link.
-  // This works regardless of when the entry was made — no time windows needed.
+  // For each transaction, fetch IMEIs — no imeiRequired gate (may be false in DB).
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
-    if (t.product.imeiRequired && t.quantity > 0) {
-      // PRIMARY: fetch by stockInTxnId — exact permanent link set at scan time
+    if (t.quantity > 0) {
+      // PRIMARY: stockInTxnId — set at scan time, exact match always
       imeis = await prisma.imeiInventory.findMany({
         where: { stockInTxnId: t.id, isDeleted: false },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
       });
-      // LEGACY FALLBACK: for entries scanned before this fix was deployed,
-      // stockInTxnId will be NULL — fall back to productId+warehouseId+IN_STOCK
-      // capped at transaction quantity so we don't pull wrong IMEIs
+      // LEGACY: for entries before stockInTxnId was added
       if (imeis.length === 0) {
         imeis = await prisma.imeiInventory.findMany({
           where: {
@@ -165,7 +162,7 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
       ean: t.product.ean,
       model: t.product.model,
       brand: t.product.brand,
-      imeiRequired: t.product.imeiRequired,
+      imeiRequired: t.product.imeiRequired || imeis.length > 0, // true if product says so OR IMEIs exist
       quantity: t.quantity,
       remarks: t.remarks,
       vendorId: t.vendor?.id ?? null,
@@ -202,44 +199,70 @@ router.get('/edit-sessions/:id', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyn
 }));
 
 
-// ── Admin: purge orphaned IMEI records ───────────────────────────────────────
-// One-time cleanup for IMEI records stuck with isDeleted=false even though
-// their linked InventoryTransaction was deleted. Also cleans records with
-// no matching active transaction at all.
+// ── Admin: full purge — delete ALL imei + transaction data (fresh start) ────
 router.post('/admin/cleanup-orphaned-imeis', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
-  // Find all imei_inventory records where:
-  // 1. isDeleted = false (still showing in tracker)
-  // 2. BUT no active STOCK_IN InventoryTransaction exists for them
-  //    (meaning the transaction was deleted but IMEI wasn't cleaned up)
-  const stuck = await prisma.$queryRaw<{id: string; imei1: string; productId: string}[]>`
-    SELECT ii.id, ii.imei1, ii."productId"
-    FROM imei_inventory ii
-    WHERE ii."isDeleted" = false
-      AND ii.status = 'IN_STOCK'
-      AND NOT EXISTS (
-        SELECT 1 FROM inventory_transactions it
-        WHERE it."productId" = ii."productId"
-          AND it."warehouseId" = ii."warehouseId"
-          AND it.type = 'STOCK_IN'
-          AND it.quantity > 0
-      )
-  `;
+  const { purgeAll } = req.body;
 
-  if (stuck.length === 0) {
-    ok(res, { cleaned: 0, message: 'No orphaned IMEI records found' });
+  if (purgeAll) {
+    // FULL PURGE: delete ALL imei_inventory and ALL inventory_transactions
+    // Resets stock levels to 0 as well. Used for a clean slate.
+    await prisma.$transaction(async (tx) => {
+      await tx.imeiInventory.deleteMany({});
+      await tx.inventoryTransaction.deleteMany({});
+      await tx.stockLevel.updateMany({ data: { quantity: 0 } });
+    });
+    ok(res, { cleaned: 'ALL', message: 'Full purge complete — all IMEI records, transactions and stock levels reset to zero' });
     return;
   }
 
-  const stuckIds = stuck.map(r => r.id);
-  const result = await prisma.imeiInventory.updateMany({
-    where: { id: { in: stuckIds }, isDeleted: false },
-    data: { isDeleted: true, deletedAt: new Date(), deletedBy: req.user!.id },
+  // SELECTIVE PURGE: remove orphaned IMEIs and their ghost transactions
+  // Step 1: Soft-delete IMEI records that shouldn't exist
+  const allImeis = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false },
+    select: { id: true, imei1: true, productId: true, warehouseId: true, stockInTxnId: true }
   });
 
+  const orphanedIds: string[] = [];
+  for (const ii of allImeis) {
+    if (ii.stockInTxnId) {
+      // Check if linked transaction still exists
+      const txn = await prisma.inventoryTransaction.findUnique({ where: { id: ii.stockInTxnId } });
+      if (!txn) orphanedIds.push(ii.id);
+    } else {
+      // No transaction link — check if any STOCK_IN txn exists for this product
+      const txn = await prisma.inventoryTransaction.findFirst({
+        where: { productId: ii.productId, warehouseId: ii.warehouseId, type: 'STOCK_IN', quantity: { gt: 0 } }
+      });
+      if (!txn) orphanedIds.push(ii.id);
+    }
+  }
+
+  let cleanedImeis = 0;
+  if (orphanedIds.length) {
+    const r = await prisma.imeiInventory.updateMany({
+      where: { id: { in: orphanedIds }, isDeleted: false },
+      data: { isDeleted: true, deletedAt: new Date(), deletedBy: req.user!.id },
+    });
+    cleanedImeis = r.count;
+  }
+
+  // Step 2: Fix stock levels to match remaining valid IMEI records
+  const stockCounts = await prisma.imeiInventory.groupBy({
+    by: ['productId', 'warehouseId'],
+    where: { isDeleted: false, status: 'IN_STOCK' },
+    _count: { id: true },
+  });
+
+  for (const sc of stockCounts) {
+    await prisma.stockLevel.updateMany({
+      where: { productId: sc.productId, warehouseId: sc.warehouseId },
+      data: { quantity: sc._count.id },
+    });
+  }
+
   ok(res, {
-    cleaned: result.count,
-    imeis: stuck.map(r => r.imei1),
-    message: `Cleaned ${result.count} orphaned IMEI records`,
+    cleanedImeis,
+    message: `Cleaned ${cleanedImeis} orphaned IMEI records and recalculated stock levels`,
   });
 }));
 
