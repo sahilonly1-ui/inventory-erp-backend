@@ -457,7 +457,7 @@ export const productService = {
     costPriceMin?: number; costPriceMax?: number;
     sellingPriceMin?: number; sellingPriceMax?: number;
     createdFrom?: string; createdTo?: string;
-    lowStock?: boolean; outOfStock?: boolean;
+    lowStock?: boolean; outOfStock?: boolean; withStock?: boolean;
     page: number; limit: number; sortBy?: string; sortDir?: 'asc' | 'desc';
   }) {
     const [items, total] = await productRepository.list({
