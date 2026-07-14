@@ -448,3 +448,6 @@ ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "deletedBy" TEXT;
 UPDATE vendors 
 SET "normalizedName" = lower(regexp_replace(trim(name), '\s+', '', 'g'))
 WHERE "normalizedName" IS NULL;
+
+-- imei_inventory: swipedAt timestamp for tracking when IMEI was swiped
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "swipedAt" TIMESTAMPTZ;
