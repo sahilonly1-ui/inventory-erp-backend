@@ -546,7 +546,6 @@ Object.assign(inventoryService, {
         userId: actor.id, action: 'DELETE',
         entityName: 'inventory_transactions', entityId: txnId,
         oldValue: {
-          // Full transaction data for restore
           productId: txn.productId, warehouseId: txn.warehouseId,
           type: txn.type, quantity: txn.quantity,
           vendorId: txn.vendorId ?? null, remarks: txn.remarks ?? null,
@@ -563,4 +562,71 @@ Object.assign(inventoryService, {
 
     return { deleted: true, txnId, productId: txn.productId };
   },
+
+  // ── Bulk-delete a supplier's full batch (one grouped audit entry) ──────────
+  // Called when user clicks "Delete" on a vendor card in Dashboard.
+  // Deletes all transactions in one DB transaction and writes a SINGLE
+  // Version History entry showing the whole batch — not one entry per product.
+  async bulkReverseTransactions(txnIds: string[], actor: { id: string; ip: string | null }) {
+    if (!txnIds.length) return { deleted: 0 };
+
+    const txns = await prisma.inventoryTransaction.findMany({
+      where: { id: { in: txnIds } },
+      include: { product: { select: { id: true, model: true, imeiRequired: true } }, vendor: { select: { name: true } } },
+    });
+    if (!txns.length) throw new BadRequestError('No transactions found');
+
+    const vendorName = txns[0].vendor?.name ?? 'Unknown Supplier';
+    const totalQty = txns.reduce((s, t) => s + Math.abs(t.quantity), 0);
+
+    // Build a summary of what was deleted (for Version History display)
+    const productSummary: Record<string, number> = {};
+    for (const t of txns) {
+      const m = t.product.model;
+      productSummary[m] = (productSummary[m] || 0) + Math.abs(t.quantity);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      for (const txn of txns) {
+        // 1. Undo stock level
+        await tx.stockLevel.updateMany({
+          where: { productId: txn.productId, warehouseId: txn.warehouseId },
+          data: { quantity: { decrement: txn.quantity } },
+        });
+
+        // 2. Soft-delete IMEI records within ±5 min window
+        if (txn.quantity > 0 && txn.product.imeiRequired) {
+          const since = new Date(txn.createdAt.getTime() - 5 * 60_000);
+          const until = new Date(txn.createdAt.getTime() + 5 * 60_000);
+          await tx.imeiInventory.updateMany({
+            where: { productId: txn.productId, warehouseId: txn.warehouseId, status: { in: ['IN_STOCK', 'RETURNED'] }, isDeleted: false, createdAt: { gte: since, lte: until } },
+            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+          });
+        }
+
+        // 3. Hard-delete the transaction
+        await tx.inventoryTransaction.delete({ where: { id: txn.id } });
+      }
+
+      // 4. Write ONE grouped audit entry for the whole batch
+      await writeAudit(tx, {
+        userId: actor.id, action: 'DELETE',
+        entityName: 'inventory_transactions',
+        entityId: txnIds[0], // anchor on first txn id
+        oldValue: {
+          bulk: true,
+          txnIds,
+          vendor: vendorName,
+          totalQty,
+          products: productSummary,
+          deletedAt: new Date().toISOString(),
+        },
+        newValue: { fullyDeleted: true, txnCount: txnIds.length, reason: `Bulk deleted — ${vendorName} entry` },
+        ipAddress: actor.ip,
+      });
+    });
+
+    return { deleted: txnIds.length, vendor: vendorName, totalQty };
+  },
 });
+
