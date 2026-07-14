@@ -142,12 +142,12 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
           warehouseId: t.warehouseId,
           isDeleted: false,
           status: 'IN_STOCK',
-          // Match supplier when available to avoid pulling other suppliers' IMEIs
-          ...(t.vendorId ? { supplierId: t.vendorId } : {}),
+          // NOTE: Do NOT filter by supplierId — it may be NULL in older records
+          // (race condition during original scan). The `take` cap ensures correctness.
         },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
-        take: Math.abs(t.quantity), // cap at stocked quantity
+        take: Math.abs(t.quantity), // cap at transaction quantity
       });
     }
     return {
