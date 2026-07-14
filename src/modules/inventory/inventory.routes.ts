@@ -201,6 +201,48 @@ router.get('/edit-sessions/:id', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyn
   ok(res, entry.data);
 }));
 
+
+// ── Admin: purge orphaned IMEI records ───────────────────────────────────────
+// One-time cleanup for IMEI records stuck with isDeleted=false even though
+// their linked InventoryTransaction was deleted. Also cleans records with
+// no matching active transaction at all.
+router.post('/admin/cleanup-orphaned-imeis', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  // Find all imei_inventory records where:
+  // 1. isDeleted = false (still showing in tracker)
+  // 2. BUT no active STOCK_IN InventoryTransaction exists for them
+  //    (meaning the transaction was deleted but IMEI wasn't cleaned up)
+  const stuck = await prisma.$queryRaw<{id: string; imei1: string; productId: string}[]>`
+    SELECT ii.id, ii.imei1, ii."productId"
+    FROM imei_inventory ii
+    WHERE ii."isDeleted" = false
+      AND ii.status = 'IN_STOCK'
+      AND NOT EXISTS (
+        SELECT 1 FROM inventory_transactions it
+        WHERE it."productId" = ii."productId"
+          AND it."warehouseId" = ii."warehouseId"
+          AND it.type = 'STOCK_IN'
+          AND it.quantity > 0
+      )
+  `;
+
+  if (stuck.length === 0) {
+    ok(res, { cleaned: 0, message: 'No orphaned IMEI records found' });
+    return;
+  }
+
+  const stuckIds = stuck.map(r => r.id);
+  const result = await prisma.imeiInventory.updateMany({
+    where: { id: { in: stuckIds }, isDeleted: false },
+    data: { isDeleted: true, deletedAt: new Date(), deletedBy: req.user!.id },
+  });
+
+  ok(res, {
+    cleaned: result.count,
+    imeis: stuck.map(r => r.imei1),
+    message: `Cleaned ${result.count} orphaned IMEI records`,
+  });
+}));
+
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
 router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   ok(res, await inventoryController.bulkReverseTransactions(req, res));
