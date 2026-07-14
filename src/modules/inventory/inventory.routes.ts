@@ -115,6 +115,11 @@ router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_AD
   ok(res, { restored: true, auditId: req.params.auditId });
 }));
 
+// ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
+router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await inventoryController.bulkReverseTransactions(req, res));
+}));
+
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
 router.delete('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   const actor = { id: req.user!.id, ip: req.ip ?? null };
