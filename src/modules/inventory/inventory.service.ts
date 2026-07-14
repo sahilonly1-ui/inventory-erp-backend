@@ -550,22 +550,23 @@ Object.assign(inventoryService, {
         data: { quantity: { decrement: txn.quantity } },
       });
 
-      // 2. Soft-delete the IMEI records linked to this transaction
-      if (txn.quantity > 0 && txn.product.imeiRequired) {
-        // PRIMARY: use stockInTxnId — permanent link added when IMEI was scanned
+      // 2. Soft-delete ALL IMEI records linked to this transaction.
+      // Do NOT gate on product.imeiRequired — it may be false even for phones
+      // (data issue in Product Master). Always attempt deletion; no-op if none exist.
+      if (txn.quantity > 0) {
+        // PRIMARY: exact match via stockInTxnId (set since the fix was deployed)
         const byTxnId = await tx.imeiInventory.updateMany({
           where: { stockInTxnId: txnId, isDeleted: false },
           data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
         });
-        // LEGACY FALLBACK: for old entries before stockInTxnId was introduced,
-        // fall back to a wide 24h window to catch all IMEIs from that day's batch
+        // LEGACY FALLBACK: delete ALL in-stock IMEIs for this product+warehouse
+        // No supplierId filter — it may be NULL due to old race condition
         if (byTxnId.count === 0) {
-          const since = new Date(txn.createdAt.getTime() - 24 * 60 * 60_000);
-          const until = new Date(txn.createdAt.getTime() + 24 * 60 * 60_000);
           await tx.imeiInventory.updateMany({
             where: {
-              productId: txn.productId, warehouseId: txn.warehouseId,
-              isDeleted: false, createdAt: { gte: since, lte: until },
+              productId: txn.productId,
+              warehouseId: txn.warehouseId,
+              isDeleted: false,
             },
             data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
           });
@@ -625,19 +626,19 @@ Object.assign(inventoryService, {
           data: { quantity: { decrement: txn.quantity } },
         });
 
-        // 2. Soft-delete IMEI records — use stockInTxnId first, then legacy fallback
-        if (txn.quantity > 0 && txn.product.imeiRequired) {
+        // 2. Soft-delete IMEI records — no imeiRequired gate (may be false in DB)
+        if (txn.quantity > 0) {
           const byTxnId = await tx.imeiInventory.updateMany({
             where: { stockInTxnId: txn.id, isDeleted: false },
             data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
           });
           if (byTxnId.count === 0) {
-            const since = new Date(txn.createdAt.getTime() - 24 * 60 * 60_000);
-            const until = new Date(txn.createdAt.getTime() + 24 * 60 * 60_000);
+            // No supplierId filter — may be NULL due to old race condition
             await tx.imeiInventory.updateMany({
               where: {
-                productId: txn.productId, warehouseId: txn.warehouseId,
-                isDeleted: false, createdAt: { gte: since, lte: until },
+                productId: txn.productId,
+                warehouseId: txn.warehouseId,
+                isDeleted: false,
               },
               data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
             });
