@@ -131,29 +131,20 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
     orderBy: { createdAt: 'asc' },
   });
 
-  // For each transaction, fetch current IN_STOCK IMEIs by productId+warehouseId+supplier
-  // No time window — so entries from days ago can be edited correctly.
+  // For each transaction, fetch its IMEIs using the permanent stockInTxnId link.
+  // This works regardless of when the entry was made — no time windows needed.
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
     if (t.product.imeiRequired && t.quantity > 0) {
-      // Strategy 1: find IMEIs created within ±30min of this transaction
-      // This correctly isolates THIS batch even if same product was stocked multiple times
-      const since = new Date(t.createdAt.getTime() - 30 * 60_000);
-      const until = new Date(t.createdAt.getTime() + 30 * 60_000);
+      // PRIMARY: fetch by stockInTxnId — exact permanent link set at scan time
       imeis = await prisma.imeiInventory.findMany({
-        where: {
-          productId: t.productId,
-          warehouseId: t.warehouseId,
-          isDeleted: false,
-          status: 'IN_STOCK',
-          createdAt: { gte: since, lte: until },
-        },
+        where: { stockInTxnId: t.id, isDeleted: false },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
-        take: Math.abs(t.quantity),
       });
-      // Strategy 2 fallback: if time window finds nothing (e.g. old entries with clock skew),
-      // just get the oldest IN_STOCK IMEIs for this product up to the quantity
+      // LEGACY FALLBACK: for entries scanned before this fix was deployed,
+      // stockInTxnId will be NULL — fall back to productId+warehouseId+IN_STOCK
+      // capped at transaction quantity so we don't pull wrong IMEIs
       if (imeis.length === 0) {
         imeis = await prisma.imeiInventory.findMany({
           where: {
