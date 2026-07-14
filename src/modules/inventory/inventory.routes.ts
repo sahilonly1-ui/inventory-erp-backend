@@ -136,19 +136,37 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
     if (t.product.imeiRequired && t.quantity > 0) {
+      // Strategy 1: find IMEIs created within ±30min of this transaction
+      // This correctly isolates THIS batch even if same product was stocked multiple times
+      const since = new Date(t.createdAt.getTime() - 30 * 60_000);
+      const until = new Date(t.createdAt.getTime() + 30 * 60_000);
       imeis = await prisma.imeiInventory.findMany({
         where: {
           productId: t.productId,
           warehouseId: t.warehouseId,
           isDeleted: false,
           status: 'IN_STOCK',
-          // NOTE: Do NOT filter by supplierId — it may be NULL in older records
-          // (race condition during original scan). The `take` cap ensures correctness.
+          createdAt: { gte: since, lte: until },
         },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
-        take: Math.abs(t.quantity), // cap at transaction quantity
+        take: Math.abs(t.quantity),
       });
+      // Strategy 2 fallback: if time window finds nothing (e.g. old entries with clock skew),
+      // just get the oldest IN_STOCK IMEIs for this product up to the quantity
+      if (imeis.length === 0) {
+        imeis = await prisma.imeiInventory.findMany({
+          where: {
+            productId: t.productId,
+            warehouseId: t.warehouseId,
+            isDeleted: false,
+            status: 'IN_STOCK',
+          },
+          select: { id: true, imei1: true, imeiType: true, status: true },
+          orderBy: { createdAt: 'asc' },
+          take: Math.abs(t.quantity),
+        });
+      }
     }
     return {
       id: t.id,
