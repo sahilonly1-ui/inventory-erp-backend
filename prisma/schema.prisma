@@ -410,6 +410,7 @@ model ImeiInventory {
   swipedAt    DateTime? // timestamp when swiped was last toggled on
   supplierId  String?
   supplier    Vendor? @relation(fields: [supplierId], references: [id])
+  stockInTxnId  String? // links this IMEI to the exact InventoryTransaction it came from
   purchaseDate DateTime?
   invoiceNo   String?
 
