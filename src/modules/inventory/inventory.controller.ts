@@ -14,6 +14,11 @@ export const inventoryController = {
   stockIn: asyncHandler(async (req: Request, res: Response) => {
     ok(res, await inventoryService.stockIn(req.body, actor(req)), 201);
   }),
+  bulkReverseTransactions: asyncHandler(async (req: Request, res: Response) => {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || !ids.length) throw new Error('ids array required');
+    ok(res, await (inventoryService as any).bulkReverseTransactions(ids, actor(req)));
+  }),
   stockOut: asyncHandler(async (req: Request, res: Response) => {
     ok(res, await inventoryService.stockOut(req.body, actor(req)), 201);
   }),
@@ -45,3 +50,4 @@ export const inventoryController = {
     }
   }),
 };
+
