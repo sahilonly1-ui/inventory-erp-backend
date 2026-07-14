@@ -104,9 +104,12 @@ export const imeiService = {
 
       const delta = statusStockDelta(row.status, target);
       await imeiRepository.setStatus(tx, [row.id], target, actor.id);
-      // Update swiped flag if provided (used by IMEI Tracker toggle)
+      // Update swiped flag if provided; record timestamp when swiping on
       if (swiped !== undefined) {
-        await tx.imeiInventory.update({ where: { id: row.id }, data: { swiped, updatedBy: actor.id } });
+        await tx.imeiInventory.update({
+          where: { id: row.id },
+          data: { swiped, swipedAt: swiped ? new Date() : null, updatedBy: actor.id },
+        });
       }
 
       let newQuantity: number | null = null;
