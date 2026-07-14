@@ -45,7 +45,7 @@ export const productRepository = {
     costPriceMin?: number; costPriceMax?: number;
     sellingPriceMin?: number; sellingPriceMax?: number;
     createdFrom?: string; createdTo?: string;
-    lowStock?: boolean; outOfStock?: boolean;
+    lowStock?: boolean; outOfStock?: boolean; withStock?: boolean;
     skip: number; take: number;
     sortBy?: string; sortDir?: 'asc' | 'desc';
   }) {
@@ -109,6 +109,7 @@ export const productRepository = {
         ]}))};
       })() : {}),
       ...(params.outOfStock ? { stockLevels: { none:  { quantity: { gt: 0 } } } } : {}),
+      ...((params as any).withStock ? { stockLevels: { some:  { quantity: { gt: 0 } } } } : {}),
       ...(params.warehouseId ? { stockLevels: { some: { warehouseId: params.warehouseId } } } : {}),
     };
 
