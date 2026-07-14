@@ -33,6 +33,7 @@ export const imeiService = {
         warehouseId: input.warehouseId,
         type: TransactionType.STOCK_IN,
         signedQty: input.imeis.length,
+        vendorId: input.vendorId ?? (input as any).vendorId ?? null,
         referenceType: 'IMEI_RECEIVE',
         remarks: input.remarks ?? null,
       }, actor);
