@@ -254,10 +254,24 @@ export const inventoryService = {
     const product = await repo.findProductByEan(ean);
     if (!product) throw new NotFoundError(`No active product for EAN ${ean}`);
     const levels = await repo.stockByProduct(product.id);
+
+    // Fetch brand-level IMEI/SrNo requirements
+    const brandRecord = product.brand
+      ? await prisma.brand.findFirst({ where: { name: product.brand, isDeleted: false }, select: { imeiRequired: true, srnoRequired: true } })
+      : null;
+
+    // Effective requirement = product setting OR brand setting
+    const imeiRequired = product.imeiRequired || (brandRecord?.imeiRequired ?? false);
+    const srnoRequired = brandRecord?.srnoRequired ?? false;
+
     return {
       product: {
         id: product.id, ean: product.ean, sku: product.sku,
-        model: product.model, brand: product.brand, imeiRequired: product.imeiRequired,
+        model: product.model, brand: product.brand,
+        imeiRequired,      // effective: product OR brand level
+        srnoRequired,      // brand level
+        brandImeiRequired: brandRecord?.imeiRequired ?? false,
+        brandSrnoRequired: brandRecord?.srnoRequired ?? false,
       },
       total: levels.reduce((sum, l) => sum + l.quantity, 0),
       byWarehouse: levels.map((l) => ({
@@ -536,14 +550,26 @@ Object.assign(inventoryService, {
         data: { quantity: { decrement: txn.quantity } },
       });
 
-      // 2. For IMEI stock-ins, soft-delete the IMEI records created within ±5 min
+      // 2. Soft-delete the IMEI records linked to this transaction
       if (txn.quantity > 0 && txn.product.imeiRequired) {
-        const since = new Date(txn.createdAt.getTime() - 5 * 60_000);
-        const until = new Date(txn.createdAt.getTime() + 5 * 60_000);
-        await tx.imeiInventory.updateMany({
-          where: { productId: txn.productId, warehouseId: txn.warehouseId, status: { in: ['IN_STOCK', 'RETURNED'] }, isDeleted: false, createdAt: { gte: since, lte: until } },
+        // PRIMARY: use stockInTxnId — permanent link added when IMEI was scanned
+        const byTxnId = await tx.imeiInventory.updateMany({
+          where: { stockInTxnId: txnId, isDeleted: false },
           data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
         });
+        // LEGACY FALLBACK: for old entries before stockInTxnId was introduced,
+        // fall back to a wide 24h window to catch all IMEIs from that day's batch
+        if (byTxnId.count === 0) {
+          const since = new Date(txn.createdAt.getTime() - 24 * 60 * 60_000);
+          const until = new Date(txn.createdAt.getTime() + 24 * 60 * 60_000);
+          await tx.imeiInventory.updateMany({
+            where: {
+              productId: txn.productId, warehouseId: txn.warehouseId,
+              isDeleted: false, createdAt: { gte: since, lte: until },
+            },
+            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+          });
+        }
       }
 
       // 3. Write audit log with FULL data (needed for restore)
@@ -599,14 +625,23 @@ Object.assign(inventoryService, {
           data: { quantity: { decrement: txn.quantity } },
         });
 
-        // 2. Soft-delete IMEI records within ±5 min window
+        // 2. Soft-delete IMEI records — use stockInTxnId first, then legacy fallback
         if (txn.quantity > 0 && txn.product.imeiRequired) {
-          const since = new Date(txn.createdAt.getTime() - 5 * 60_000);
-          const until = new Date(txn.createdAt.getTime() + 5 * 60_000);
-          await tx.imeiInventory.updateMany({
-            where: { productId: txn.productId, warehouseId: txn.warehouseId, status: { in: ['IN_STOCK', 'RETURNED'] }, isDeleted: false, createdAt: { gte: since, lte: until } },
+          const byTxnId = await tx.imeiInventory.updateMany({
+            where: { stockInTxnId: txn.id, isDeleted: false },
             data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
           });
+          if (byTxnId.count === 0) {
+            const since = new Date(txn.createdAt.getTime() - 24 * 60 * 60_000);
+            const until = new Date(txn.createdAt.getTime() + 24 * 60 * 60_000);
+            await tx.imeiInventory.updateMany({
+              where: {
+                productId: txn.productId, warehouseId: txn.warehouseId,
+                isDeleted: false, createdAt: { gte: since, lte: until },
+              },
+              data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            });
+          }
         }
 
         // 3. Hard-delete the transaction
