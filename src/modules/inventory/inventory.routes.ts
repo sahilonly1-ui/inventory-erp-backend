@@ -131,22 +131,23 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
     orderBy: { createdAt: 'asc' },
   });
 
-  // For each transaction, fetch the IMEIs that were created within ±10 min
+  // For each transaction, fetch current IN_STOCK IMEIs by productId+warehouseId+supplier
+  // No time window — so entries from days ago can be edited correctly.
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
     if (t.product.imeiRequired && t.quantity > 0) {
-      const since = new Date(t.createdAt.getTime() - 10 * 60_000);
-      const until = new Date(t.createdAt.getTime() + 10 * 60_000);
       imeis = await prisma.imeiInventory.findMany({
         where: {
           productId: t.productId,
           warehouseId: t.warehouseId,
           isDeleted: false,
           status: 'IN_STOCK',
-          createdAt: { gte: since, lte: until },
+          // Match supplier when available to avoid pulling other suppliers' IMEIs
+          ...(t.vendorId ? { supplierId: t.vendorId } : {}),
         },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
+        take: Math.abs(t.quantity), // cap at stocked quantity
       });
     }
     return {
@@ -168,6 +169,27 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
   }));
 
   ok(res, { transactions: enriched });
+}));
+
+
+// ── Edit Session store (server-side, survives page refresh, 24h TTL) ───────
+// Stores the full draft row list for a stock-in edit so localStorage isn't needed.
+const EDIT_SESSIONS = new Map<string, { data: any; expires: number }>();
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+router.post('/edit-sessions', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const id = `es_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  EDIT_SESSIONS.set(id, { data: req.body, expires: Date.now() + SESSION_TTL });
+  // Prune expired sessions
+  for (const [k, v] of EDIT_SESSIONS) { if (v.expires < Date.now()) EDIT_SESSIONS.delete(k); }
+  ok(res, { sessionId: id });
+}));
+
+router.get('/edit-sessions/:id', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const entry = EDIT_SESSIONS.get(req.params.id);
+  if (!entry || entry.expires < Date.now()) throw new BadRequestError('Edit session not found or expired');
+  EDIT_SESSIONS.delete(req.params.id); // consume once
+  ok(res, entry.data);
 }));
 
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
