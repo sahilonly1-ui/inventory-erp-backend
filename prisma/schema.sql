@@ -451,3 +451,7 @@ WHERE "normalizedName" IS NULL;
 
 -- imei_inventory: swipedAt timestamp for tracking when IMEI was swiped
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "swipedAt" TIMESTAMPTZ;
+
+-- imei_inventory: stockInTxnId — permanent link to the InventoryTransaction that created this IMEI
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "stockInTxnId" TEXT REFERENCES inventory_transactions(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS imei_inventory_stock_in_txn_id ON imei_inventory("stockInTxnId");
