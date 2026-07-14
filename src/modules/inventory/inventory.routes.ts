@@ -115,6 +115,61 @@ router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_AD
   ok(res, { restored: true, auditId: req.params.auditId });
 }));
 
+
+// ── Fetch full entry detail for editing (products + IMEIs per transaction) ──
+router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  const ids = String(req.query.ids || '').split(',').filter(Boolean);
+  if (!ids.length) throw new BadRequestError('ids query param required');
+
+  const txns = await prisma.inventoryTransaction.findMany({
+    where: { id: { in: ids } },
+    include: {
+      product: { select: { id: true, ean: true, model: true, brand: true, imeiRequired: true } },
+      vendor:  { select: { id: true, name: true } },
+      warehouse: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  // For each transaction, fetch the IMEIs that were created within ±10 min
+  const enriched = await Promise.all(txns.map(async (t) => {
+    let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
+    if (t.product.imeiRequired && t.quantity > 0) {
+      const since = new Date(t.createdAt.getTime() - 10 * 60_000);
+      const until = new Date(t.createdAt.getTime() + 10 * 60_000);
+      imeis = await prisma.imeiInventory.findMany({
+        where: {
+          productId: t.productId,
+          warehouseId: t.warehouseId,
+          isDeleted: false,
+          status: 'IN_STOCK',
+          createdAt: { gte: since, lte: until },
+        },
+        select: { id: true, imei1: true, imeiType: true, status: true },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
+    return {
+      id: t.id,
+      productId: t.product.id,
+      ean: t.product.ean,
+      model: t.product.model,
+      brand: t.product.brand,
+      imeiRequired: t.product.imeiRequired,
+      quantity: t.quantity,
+      remarks: t.remarks,
+      vendorId: t.vendor?.id ?? null,
+      vendorName: t.vendor?.name ?? null,
+      warehouseId: t.warehouseId,
+      warehouseName: t.warehouse.name,
+      createdAt: t.createdAt,
+      imeis,
+    };
+  }));
+
+  ok(res, { transactions: enriched });
+}));
+
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
 router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   ok(res, await inventoryController.bulkReverseTransactions(req, res));
