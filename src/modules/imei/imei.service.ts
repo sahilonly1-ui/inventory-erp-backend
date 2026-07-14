@@ -27,7 +27,7 @@ export const imeiService = {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      await imeiRepository.createReceived(tx, input.productId, input.warehouseId, input.imeis, actor.id, (input as any).vendorId);
+      // Create the InventoryTransaction FIRST so we get its ID to link to IMEI records
       const move = await applyLedgerMovementTx(tx, {
         productId: input.productId,
         warehouseId: input.warehouseId,
@@ -37,6 +37,11 @@ export const imeiService = {
         referenceType: 'IMEI_RECEIVE',
         remarks: input.remarks ?? null,
       }, actor);
+      // Create IMEI records linked to this exact transaction — enables time-independent edit
+      await imeiRepository.createReceived(
+        tx, input.productId, input.warehouseId, input.imeis,
+        actor.id, (input as any).vendorId, move.transactionId,
+      );
       // strict: same-tx writes must reconcile, or we roll back.
       await assertConsistentTx(tx, input.productId, input.warehouseId, true, { strict: true });
       return move;
