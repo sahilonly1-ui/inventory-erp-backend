@@ -59,6 +59,7 @@ export const listProductsSchema = z.object({
   createdTo:       z.string().optional(),
   lowStock:        booleanish.optional(),
   outOfStock:      booleanish.optional(),
+  withStock:       booleanish.optional(),
   page:            z.coerce.number().int().positive().default(1),
   limit:           z.coerce.number().int().positive().max(2000).default(50),
   sortBy:          z.string().optional(),
