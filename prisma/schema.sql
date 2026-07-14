@@ -455,3 +455,35 @@ ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "swipedAt" TIMESTAMPTZ;
 -- imei_inventory: stockInTxnId — permanent link to the InventoryTransaction that created this IMEI
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "stockInTxnId" TEXT REFERENCES inventory_transactions(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS imei_inventory_stock_in_txn_id ON imei_inventory("stockInTxnId");
+
+-- brands: add imeiRequired and srnoRequired columns
+ALTER TABLE brands ADD COLUMN IF NOT EXISTS "imeiRequired" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE brands ADD COLUMN IF NOT EXISTS "srnoRequired" BOOLEAN NOT NULL DEFAULT false;
+
+-- Pre-populate brand IMEI/SrNo requirements from brand configuration
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Amazon';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Apple';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Bang & Olufsen';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Google';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Harman Kardon';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Honor';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Infinity';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Infinix';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='JBL';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Lenovo';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='LG';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Marshall';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Micromax';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Motorola';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Nokia';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Nothing';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='OnePlus';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='OPPO';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Poco';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Realme';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Samsung';
+UPDATE brands SET "imeiRequired"=false, "srnoRequired"=true WHERE name='Sennheiser';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Tecno';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Videocon';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Vivo';
+UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Xiaomi';
