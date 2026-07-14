@@ -96,7 +96,7 @@ export const imeiService = {
   },
 
   // Operator status transition (block / damage / open-box / return / restock).
-  async changeStatus(imei: string, target: ImeiStatus, reason: string | undefined, actor: Actor) {
+  async changeStatus(imei: string, target: ImeiStatus, reason: string | undefined, actor: Actor, swiped?: boolean) {
     const result = await prisma.$transaction(async (tx) => {
       const [row] = await imeiRepository.lockByImei1(tx, [imei]);
       if (!row) throw new NotFoundError(`IMEI ${imei} not found`);
@@ -104,6 +104,10 @@ export const imeiService = {
 
       const delta = statusStockDelta(row.status, target);
       await imeiRepository.setStatus(tx, [row.id], target, actor.id);
+      // Update swiped flag if provided (used by IMEI Tracker toggle)
+      if (swiped !== undefined) {
+        await tx.imeiInventory.update({ where: { id: row.id }, data: { swiped, updatedBy: actor.id } });
+      }
 
       let newQuantity: number | null = null;
       if (delta !== 0) {
