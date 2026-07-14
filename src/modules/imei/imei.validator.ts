@@ -33,6 +33,7 @@ export const changeStatusSchema = z.object({
     .nativeEnum(ImeiStatus)
     .refine((s) => s !== ImeiStatus.SOLD, 'Use /imei/dispatch to mark a unit SOLD'),
   reason: z.string().max(500).optional(),
+  swiped: z.boolean().optional(),
 });
 
 export const imeiParamSchema = z.object({ imei: z.string().regex(/^\d{14,17}$/) });
