@@ -407,6 +407,7 @@ model ImeiInventory {
   status      ImeiStatus @default(IN_STOCK)
   imeiType    String @default("NIL") // NIL | OPEN_BOX | DEMO | SECOND_IMEI
   swiped      Boolean @default(false)
+  swipedAt    DateTime? // timestamp when swiped was last toggled on
   supplierId  String?
   supplier    Vendor? @relation(fields: [supplierId], references: [id])
   purchaseDate DateTime?
