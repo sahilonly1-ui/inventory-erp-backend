@@ -19,7 +19,7 @@ router.post('/receive', authorize(PERMISSIONS.IMEI_MANAGE), validate(receiveImei
 router.post('/dispatch', authorize(PERMISSIONS.IMEI_MANAGE), validate(dispatchImeiSchema), imeiController.dispatch);
 router.patch('/:imei/status', authorize(PERMISSIONS.IMEI_MANAGE), validate(imeiParamSchema, 'params'), validate(changeStatusSchema), imeiController.changeStatus);
 
-// ── Toggle swiped only — dedicated endpoint avoids status early-return bug ──
+// ── Toggle swiped only ───────────────────────────────────────────────────────
 router.patch('/:id/swiped', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
   const { swiped } = req.body;
   if (typeof swiped !== 'boolean') throw new BadRequestError('swiped must be boolean');
@@ -29,6 +29,18 @@ router.patch('/:id/swiped', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(asy
     data: { swiped, swipedAt: swiped ? new Date() : null, updatedBy: actor.id },
   });
   ok(res, { id: updated.id, swiped: updated.swiped, swipedAt: updated.swipedAt });
+}));
+
+// ── Toggle activated (unit demo'd/activated by customer) ─────────────────────
+router.patch('/:id/activated', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
+  const { activated } = req.body;
+  if (typeof activated !== 'boolean') throw new BadRequestError('activated must be boolean');
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const updated = await prisma.imeiInventory.update({
+    where: { id: req.params.id },
+    data: { activated, activatedAt: activated ? new Date() : null, updatedBy: actor.id },
+  });
+  ok(res, { id: updated.id, activated: updated.activated, activatedAt: updated.activatedAt });
 }));
 
 router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'query'), imeiController.list);
