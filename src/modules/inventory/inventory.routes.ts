@@ -51,17 +51,25 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     orderBy: [{ brand: 'asc' }, { model: 'asc' }],
   });
   const imeiProductIds = products.filter(p => p.imeiRequired).map(p => p.id);
-  const imeiCounts = await prisma.imeiInventory.groupBy({
-    by: ['productId', 'activated'],
+  // Count total IN_STOCK per product
+  const totalCounts = await prisma.imeiInventory.groupBy({
+    by: ['productId'],
     where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK' },
     _count: { id: true },
   });
+  // Count activated=true units per product (ACC column)
+  const activatedCounts = await prisma.imeiInventory.groupBy({
+    by: ['productId'],
+    where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK', activated: true },
+    _count: { id: true },
+  });
   const imeiMap = new Map<string, { total: number; activated: number }>();
-  for (const row of imeiCounts) {
-    if (!imeiMap.has(row.productId)) imeiMap.set(row.productId, { total: 0, activated: 0 });
-    const entry = imeiMap.get(row.productId)!;
-    entry.total += row._count.id;
-    if ((row as any).activated) entry.activated += row._count.id;
+  for (const row of totalCounts) {
+    imeiMap.set(row.productId, { total: row._count.id, activated: 0 });
+  }
+  for (const row of activatedCounts) {
+    const entry = imeiMap.get(row.productId);
+    if (entry) entry.activated = row._count.id;
   }
   const rows = products.map(p => {
     const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
