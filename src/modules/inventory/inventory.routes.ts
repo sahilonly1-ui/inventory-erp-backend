@@ -52,16 +52,16 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   });
   const imeiProductIds = products.filter(p => p.imeiRequired).map(p => p.id);
   const imeiCounts = await prisma.imeiInventory.groupBy({
-    by: ['productId', 'swiped'],
+    by: ['productId', 'activated'],
     where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK' },
     _count: { id: true },
   });
-  const imeiMap = new Map<string, { total: number; swiped: number }>();
+  const imeiMap = new Map<string, { total: number; activated: number }>();
   for (const row of imeiCounts) {
-    if (!imeiMap.has(row.productId)) imeiMap.set(row.productId, { total: 0, swiped: 0 });
+    if (!imeiMap.has(row.productId)) imeiMap.set(row.productId, { total: 0, activated: 0 });
     const entry = imeiMap.get(row.productId)!;
     entry.total += row._count.id;
-    if (row.swiped) entry.swiped += row._count.id;
+    if ((row as any).activated) entry.activated += row._count.id;
   }
   const rows = products.map(p => {
     const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
@@ -69,7 +69,7 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     let totalQty = totalStock, activated = 0, retail = totalStock;
     if (p.imeiRequired) {
       const imei = imeiMap.get(p.id);
-      if (imei) { totalQty = imei.total; activated = imei.swiped; retail = imei.total - imei.swiped; }
+      if (imei) { totalQty = imei.total; activated = imei.activated; retail = imei.total - imei.activated; }
     }
     return { productId: p.id, ean: p.ean, model: p.model, brand: p.brand,
       category: (p as any).category?.name ?? '', categoryId: p.categoryId ?? '',
