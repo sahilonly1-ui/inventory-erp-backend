@@ -344,6 +344,97 @@ router.get('/transactions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   ok(res, { items: enriched, total, page: parseInt(page), limit: parseInt(limit) });
 }));
 
+
+// ── Stock Report — brand-wise Qty / Retail (unswiped) / Activated (swiped) ──
+router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  const { categoryId, brand } = req.query as Record<string, string>;
+
+  // 1. Get all products that have stock > 0
+  const productWhere: any = { isDeleted: false };
+  if (categoryId) productWhere.categoryId = categoryId;
+  if (brand)      productWhere.brand = brand;
+
+  const products = await prisma.product.findMany({
+    where: {
+      ...productWhere,
+      stockLevels: { some: { quantity: { gt: 0 } } },
+    },
+    include: {
+      stockLevels: { select: { quantity: true } },
+      category:    { select: { id: true, name: true } },
+    },
+    orderBy: [{ brand: 'asc' }, { model: 'asc' }],
+  });
+
+  // 2. For IMEI products, get swiped counts from imei_inventory
+  const imeiProductIds = products.filter(p => p.imeiRequired).map(p => p.id);
+
+  // Get all IN_STOCK IMEI records for these products grouped
+  const imeiCounts = await prisma.imeiInventory.groupBy({
+    by: ['productId', 'swiped'],
+    where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK' },
+    _count: { id: true },
+  });
+
+  // Build lookup: productId → { total, swiped }
+  const imeiMap = new Map<string, { total: number; swiped: number }>();
+  for (const row of imeiCounts) {
+    if (!imeiMap.has(row.productId)) imeiMap.set(row.productId, { total: 0, swiped: 0 });
+    const entry = imeiMap.get(row.productId)!;
+    entry.total += row._count.id;
+    if (row.swiped) entry.swiped += row._count.id;
+  }
+
+  // 3. Build report rows
+  const rows = products.map(p => {
+    const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
+    if (totalStock <= 0) return null;
+
+    let totalQty = totalStock;
+    let activated = 0;
+    let retail = totalStock;
+
+    if (p.imeiRequired) {
+      const imei = imeiMap.get(p.id);
+      if (imei) {
+        totalQty  = imei.total;
+        activated = imei.swiped;
+        retail    = imei.total - imei.swiped;
+      }
+    }
+
+    return {
+      productId:    p.id,
+      ean:          p.ean,
+      model:        p.model,
+      brand:        p.brand,
+      category:     p.category?.name ?? '',
+      categoryId:   p.categoryId ?? '',
+      imeiRequired: p.imeiRequired,
+      totalQty,
+      retail,
+      activated,
+    };
+  }).filter(Boolean);
+
+  // 4. Get category list for filter dropdown
+  const categories = await prisma.category.findMany({
+    where: { isDeleted: false },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+
+  // 5. Get brand list
+  const brandsRaw = await prisma.product.groupBy({
+    by: ['brand'],
+    where: { isDeleted: false, stockLevels: { some: { quantity: { gt: 0 } } } },
+    orderBy: { brand: 'asc' },
+  });
+  const brands = brandsRaw.map(b => b.brand).filter(Boolean);
+
+  ok(res, { rows, categories, brands });
+}));
+
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
 router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   ok(res, await inventoryController.bulkReverseTransactions(req, res));
