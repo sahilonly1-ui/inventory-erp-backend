@@ -30,10 +30,18 @@ router.get('/lookup', authorize(PERMISSIONS.INVENTORY_READ), validate(eanLookupS
 
 // ── Stock Report — brand-wise Qty / Retail (unswiped) / Activated (swiped) ──
 router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
-  const { categoryId, brand } = req.query as Record<string, string>;
+  // Support multiple brands/categories via comma-separated values
+  const categoryIds = req.query.categoryId
+    ? String(req.query.categoryId).split(',').filter(Boolean)
+    : [];
+  const brands = req.query.brand
+    ? String(req.query.brand).split(',').filter(Boolean)
+    : [];
   const productWhere: any = { isDeleted: false };
-  if (categoryId) productWhere.categoryId = categoryId;
-  if (brand)      productWhere.brand = brand;
+  if (categoryIds.length === 1)  productWhere.categoryId = categoryIds[0];
+  else if (categoryIds.length > 1) productWhere.categoryId = { in: categoryIds };
+  if (brands.length === 1)  productWhere.brand = brands[0];
+  else if (brands.length > 1) productWhere.brand = { in: brands };
   const products = await prisma.product.findMany({
     where: { ...productWhere, stockLevels: { some: { quantity: { gt: 0 } } } },
     include: {
