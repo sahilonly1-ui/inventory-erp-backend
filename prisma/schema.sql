@@ -487,3 +487,7 @@ UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Tecno';
 UPDATE brands SET "imeiRequired"=true, "srnoRequired"=false WHERE name='Videocon';
 UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Vivo';
 UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Xiaomi';
+
+-- imei_inventory: activated + activatedAt (unit demo'd/activated by customer)
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activated"   BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activatedAt" TIMESTAMPTZ;
