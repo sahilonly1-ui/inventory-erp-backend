@@ -408,6 +408,8 @@ model ImeiInventory {
   imeiType    String @default("NIL") // NIL | OPEN_BOX | DEMO | SECOND_IMEI
   swiped      Boolean @default(false)
   swipedAt    DateTime? // timestamp when swiped was last toggled on
+  activated   Boolean @default(false)   // unit activated/demo'd by customer
+  activatedAt DateTime?                 // timestamp when activated was toggled on
   supplierId  String?
   supplier    Vendor? @relation(fields: [supplierId], references: [id])
   stockInTxnId  String? // links this IMEI to the exact InventoryTransaction it came from
