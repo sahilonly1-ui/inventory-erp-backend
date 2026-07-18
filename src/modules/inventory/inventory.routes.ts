@@ -51,25 +51,25 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     orderBy: [{ brand: 'asc' }, { model: 'asc' }],
   });
   const imeiProductIds = products.filter(p => p.imeiRequired).map(p => p.id);
-  // Count total IN_STOCK per product
-  const totalCounts = await prisma.imeiInventory.groupBy({
-    by: ['productId'],
-    where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK' },
-    _count: { id: true },
-  });
-  // Count activated=true units per product (ACC column)
-  const activatedCounts = await prisma.imeiInventory.groupBy({
-    by: ['productId'],
-    where: { productId: { in: imeiProductIds }, isDeleted: false, status: 'IN_STOCK', activated: true },
-    _count: { id: true },
-  });
+  // Use raw SQL — bypasses Prisma client cache, always reflects actual DB schema
+  type ImeiCount = { productId: string; total: bigint; activated: bigint };
+  const imeiRaw = await prisma.$queryRaw<ImeiCount[]>`
+    SELECT
+      "productId",
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE activated = true) AS activated
+    FROM imei_inventory
+    WHERE "productId" = ANY(${imeiProductIds}::text[])
+      AND "isDeleted" = false
+      AND status = 'IN_STOCK'
+    GROUP BY "productId"
+  `;
   const imeiMap = new Map<string, { total: number; activated: number }>();
-  for (const row of totalCounts) {
-    imeiMap.set(row.productId, { total: row._count.id, activated: 0 });
-  }
-  for (const row of activatedCounts) {
-    const entry = imeiMap.get(row.productId);
-    if (entry) entry.activated = row._count.id;
+  for (const row of imeiRaw) {
+    imeiMap.set(row.productId, {
+      total:     Number(row.total),
+      activated: Number(row.activated),
+    });
   }
   const rows = products.map(p => {
     const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
