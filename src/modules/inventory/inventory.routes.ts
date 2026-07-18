@@ -50,7 +50,8 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     },
     orderBy: [{ brand: 'asc' }, { model: 'asc' }],
   });
-  const imeiProductIds = products.filter(p => p.imeiRequired).map(p => p.id);
+  // Query ALL products — don't filter by imeiRequired (may be false for phones)
+  const imeiProductIds = products.map(p => p.id);
   // Use raw SQL — bypasses Prisma client cache, always reflects actual DB schema
   type ImeiCount = { productId: string; total: bigint; activated: bigint };
   const imeiRaw = await prisma.$queryRaw<ImeiCount[]>`
@@ -75,9 +76,13 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
     if (totalStock <= 0) return null;
     let totalQty = totalStock, activated = 0, retail = totalStock;
-    if (p.imeiRequired) {
-      const imei = imeiMap.get(p.id);
-      if (imei) { totalQty = imei.total; activated = imei.activated; retail = imei.total - imei.activated; }
+    // Use IMEI counts if records exist for this product
+    // (don't rely on imeiRequired flag — may be false even for phones due to data issue)
+    const imei = imeiMap.get(p.id);
+    if (imei && imei.total > 0) {
+      totalQty  = imei.total;
+      activated = imei.activated;
+      retail    = imei.total - imei.activated;
     }
     return { productId: p.id, ean: p.ean, model: p.model, brand: p.brand,
       category: (p as any).category?.name ?? '', categoryId: p.categoryId ?? '',
