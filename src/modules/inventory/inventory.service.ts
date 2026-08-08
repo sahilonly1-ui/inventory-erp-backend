@@ -589,6 +589,7 @@ Object.assign(inventoryService, {
         ipAddress: actor.ip,
       });
 
+      await tx.$executeRaw`UPDATE imei_inventory SET "stockInTxnId" = NULL WHERE "stockInTxnId" = ${txnId}`; // FK safety
       await tx.inventoryTransaction.delete({ where: { id: txnId } });
     });
 
@@ -645,7 +646,10 @@ Object.assign(inventoryService, {
           }
         }
 
-        // 3. Hard-delete the transaction
+        // 3. Null out stockInTxnId on any IMEI records (FK safety — in case ON DELETE SET NULL wasn't applied)
+        await tx.$executeRaw`UPDATE imei_inventory SET "stockInTxnId" = NULL WHERE "stockInTxnId" = ${txn.id}`;
+
+        // 4. Hard-delete the transaction
         await tx.inventoryTransaction.delete({ where: { id: txn.id } });
       }
 
