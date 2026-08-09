@@ -544,11 +544,13 @@ Object.assign(inventoryService, {
     if (!txn) throw new BadRequestError('Transaction not found');
 
     await prisma.$transaction(async (tx) => {
-      // 1. Directly undo the stock level effect (no new transaction logged)
-      await tx.stockLevel.updateMany({
-        where: { productId: txn.productId, warehouseId: txn.warehouseId },
-        data: { quantity: { decrement: txn.quantity } },
-      });
+      // 1. Undo stock level — use GREATEST(0,...) to avoid negative stock CHECK violation
+      await tx.$executeRaw`
+        UPDATE stock_levels
+        SET quantity = GREATEST(0, quantity - ${txn.quantity})
+        WHERE "productId" = ${txn.productId}
+          AND "warehouseId" = ${txn.warehouseId}
+      `;
 
       // 2. Soft-delete ALL IMEI records linked to this transaction.
       // Do NOT gate on product.imeiRequired — it may be false even for phones
@@ -621,11 +623,13 @@ Object.assign(inventoryService, {
 
     await prisma.$transaction(async (tx) => {
       for (const txn of txns) {
-        // 1. Undo stock level
-        await tx.stockLevel.updateMany({
-          where: { productId: txn.productId, warehouseId: txn.warehouseId },
-          data: { quantity: { decrement: txn.quantity } },
-        });
+        // 1. Undo stock level — use GREATEST(0,...) to avoid negative stock CHECK violation
+        await tx.$executeRaw`
+          UPDATE stock_levels
+          SET quantity = GREATEST(0, quantity - ${txn.quantity})
+          WHERE "productId" = ${txn.productId}
+            AND "warehouseId" = ${txn.warehouseId}
+        `;
 
         // 2. Soft-delete IMEI records — no imeiRequired gate (may be false in DB)
         if (txn.quantity > 0) {
