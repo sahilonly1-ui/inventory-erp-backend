@@ -419,12 +419,7 @@ router.get('/transactions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
 
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
 router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
-  try {
-    ok(res, await inventoryController.bulkReverseTransactions(req, res));
-  } catch (e: any) {
-    // Return actual error message for debugging (not just "Internal server error")
-    res.status(500).json({ success: false, error: { message: String(e?.message || e), code: e?.code, meta: e?.meta } });
-  }
+  ok(res, await inventoryController.bulkReverseTransactions(req, res));
 }));
 
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
