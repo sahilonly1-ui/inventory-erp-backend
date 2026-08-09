@@ -544,13 +544,16 @@ Object.assign(inventoryService, {
     if (!txn) throw new BadRequestError('Transaction not found');
 
     await prisma.$transaction(async (tx) => {
-      // 1. Undo stock level — use GREATEST(0,...) to avoid negative stock CHECK violation
-      await tx.$executeRaw`
-        UPDATE stock_levels
-        SET quantity = GREATEST(0, quantity - ${txn.quantity})
-        WHERE "productId" = ${txn.productId}
-          AND "warehouseId" = ${txn.warehouseId}
-      `;
+      // 1. Undo stock level — clamp to 0 to avoid CHECK(quantity>=0) violation
+      const sl = await tx.stockLevel.findFirst({
+        where: { productId: txn.productId, warehouseId: txn.warehouseId },
+      });
+      if (sl) {
+        await tx.stockLevel.update({
+          where: { id: sl.id },
+          data: { quantity: Math.max(0, sl.quantity - txn.quantity) },
+        });
+      }
 
       // 2. Soft-delete ALL IMEI records linked to this transaction.
       // Do NOT gate on product.imeiRequired — it may be false even for phones
@@ -591,7 +594,11 @@ Object.assign(inventoryService, {
         ipAddress: actor.ip,
       });
 
-      await tx.$executeRaw`UPDATE imei_inventory SET "stockInTxnId" = NULL WHERE "stockInTxnId" = ${txnId}`; // FK safety
+      // FK safety: null out stockInTxnId before hard-delete
+      await tx.imeiInventory.updateMany({
+        where: { stockInTxnId: txnId },
+        data: { stockInTxnId: null },
+      });
       await tx.inventoryTransaction.delete({ where: { id: txnId } });
     });
 
@@ -623,13 +630,16 @@ Object.assign(inventoryService, {
 
     await prisma.$transaction(async (tx) => {
       for (const txn of txns) {
-        // 1. Undo stock level — use GREATEST(0,...) to avoid negative stock CHECK violation
-        await tx.$executeRaw`
-          UPDATE stock_levels
-          SET quantity = GREATEST(0, quantity - ${txn.quantity})
-          WHERE "productId" = ${txn.productId}
-            AND "warehouseId" = ${txn.warehouseId}
-        `;
+        // 1. Undo stock level — clamp to 0 to avoid CHECK(quantity>=0) violation
+        const sl = await tx.stockLevel.findFirst({
+          where: { productId: txn.productId, warehouseId: txn.warehouseId },
+        });
+        if (sl) {
+          await tx.stockLevel.update({
+            where: { id: sl.id },
+            data: { quantity: Math.max(0, sl.quantity - txn.quantity) },
+          });
+        }
 
         // 2. Soft-delete IMEI records — no imeiRequired gate (may be false in DB)
         if (txn.quantity > 0) {
@@ -650,8 +660,11 @@ Object.assign(inventoryService, {
           }
         }
 
-        // 3. Null out stockInTxnId on any IMEI records (FK safety — in case ON DELETE SET NULL wasn't applied)
-        await tx.$executeRaw`UPDATE imei_inventory SET "stockInTxnId" = NULL WHERE "stockInTxnId" = ${txn.id}`;
+        // 3. FK safety: null out stockInTxnId before hard-delete
+        await tx.imeiInventory.updateMany({
+          where: { stockInTxnId: txn.id },
+          data: { stockInTxnId: null },
+        });
 
         // 4. Hard-delete the transaction
         await tx.inventoryTransaction.delete({ where: { id: txn.id } });
