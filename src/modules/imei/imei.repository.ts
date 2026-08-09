@@ -73,11 +73,14 @@ export const imeiRepository = {
 
   list(params: {
     status?: ImeiStatus; productId?: string; warehouseId?: string; search?: string;
+    swiped?: boolean; activated?: boolean;
     skip: number; take: number;
   }) {
     const where: Prisma.ImeiInventoryWhereInput = {
       isDeleted: false,
       ...(params.status ? { status: params.status } : {}),
+      ...(params.swiped    !== undefined ? { swiped:    params.swiped    } : {}),
+      ...(params.activated !== undefined ? { activated: params.activated } : {}),
       ...(params.productId ? { productId: params.productId } : {}),
       ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
       ...(params.search ? (() => {
