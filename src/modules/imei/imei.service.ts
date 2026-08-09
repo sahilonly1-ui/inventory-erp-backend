@@ -158,7 +158,10 @@ export const imeiService = {
   }) {
     const [items, total] = await imeiRepository.list({
       status: input.status, productId: input.productId, warehouseId: input.warehouseId,
-      search: input.search, skip: (input.page - 1) * input.limit, take: input.limit,
+      search: input.search,
+      swiped:    input.swiped    === 'true' ? true : input.swiped    === 'false' ? false : undefined,
+      activated: input.activated === 'true' ? true : input.activated === 'false' ? false : undefined,
+      skip: (input.page - 1) * input.limit, take: input.limit,
     });
     return { items, page: input.page, limit: input.limit, total, totalPages: Math.ceil(total / input.limit) };
   },
