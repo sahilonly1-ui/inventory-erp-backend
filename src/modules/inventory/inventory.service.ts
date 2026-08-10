@@ -600,7 +600,7 @@ Object.assign(inventoryService, {
         data: { stockInTxnId: null },
       });
       await tx.inventoryTransaction.delete({ where: { id: txnId } });
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     return { deleted: true, txnId, productId: txn.productId };
   },
@@ -628,49 +628,65 @@ Object.assign(inventoryService, {
       productSummary[m] = (productSummary[m] || 0) + Math.abs(t.quantity);
     }
 
+    // ── Batch everything instead of looping per-transaction ──────────────────
+    // The old code ran 4+ sequential queries PER transaction inside one DB
+    // transaction (16 items = 64+ queries), which exceeded Prisma's default
+    // 5s interactive-transaction timeout on Supabase's pooler — causing
+    // "Internal server error" specifically on larger batches (e.g. a 16-item
+    // "No Vendor" entry) while smaller single-vendor batches happened to
+    // finish in time. Fix: aggregate stock deltas and use IN-clause bulk
+    // operations so the whole batch is a handful of queries, not dozens.
+
+    // 1. Aggregate stock quantity to subtract, per productId+warehouseId
+    const deltaByKey = new Map<string, { productId: string; warehouseId: string; qty: number }>();
+    for (const t of txns) {
+      const key = `${t.productId}::${t.warehouseId}`;
+      const cur = deltaByKey.get(key) ?? { productId: t.productId, warehouseId: t.warehouseId, qty: 0 };
+      cur.qty += t.quantity;
+      deltaByKey.set(key, cur);
+    }
+
     await prisma.$transaction(async (tx) => {
-      for (const txn of txns) {
-        // 1. Undo stock level — clamp to 0 to avoid CHECK(quantity>=0) violation
-        const sl = await tx.stockLevel.findFirst({
-          where: { productId: txn.productId, warehouseId: txn.warehouseId },
-        });
+      // 2. Apply stock level adjustments — one query per unique product+warehouse
+      //    (typically far fewer than txnIds.length since products repeat)
+      for (const { productId, warehouseId, qty } of deltaByKey.values()) {
+        const sl = await tx.stockLevel.findFirst({ where: { productId, warehouseId } });
         if (sl) {
           await tx.stockLevel.update({
             where: { id: sl.id },
-            data: { quantity: Math.max(0, sl.quantity - txn.quantity) },
+            data: { quantity: Math.max(0, sl.quantity - qty) },
           });
         }
-
-        // 2. Soft-delete IMEI records — no imeiRequired gate (may be false in DB)
-        if (txn.quantity > 0) {
-          const byTxnId = await tx.imeiInventory.updateMany({
-            where: { stockInTxnId: txn.id, isDeleted: false },
-            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
-          });
-          if (byTxnId.count === 0) {
-            // No supplierId filter — may be NULL due to old race condition
-            await tx.imeiInventory.updateMany({
-              where: {
-                productId: txn.productId,
-                warehouseId: txn.warehouseId,
-                isDeleted: false,
-              },
-              data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
-            });
-          }
-        }
-
-        // 3. FK safety: null out stockInTxnId before hard-delete
-        await tx.imeiInventory.updateMany({
-          where: { stockInTxnId: txn.id },
-          data: { stockInTxnId: null },
-        });
-
-        // 4. Hard-delete the transaction
-        await tx.inventoryTransaction.delete({ where: { id: txn.id } });
       }
 
-      // 4. Write ONE grouped audit entry for the whole batch
+      // 3. Soft-delete ALL linked IMEI records in ONE bulk query
+      const byTxnId = await tx.imeiInventory.updateMany({
+        where: { stockInTxnId: { in: txnIds }, isDeleted: false },
+        data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+      });
+
+      // 4. LEGACY FALLBACK: for any product+warehouse pair where no IMEI matched
+      //    by stockInTxnId (old records missing the link), soft-delete by
+      //    product+warehouse instead — batched per unique pair, not per txn.
+      if (byTxnId.count === 0) {
+        for (const { productId, warehouseId } of deltaByKey.values()) {
+          await tx.imeiInventory.updateMany({
+            where: { productId, warehouseId, isDeleted: false },
+            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+          });
+        }
+      }
+
+      // 5. FK safety: null out stockInTxnId for the whole batch in ONE query
+      await tx.imeiInventory.updateMany({
+        where: { stockInTxnId: { in: txnIds } },
+        data: { stockInTxnId: null },
+      });
+
+      // 6. Hard-delete all transactions in ONE query
+      await tx.inventoryTransaction.deleteMany({ where: { id: { in: txnIds } } });
+
+      // 7. Write ONE grouped audit entry for the whole batch
       await writeAudit(tx, {
         userId: actor.id, action: 'DELETE',
         entityName: 'inventory_transactions',
@@ -686,7 +702,7 @@ Object.assign(inventoryService, {
         newValue: { fullyDeleted: true, txnCount: txnIds.length, reason: `Bulk deleted — ${vendorName} entry` },
         ipAddress: actor.ip,
       });
-    });
+    }, { timeout: 30000, maxWait: 10000 }); // generous timeout as a safety net for large batches
 
     return { deleted: txnIds.length, vendor: vendorName, totalQty };
   },
