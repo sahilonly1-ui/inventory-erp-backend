@@ -339,50 +339,9 @@ router.post('/admin/cleanup-orphaned-imeis', authorize(PERMISSIONS.INVENTORY_ADJ
 
 
 // ── List transactions by type (for Opening Stock history, etc.) ──────────────
-router.get('/transactions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
-  const { type, page = '1', limit = '100' } = req.query as Record<string, string>;
-  const skip = (parseInt(page) - 1) * parseInt(limit);
-  const where: any = {};
-  if (type) where.type = type;
-  const [items, total] = await prisma.$transaction([
-    prisma.inventoryTransaction.findMany({
-      where,
-      include: {
-        product:   { select: { id: true, ean: true, model: true, brand: true, imeiRequired: true } },
-        vendor:    { select: { id: true, name: true } },
-        warehouse: { select: { id: true, name: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      skip, take: parseInt(limit),
-    }),
-    prisma.inventoryTransaction.count({ where }),
-  ]);
-  // For OPENING/STOCK_IN transactions, also find linked IMEIs
-  const enriched = await Promise.all(items.map(async (t) => {
-    let imeis: string[] = [];
-    if (t.quantity > 0) {
-      const imeiRecs = await prisma.imeiInventory.findMany({
-        where: { stockInTxnId: t.id, isDeleted: false },
-        select: { imei1: true },
-      });
-      imeis = imeiRecs.map(i => i.imei1);
-    }
-    return {
-      id: t.id, type: t.type, quantity: t.quantity,
-      productId: t.product.id, ean: t.product.ean,
-      model: t.product.model, brand: t.product.brand,
-      imeiRequired: t.product.imeiRequired,
-      vendorId: t.vendorId, vendorName: t.vendor?.name ?? null,
-      warehouseId: t.warehouseId, warehouseName: t.warehouse.name,
-      unitCost: t.unitCost, remarks: t.remarks,
-      createdAt: t.createdAt, imeis,
-    };
-  }));
-  ok(res, { items: enriched, total, page: parseInt(page), limit: parseInt(limit) });
-}));
-
-
-// ── List transactions by type (for Opening Stock history, etc.) ──────────────
+// (Was previously registered twice with near-identical bodies — Express only
+// ever executed the first, silently discarding the second's Number()/ISO
+// fixes. Merged into a single route with those fixes kept.)
 router.get('/transactions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
   const { type, page = '1', limit = '100' } = req.query as Record<string, string>;
   const skip = (parseInt(page) - 1) * parseInt(limit);

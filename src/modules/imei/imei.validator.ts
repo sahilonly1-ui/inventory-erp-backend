@@ -17,6 +17,7 @@ export const receiveImeiSchema = z.object({
   vendorId: z.string().uuid().optional(),
   remarks: z.string().max(500).optional(),
   force: z.boolean().optional(), // bypass imeiRequired check (user explicitly chose IMEI column)
+  type: z.enum(['STOCK_IN', 'OPENING']).optional(), // OPENING = Opening Stock entry, not a normal receive
 });
 
 export const dispatchImeiSchema = z.object({

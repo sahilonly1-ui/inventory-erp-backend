@@ -28,10 +28,14 @@ export const imeiService = {
 
     const result = await prisma.$transaction(async (tx) => {
       // Create the InventoryTransaction FIRST so we get its ID to link to IMEI records
+      // Opening Stock sends type:'OPENING' so these show up in the Opening
+      // Stock "View & Manage" tab (which filters by type=OPENING) instead of
+      // being mixed into the regular Stock In history.
+      const txnType = (input as any).type === 'OPENING' ? TransactionType.OPENING : TransactionType.STOCK_IN;
       const move = await applyLedgerMovementTx(tx, {
         productId: input.productId,
         warehouseId: input.warehouseId,
-        type: TransactionType.STOCK_IN,
+        type: txnType,
         signedQty: input.imeis.length,
         vendorId: input.vendorId ?? (input as any).vendorId ?? null,
         referenceType: 'IMEI_RECEIVE',
