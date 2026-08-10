@@ -19,6 +19,53 @@ router.post('/receive', authorize(PERMISSIONS.INVENTORY_STOCK_IN), validate(rece
 router.post('/dispatch', authorize(PERMISSIONS.INVENTORY_STOCK_OUT), validate(dispatchImeiSchema), imeiController.dispatch);
 router.patch('/:imei/status', authorize(PERMISSIONS.IMEI_MANAGE), validate(imeiParamSchema, 'params'), validate(changeStatusSchema), imeiController.changeStatus);
 
+// ── Bulk swipe + activate via uploaded Excel list ───────────────────────────
+// Body: { rows: [{imei1, swiped?, swipedAt?, activated?, activatedAt?}] }
+router.post('/bulk-update', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const rows = req.body.rows;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new BadRequestError('rows array required');
+  }
+  if (rows.length > 5000) throw new BadRequestError('Maximum 5000 rows per upload');
+
+  const results: { imei: string; status: 'ok' | 'not_found' | 'error'; msg?: string }[] = [];
+
+  for (const row of rows) {
+    const imei1 = String(row.imei1 || row.imei || '').trim();
+    if (!imei1) { results.push({ imei: imei1, status: 'error', msg: 'Empty IMEI' }); continue; }
+
+    try {
+      const rec = await prisma.imeiInventory.findFirst({ where: { imei1, isDeleted: false } });
+      if (!rec) { results.push({ imei: imei1, status: 'not_found' }); continue; }
+
+      const patch: Record<string, any> = { updatedBy: actor.id };
+      if (row.swiped !== undefined) {
+        patch.swiped = Boolean(row.swiped);
+        patch.swipedAt = row.swiped
+          ? (row.swipedAt ? new Date(row.swipedAt) : new Date())
+          : null;
+      }
+      if (row.activated !== undefined) {
+        patch.activated = Boolean(row.activated);
+        patch.activatedAt = row.activated
+          ? (row.activatedAt ? new Date(row.activatedAt) : new Date())
+          : null;
+      }
+
+      await prisma.imeiInventory.update({ where: { id: rec.id }, data: patch });
+      results.push({ imei: imei1, status: 'ok' });
+    } catch (e: any) {
+      results.push({ imei: imei1, status: 'error', msg: e.message?.slice(0, 80) });
+    }
+  }
+
+  const ok  = results.filter(r => r.status === 'ok').length;
+  const nf  = results.filter(r => r.status === 'not_found').length;
+  const err = results.filter(r => r.status === 'error').length;
+  ok(res, { processed: rows.length, ok, not_found: nf, errors: err, results });
+}));
+
 // ── Toggle swiped only ───────────────────────────────────────────────────────
 router.patch('/:id/swiped', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
   const { swiped } = req.body;
