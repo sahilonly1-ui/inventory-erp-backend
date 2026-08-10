@@ -15,8 +15,8 @@ import {
 const router = Router();
 router.use(authenticate);
 
-router.post('/receive', authorize(PERMISSIONS.IMEI_MANAGE), validate(receiveImeiSchema), imeiController.receive);
-router.post('/dispatch', authorize(PERMISSIONS.IMEI_MANAGE), validate(dispatchImeiSchema), imeiController.dispatch);
+router.post('/receive', authorize(PERMISSIONS.INVENTORY_STOCK_IN), validate(receiveImeiSchema), imeiController.receive);
+router.post('/dispatch', authorize(PERMISSIONS.INVENTORY_STOCK_OUT), validate(dispatchImeiSchema), imeiController.dispatch);
 router.patch('/:imei/status', authorize(PERMISSIONS.IMEI_MANAGE), validate(imeiParamSchema, 'params'), validate(changeStatusSchema), imeiController.changeStatus);
 
 // ── Toggle swiped only ───────────────────────────────────────────────────────
