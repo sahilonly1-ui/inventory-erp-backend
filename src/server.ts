@@ -13,13 +13,26 @@ async function ensureSchema() {
   const { Client } = require('pg') as typeof import('pg');
 
   const PROJECT = 'xukbgkwagjtzxoobcyuk';
-  const PASSWORD = 'Harbans1073!';
 
-  // Try multiple Supabase connection endpoints
+  // Use DATABASE_URL from environment (set by Render) — this is the correct one!
+  // Fallback to hardcoded direct connection if env var not set
+  const dbUrl = process.env.DATABASE_URL || process.env.DIRECT_URL ||
+    `postgresql://postgres:Harbans_1073@db.${PROJECT}.supabase.co:5432/postgres`;
+
+  const parsed = (() => {
+    try {
+      const u = new URL(dbUrl);
+      return { host: u.hostname, port: parseInt(u.port||'5432'), user: u.username, password: u.password, database: u.pathname.slice(1) };
+    } catch { return null; }
+  })();
+
   const configs = [
-    { host:'aws-1-ap-northeast-1.pooler.supabase.com', port:5432, user:`postgres.${PROJECT}`, password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
-    { host:'aws-1-ap-northeast-1.pooler.supabase.com', port:6543, user:`postgres.${PROJECT}`, password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
-    { host:`db.${PROJECT}.supabase.co`, port:5432, user:'postgres', password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
+    // Primary: use DATABASE_URL from Render env (correct password!)
+    ...(parsed ? [{ ...parsed, ssl:{rejectUnauthorized:false} }] : []),
+    // Fallback: direct Supabase connection with correct password
+    { host:`db.${PROJECT}.supabase.co`, port:5432, user:'postgres', password:'Harbans_1073', database:'postgres', ssl:{rejectUnauthorized:false} },
+    // Last resort: pooler connections
+    { host:'aws-1-ap-northeast-1.pooler.supabase.com', port:5432, user:`postgres.${PROJECT}`, password:'Harbans_1073', database:'postgres', ssl:{rejectUnauthorized:false} },
   ];
 
   let client: InstanceType<typeof Client> | null = null;

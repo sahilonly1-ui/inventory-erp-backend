@@ -11,9 +11,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Supabase connection options — all with project ref in username for SNI
 const PROJECT = 'xukbgkwagjtzxoobcyuk';
-const PASSWORD = 'Harbans1073!';
+const PASSWORD = process.env.DB_PASSWORD || 'Harbans_1073'; // Render sets this correctly
+
+// Parse DATABASE_URL if available (Render sets this correctly)
+const DB_URL = process.env.DATABASE_URL;
+const parsedUrl = DB_URL ? (() => {
+  try {
+    const u = new URL(DB_URL);
+    return { host: u.hostname, port: parseInt(u.port||'5432'), user: u.username, password: u.password, database: u.pathname.slice(1), ssl: { rejectUnauthorized: false }, label: 'DATABASE_URL env var' };
+  } catch { return null; }
+})() : null;
 
 const CONNECTIONS = [
+  // PRIMARY: use DATABASE_URL from Render environment (correct credentials!)
+  ...(parsedUrl ? [parsedUrl] : []),
   // Transaction pooler (IPv4, port 6543) — project ref in username triggers SNI
   {
     host: 'aws-1-ap-northeast-1.pooler.supabase.com',
