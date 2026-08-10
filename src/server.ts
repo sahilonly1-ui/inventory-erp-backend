@@ -68,7 +68,14 @@ export async function ensureSchema() {
   const sql = fs.readFileSync(schemaPath, 'utf8');
   const statements = sql.split(';')
     .map((s) => s.replace(/^(\s*--[^\n]*\n)+/gm, '').trim())
-    .filter((s) => s.length > 5 && !s.startsWith('--'));
+    .filter((s) => {
+      if (s.length <= 5 || s.startsWith('--')) return false;
+      // CRITICAL: skip DROP statements — schema.sql has DROP TABLE IF EXISTS for
+      // "_UserRoles" and "_RolePermissions" which would destroy all role/permission
+      // assignments on every server restart, locking everyone out of every page.
+      if (s.trimStart().toUpperCase().startsWith('DROP ')) return false;
+      return true;
+    });
 
   let ok = 0, skip = 0, err = 0;
   for (const stmt of statements) {
