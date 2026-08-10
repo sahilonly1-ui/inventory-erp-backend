@@ -6,33 +6,60 @@ import { logger } from './config/logger';
 import { initSocket } from './realtime/socket';
 
 // ── Auto-migrate missing columns on every startup ────────────────────────────
-// These ALTER TABLE statements are safe to re-run (IF NOT EXISTS)
-// Guarantees the Supabase DB schema matches the Prisma model regardless of
-// which npm start script Render uses.
+// Uses direct pg client (NOT Prisma pooler) because ALTER TABLE requires a
+// persistent session connection, not a transaction-mode pooler connection.
 async function ensureSchema() {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require('pg') as typeof import('pg');
+
+  const PROJECT = 'xukbgkwagjtzxoobcyuk';
+  const PASSWORD = 'Harbans1073!';
+
+  // Try multiple Supabase connection endpoints
+  const configs = [
+    { host:'aws-1-ap-northeast-1.pooler.supabase.com', port:5432, user:`postgres.${PROJECT}`, password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
+    { host:'aws-1-ap-northeast-1.pooler.supabase.com', port:6543, user:`postgres.${PROJECT}`, password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
+    { host:`db.${PROJECT}.supabase.co`, port:5432, user:'postgres', password:PASSWORD, database:'postgres', ssl:{rejectUnauthorized:false} },
+  ];
+
+  let client: InstanceType<typeof Client> | null = null;
+  for (const cfg of configs) {
+    const c = new Client(cfg);
+    try { await c.connect(); client = c; logger.info(`Schema migration: connected via ${cfg.host}:${cfg.port}`); break; }
+    catch (e) { try { await c.end(); } catch {} }
+  }
+
+  if (!client) { logger.warn('Schema migration: could not connect — skipping'); return; }
+
   const alters = [
     // Vendor: state, normalizedName, notes
     `ALTER TABLE vendors ADD COLUMN IF NOT EXISTS "normalizedName" TEXT`,
     `ALTER TABLE vendors ADD COLUMN IF NOT EXISTS state TEXT`,
     `ALTER TABLE vendors ADD COLUMN IF NOT EXISTS notes TEXT`,
-    // IMEI Inventory: type, swiped flag, supplier link
+    // IMEI Inventory: type, swiped, supplier
     `ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "imeiType" TEXT NOT NULL DEFAULT 'NIL'`,
     `ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS swiped BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "supplierId" TEXT`,
     `ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "purchaseDate" TIMESTAMPTZ`,
     `ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "invoiceNo" TEXT`,
-    // InventoryTransaction: soft-delete support
+    // InventoryTransaction: soft-delete
     `ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "isDeleted" BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMPTZ`,
     `ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS "deletedBy" TEXT`,
     // Backfill normalizedName for existing vendors
-    `UPDATE vendors SET "normalizedName" = lower(regexp_replace(trim(name), '\\s+', '', 'g')) WHERE "normalizedName" IS NULL`,
+    `UPDATE vendors SET "normalizedName" = lower(regexp_replace(trim(name), '\s+', '', 'g')) WHERE "normalizedName" IS NULL`,
   ];
-  let ok = 0;
+
+  let ok = 0, skip = 0;
   for (const sql of alters) {
-    try { await prisma.$executeRawUnsafe(sql); ok++; } catch {}
+    try { await client.query(sql); ok++; }
+    catch (e: any) {
+      if (e.message?.includes('already exists') || e.message?.includes('duplicate')) skip++;
+      else logger.warn({ msg: e.message?.slice(0, 120) }, 'Schema migration warn');
+    }
   }
-  logger.info(`Schema auto-migration: ${ok}/${alters.length} statements applied`);
+  await client.end();
+  logger.info(`Schema auto-migration: ${ok} applied, ${skip} skipped`);
 }
 
 async function bootstrap() {
