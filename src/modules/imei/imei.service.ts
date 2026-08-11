@@ -26,6 +26,30 @@ export const imeiService = {
       throw new BadRequestError('Product is not IMEI-tracked; use /inventory/stock-in');
     }
 
+    // Guard against duplicates BEFORE attempting the insert. Without this the
+    // DB throws a bare unique-constraint error that names no IMEI, leaving the
+    // user with no idea which scan to fix.
+    const incoming = input.imeis.map(i => i.imei1);
+    const dupesInPayload = incoming.filter((v, idx) => incoming.indexOf(v) !== idx);
+    if (dupesInPayload.length) {
+      const list = [...new Set(dupesInPayload)];
+      throw new BadRequestError(
+        `Duplicate IMEI in this batch: ${list.slice(0, 5).join(', ')}${list.length > 5 ? ` (+${list.length - 5} more)` : ''}. Each IMEI can only be scanned once.`
+      );
+    }
+    const existing = await prisma.imeiInventory.findMany({
+      where: { imei1: { in: incoming }, isDeleted: false },
+      select: { imei1: true, status: true, product: { select: { model: true } } },
+    });
+    if (existing.length) {
+      const detail = existing.slice(0, 5)
+        .map(e => `${e.imei1} (already in stock as ${e.product?.model ?? 'another product'})`)
+        .join('; ');
+      throw new BadRequestError(
+        `${existing.length} IMEI(s) already exist in the system: ${detail}${existing.length > 5 ? ` (+${existing.length - 5} more)` : ''}. Remove these rows and save again.`
+      );
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       // Create the InventoryTransaction FIRST so we get its ID to link to IMEI records
       // Opening Stock sends type:'OPENING' so these show up in the Opening

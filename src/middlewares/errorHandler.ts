@@ -16,7 +16,14 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002') {
-      return fail(res, 409, 'CONFLICT', 'Unique constraint violation', { target: err.meta?.target });
+      const target = err.meta?.target;
+      const fields = Array.isArray(target) ? target.join(', ') : String(target ?? '');
+      const hint = fields.toLowerCase().includes('imei')
+        ? 'One or more IMEIs already exist in the system. Check for a duplicate scan.'
+        : fields
+          ? `A record with this ${fields} already exists.`
+          : 'This record already exists.';
+      return fail(res, 409, 'CONFLICT', hint, { target });
     }
     if (err.code === 'P2025') {
       return fail(res, 404, 'NOT_FOUND', 'Record not found');
