@@ -73,7 +73,7 @@ export const imeiRepository = {
 
   list(params: {
     status?: ImeiStatus; productId?: string; warehouseId?: string; search?: string;
-    swiped?: boolean; activated?: boolean; imeiType?: string;
+    swiped?: boolean; activated?: boolean; imeiType?: string; brand?: string;
     skip: number; take: number;
   }) {
     const where: Prisma.ImeiInventoryWhereInput = {
@@ -84,6 +84,7 @@ export const imeiRepository = {
       ...(params.activated !== undefined ? { activated: params.activated } : {}),
       ...(params.productId ? { productId: params.productId } : {}),
       ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
+      ...(params.brand ? { product: { brand: { equals: params.brand, mode: 'insensitive' } } } : {}),
       ...(params.search ? (() => {
         const words = params.search.trim().split(/\s+/).filter(Boolean);
         if (words.length <= 1) {

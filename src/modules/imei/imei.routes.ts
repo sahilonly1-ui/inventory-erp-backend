@@ -68,24 +68,30 @@ router.post('/bulk-update', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(asy
 
 // ── Toggle swiped only ───────────────────────────────────────────────────────
 router.patch('/:id/swiped', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
-  const { swiped } = req.body;
+  const { swiped, swipedAt } = req.body;
   if (typeof swiped !== 'boolean') throw new BadRequestError('swiped must be boolean');
   const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const resolvedSwipedAt = swiped
+    ? (swipedAt ? new Date(swipedAt) : new Date())
+    : null;
   const updated = await prisma.imeiInventory.update({
     where: { id: req.params.id },
-    data: { swiped, swipedAt: swiped ? new Date() : null, updatedBy: actor.id },
+    data: { swiped, swipedAt: resolvedSwipedAt, updatedBy: actor.id },
   });
   ok(res, { id: updated.id, swiped: updated.swiped, swipedAt: updated.swipedAt });
 }));
 
 // ── Toggle activated (unit demo'd/activated by customer) ─────────────────────
 router.patch('/:id/activated', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
-  const { activated } = req.body;
+  const { activated, activatedAt } = req.body;
   if (typeof activated !== 'boolean') throw new BadRequestError('activated must be boolean');
   const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const resolvedActivatedAt = activated
+    ? (activatedAt ? new Date(activatedAt) : new Date())
+    : null;
   const updated = await prisma.imeiInventory.update({
     where: { id: req.params.id },
-    data: { activated, activatedAt: activated ? new Date() : null, updatedBy: actor.id },
+    data: { activated, activatedAt: resolvedActivatedAt, updatedBy: actor.id },
   });
   ok(res, { id: updated.id, activated: updated.activated, activatedAt: updated.activatedAt });
 }));

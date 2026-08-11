@@ -489,7 +489,7 @@ const inventoryServiceExtensions = {
       })),
       recentTxns: txns.slice(0, 50).map(t => ({
         id: t.id, type: t.type, qty: t.quantity,
-        product: `${t.product.model} (${t.product.ean})`,
+        product: t.product.model,
         productId: t.productId,
         ean: t.product.ean,
         vendor: t.vendor?.name,

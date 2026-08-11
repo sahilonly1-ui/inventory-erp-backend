@@ -158,11 +158,12 @@ export const imeiService = {
 
   async list(input: {
     status?: ImeiStatus; productId?: string; warehouseId?: string; search?: string;
-    page: number; limit: number;
+    brand?: string; page: number; limit: number;
   }) {
     const [items, total] = await imeiRepository.list({
       status: input.status, productId: input.productId, warehouseId: input.warehouseId,
       search: input.search,
+      brand:     input.brand     || undefined,
       imeiType:  input.imeiType  || undefined,
       swiped:    input.swiped    === 'true' ? true : input.swiped    === 'false' ? false : undefined,
       activated: input.activated === 'true' ? true : input.activated === 'false' ? false : undefined,
