@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../config/prisma';
 import authRoutes from '../modules/auth/auth.routes';
 import userRoutes from '../modules/users/user.routes';
+import roleRoutes from '../modules/roles/role.routes';
 import productRoutes from '../modules/products/product.routes';
 import auditRoutes from '../modules/audit/audit.routes';
 import warehouseRoutes from '../modules/warehouses/warehouse.module';
@@ -25,6 +26,7 @@ router.get('/health', async (_req: Request, res: Response) => {
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
+router.use('/roles', roleRoutes);
 router.use('/products', productRoutes);
 router.use('/audit', auditRoutes);
 router.use('/warehouses', warehouseRoutes);

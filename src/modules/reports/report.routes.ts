@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
-import { UnauthorizedError } from '../../common/errors';
+import { UnauthorizedError, BadRequestError } from '../../common/errors';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
@@ -12,7 +12,7 @@ const router = Router();
 router.use(authenticate);
 
 // Custom IMEI type report (Open Box, Demo, Second IMEI, Swiped/Unswiped)
-router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_VIEW), asyncHandler(async (req, res) => {
+router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandler(async (req, res) => {
   const { imeiType, swiped, activated, status, search, brand } = req.body;
   // Build dynamic IMEI export
   const where: any = { isDeleted: false };
@@ -83,6 +83,27 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_VIEW), asyncHandler(
   res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition',`attachment; filename="IMEI_Export_${new Date().toISOString().slice(0,10)}.xlsx"`);
   res.send(buf);
+}));
+
+// Per-entry stock-in export: one workbook for a single vendor entry, named
+// "<Vendor> - <Invoice No> - <Date>.xlsx".
+router.post('/stock-in-entry', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandler(async (req: Request, res: Response) => {
+  const ids: string[] = Array.isArray(req.body?.txnIds) ? req.body.txnIds.filter(Boolean) : [];
+  if (!ids.length) throw new BadRequestError('txnIds is required');
+  const { buildEntryExport } = await import('./entryExport.service');
+  const { buffer, filename } = await buildEntryExport(ids);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buffer);
+}));
+
+// Manually trigger the nightly per-vendor backup email (also runs on a cron).
+// Useful for testing SMTP setup and for re-sending a day that failed.
+router.post('/daily-backup', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandler(async (req: Request, res: Response) => {
+  const date = String(req.body?.date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }));
+  const { sendDailyStockInBackup } = await import('./dailyBackup.service');
+  const result = await sendDailyStockInBackup(date);
+  res.json({ success: true, data: result });
 }));
 
 // POST /reports/:type  -> streams an xlsx download

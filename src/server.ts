@@ -6,6 +6,7 @@ import { env } from './config/env';
 import { prisma } from './config/prisma';
 import { logger } from './config/logger';
 import { initSocket } from './realtime/socket';
+import { startScheduler } from './scheduler';
 
 // ── Auto-migrate the ENTIRE schema.sql on every startup ──────────────────────
 // schema.sql has grown into a running log of every ALTER TABLE ever added
@@ -101,6 +102,7 @@ async function bootstrap() {
   });
 
   initSocket(server); // live stock updates over websocket
+  startScheduler();   // nightly stock-in backup email
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
