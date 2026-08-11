@@ -1,7 +1,20 @@
 import { z } from 'zod';
 import { ImeiStatus } from '@prisma/client';
 
-const imei = z.string().regex(/^\d{14,17}$/, 'IMEI must be 14-17 digits');
+// Phones carry a 14-17 digit IMEI; tablets and Wi-Fi-only devices carry an
+// alphanumeric serial number instead. Both are tracked in the same table so
+// swipe/activation works identically for either.
+const imei = z.string()
+  .trim()
+  .min(4, 'IMEI / Serial number is too short')
+  .max(32, 'IMEI / Serial number is too long')
+  .regex(/^[A-Za-z0-9-]+$/, 'IMEI / Serial number may only contain letters, digits and hyphens');
+
+const imeiParam = z.string()
+  .trim()
+  .min(4)
+  .max(32)
+  .regex(/^[A-Za-z0-9-]+$/);
 
 export const receiveImeiSchema = z.object({
   productId: z.string().uuid(),
@@ -37,7 +50,7 @@ export const changeStatusSchema = z.object({
   swiped: z.boolean().optional(),
 });
 
-export const imeiParamSchema = z.object({ imei: z.string().regex(/^\d{14,17}$/) });
+export const imeiParamSchema = z.object({ imei: imeiParam });
 
 export const imeiQuerySchema = z.object({
   status: z.nativeEnum(ImeiStatus).optional(),

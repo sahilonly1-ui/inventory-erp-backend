@@ -57,7 +57,7 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_VIEW), asyncHandler(
   // EAN | IMEI | Model | Brand | Status | Swiped | Supplier | Stock In Date | Last Updated
   ws.columns = [
     { header: 'EAN',            key: 'ean',       width: 16 },
-    { header: 'IMEI',           key: 'imei',      width: 20 },
+    { header: 'IMEI / Serial',  key: 'imei',      width: 22 },
     { header: 'Model',          key: 'model',     width: 36 },
     { header: 'Brand',          key: 'brand',     width: 16 },
     { header: 'Status',         key: 'status',    width: 14 },
