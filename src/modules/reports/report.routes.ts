@@ -13,12 +13,16 @@ router.use(authenticate);
 
 // Custom IMEI type report (Open Box, Demo, Second IMEI, Swiped/Unswiped)
 router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_VIEW), asyncHandler(async (req, res) => {
-  const { imeiType, swiped, search } = req.body;
+  const { imeiType, swiped, activated, status, search, brand } = req.body;
   // Build dynamic IMEI export
   const where: any = { isDeleted: false };
   if (imeiType && imeiType !== 'ALL') where.imeiType = imeiType;
+  if (status) where.status = status;
   if (swiped === 'true') where.swiped = true;
   if (swiped === 'false') where.swiped = false;
+  if (activated === 'true') where.activated = true;
+  if (activated === 'false') where.activated = false;
+  if (brand) where.product = { brand: { equals: brand, mode: 'insensitive' } };
   if (search) {
     const words = search.trim().split(/\s+/).filter(Boolean);
     if (words.length > 1) {
@@ -49,21 +53,30 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_VIEW), asyncHandler(
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('IMEI Export');
+  // Required columns only in specified order:
+  // EAN | IMEI | Model | Brand | Status | Swiped | Supplier | Stock In Date | Last Updated
   ws.columns = [
-    {header:'IMEI 1',key:'a',width:20},{header:'IMEI 2',key:'b',width:20},
-    {header:'EAN',key:'c',width:16},{header:'Model',key:'d',width:32},
-    {header:'Brand',key:'e',width:16},{header:'Type',key:'f',width:14},
-    {header:'Status',key:'g',width:14},{header:'Swiped',key:'h',width:10},
-    {header:'Supplier',key:'i',width:24},{header:'Warehouse',key:'j',width:18},
-    {header:'Stock In Date',key:'k',width:20},{header:'Last Updated',key:'l',width:20},
+    { header: 'EAN',            key: 'ean',       width: 16 },
+    { header: 'IMEI',           key: 'imei',      width: 20 },
+    { header: 'Model',          key: 'model',     width: 36 },
+    { header: 'Brand',          key: 'brand',     width: 16 },
+    { header: 'Status',         key: 'status',    width: 14 },
+    { header: 'Swiped',         key: 'swiped',    width: 10 },
+    { header: 'Supplier',       key: 'supplier',  width: 24 },
+    { header: 'Stock In Date',  key: 'stockIn',   width: 16 },
+    { header: 'Last Updated',   key: 'updated',   width: 16 },
   ];
   for (const r of rows) {
     ws.addRow({
-      a:r.imei1, b:(r as any).imei2??'', c:r.product.ean, d:r.product.model,
-      e:r.product.brand, f:(r as any).imeiType??'NIL', g:r.status,
-      h:(r as any).swiped?'Yes':'No', i:(r as any).supplier?.name??'',
-      j:r.warehouse.name, k:r.createdAt.toISOString().slice(0,10),
-      l:r.updatedAt.toISOString().slice(0,10),
+      ean:      r.product.ean,
+      imei:     r.imei1,
+      model:    r.product.model,
+      brand:    r.product.brand,
+      status:   r.status,
+      swiped:   (r as any).swiped ? 'Yes' : 'No',
+      supplier: (r as any).supplier?.name ?? '',
+      stockIn:  r.createdAt.toISOString().slice(0, 10),
+      updated:  r.updatedAt.toISOString().slice(0, 10),
     });
   }
   const buf = Buffer.from(await wb.xlsx.writeBuffer() as ArrayBuffer);
