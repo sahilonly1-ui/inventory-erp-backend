@@ -60,10 +60,10 @@ router.post('/bulk-update', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(asy
     }
   }
 
-  const ok  = results.filter(r => r.status === 'ok').length;
+  const okCount  = results.filter(r => r.status === 'ok').length;
   const nf  = results.filter(r => r.status === 'not_found').length;
   const err = results.filter(r => r.status === 'error').length;
-  ok(res, { processed: rows.length, ok, not_found: nf, errors: err, results });
+  ok(res, { processed: rows.length, ok: okCount, not_found: nf, errors: err, results });
 }));
 
 // ── Toggle swiped only ───────────────────────────────────────────────────────
