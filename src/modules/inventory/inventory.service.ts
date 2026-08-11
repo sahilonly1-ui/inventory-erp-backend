@@ -487,7 +487,10 @@ const inventoryServiceExtensions = {
       byProduct: [...byProduct.entries()].map(([id, v]) => ({
         productId: id, ...v, vendors: [...v.vendors],
       })),
-      recentTxns: txns.slice(0, 50).map(t => ({
+      // No slice here: the dashboard groups these by supplier and product, so
+      // truncating hides transactions and makes the totals disagree with the
+      // list (a 120-unit day was only showing the first 50 rows).
+      recentTxns: txns.map(t => ({
         id: t.id, type: t.type, qty: t.quantity,
         product: t.product.model,
         productId: t.productId,
