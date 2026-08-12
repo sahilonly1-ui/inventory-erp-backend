@@ -57,6 +57,7 @@ export const imeiQuerySchema = z.object({
   productId: z.string().uuid().optional(),
   warehouseId: z.string().uuid().optional(),
   search: z.string().max(60).optional(),
+  brand: z.string().max(60).optional(),
   imeiType: z.enum(['NIL','OPEN_BOX','DEMO','SECOND_IMEI']).optional(),
   swiped:     z.enum(['true','false']).optional(),
   activated:  z.enum(['true','false']).optional(),
