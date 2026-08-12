@@ -27,4 +27,12 @@ router.post('/:id/restore', authorize(PERMISSIONS.PRODUCTS_UPDATE), asyncHandler
   ok(res, await auditService.restore(req.params.id, actor(req)));
 }));
 
+// Revert a whole grouped batch. Pass dryRun to preview what would change
+// before anything is written.
+router.post('/restore-batch', authorize(PERMISSIONS.PRODUCTS_UPDATE), asyncHandler(async (req, res) => {
+  const ids: string[] = Array.isArray(req.body?.auditIds) ? req.body.auditIds.filter(Boolean) : [];
+  const dryRun = req.body?.dryRun === true;
+  ok(res, await auditService.restoreBatch(ids, actor(req), dryRun));
+}));
+
 export default router;

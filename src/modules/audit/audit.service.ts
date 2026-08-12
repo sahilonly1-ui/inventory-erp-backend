@@ -172,6 +172,94 @@ export const auditService = {
     return { items, total, page: params.page, limit: params.limit, totalPages: Math.ceil(total / params.limit) };
   },
 
+  // Restore every entry in a grouped batch.
+  //
+  // A batch mixes rows that can and cannot be reverted (a creation has nothing
+  // to revert to), and reverting a hundred rows blindly is exactly how data
+  // gets lost. So this runs in two modes: dryRun reports what would happen,
+  // and the real pass applies only the entries it can, reporting the rest.
+  async restoreBatch(auditIds: string[], actor: Actor, dryRun = false) {
+    if (!auditIds?.length) throw new BadRequestError('No entries selected');
+
+    const logs = await prisma.auditLog.findMany({ where: { id: { in: auditIds } } });
+    if (!logs.length) throw new NotFoundError('No audit entries found for this batch');
+
+    const plan: { auditId: string; label: string; willRestore: boolean; reason?: string }[] = [];
+
+    // Resolve product names once so the preview reads in plain language.
+    const productIds = new Set<string>();
+    for (const l of logs) {
+      const nv: any = l.newValue || {};
+      const ov: any = l.oldValue || {};
+      if (l.entityName === 'products') productIds.add(l.entityId);
+      if (nv.productId) productIds.add(nv.productId);
+      if (ov.productId) productIds.add(ov.productId);
+    }
+    const products = productIds.size
+      ? await prisma.product.findMany({ where: { id: { in: [...productIds] } }, select: { id: true, model: true } })
+      : [];
+    const nameById = new Map<string, string>(products.map((p: any) => [p.id as string, p.model as string]));
+
+    const labelFor = (l: typeof logs[number]) => {
+      const nv: any = l.newValue || {};
+      const ov: any = l.oldValue || {};
+      const pid = nv.productId || ov.productId || (l.entityName === 'products' ? l.entityId : null);
+      return ov.product || nv.model || ov.model || (pid ? nameById.get(pid) : null) || l.entityName;
+    };
+
+    for (const l of logs) {
+      const nv: any = l.newValue || {};
+      const isDeleteFlavoured = l.action === 'DELETE' || nv.isDeleted === true;
+      const label = labelFor(l);
+
+      if (l.entityName !== 'products') {
+        plan.push({ auditId: l.id, label, willRestore: false, reason: 'Only product changes can be reverted' });
+      } else if (l.action === 'CREATE' && !isDeleteFlavoured) {
+        plan.push({ auditId: l.id, label, willRestore: false, reason: 'Creation — nothing to revert to' });
+      } else if (l.action === 'LOGIN') {
+        plan.push({ auditId: l.id, label, willRestore: false, reason: 'Not a data change' });
+      } else {
+        plan.push({ auditId: l.id, label, willRestore: true });
+      }
+    }
+
+    const doable = plan.filter(p => p.willRestore);
+    if (dryRun) {
+      return {
+        dryRun: true,
+        total: plan.length,
+        restorable: doable.length,
+        skipped: plan.length - doable.length,
+        plan: plan.slice(0, 50),
+      };
+    }
+    if (!doable.length) {
+      throw new BadRequestError('Nothing in this batch can be reverted');
+    }
+
+    // Apply one at a time: a single failure must not roll back the others,
+    // and each restore writes its own audit trail.
+    let restored = 0;
+    const failures: { label: string; error: string }[] = [];
+    for (const item of doable) {
+      try {
+        await this.restore(item.auditId, actor);
+        restored++;
+      } catch (e: any) {
+        failures.push({ label: item.label, error: e?.message ?? 'Unknown error' });
+      }
+    }
+
+    return {
+      dryRun: false,
+      total: plan.length,
+      restored,
+      skipped: plan.length - doable.length,
+      failed: failures.length,
+      failures: failures.slice(0, 20),
+    };
+  },
+
   // Restore a single audit entry:
   //  - DELETE-flavoured entries (action DELETE, or an UPDATE that set isDeleted:true) → undelete the row
   //  - UPDATE entries → revert every field captured in oldValue back onto the row
