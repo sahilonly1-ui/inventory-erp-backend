@@ -91,6 +91,7 @@ export const imeiRepository = {
           return { OR: [
             { imei1: { contains: params.search } },
             { imei2: { contains: params.search } },
+            { product: { ean: { contains: params.search } } },
             { product: { model: { contains: params.search, mode: 'insensitive' } } },
             { product: { brand: { contains: params.search, mode: 'insensitive' } } },
           ]};
