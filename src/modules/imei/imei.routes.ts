@@ -156,6 +156,25 @@ router.post('/restore-activations', authorize(PERMISSIONS.IMEI_MANAGE), asyncHan
 }));
 
 router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'query'), imeiController.list);
+// Brands that actually have units in the tracker. The full Product Master list
+// runs to dozens of brands that carry no IMEI or serial at all, which makes the
+// filter useless to scan. Declared before '/:imei' so the literal path wins.
+router.get('/brands', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (_req, res) => {
+  const rows = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false },
+    select: { product: { select: { brand: true } } },
+    distinct: ['productId'],
+  });
+  const seen: string[] = [];
+  for (const r of rows) {
+    const b = r.product?.brand;
+    if (b && !seen.includes(b)) seen.push(b);
+  }
+  seen.sort((a, b) => a.localeCompare(b));
+  const brands = seen;
+  ok(res, brands);
+}));
+
 router.get('/:imei', authorize(PERMISSIONS.IMEI_READ), validate(imeiParamSchema, 'params'), imeiController.lookup);
 
 export default router;
