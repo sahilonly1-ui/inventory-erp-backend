@@ -96,6 +96,65 @@ router.patch('/:id/activated', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(
   ok(res, { id: updated.id, activated: updated.activated, activatedAt: updated.activatedAt });
 }));
 
+// Recover swipe/activation history that an entry edit wiped.
+//
+// Editing a stock-in entry used to soft-delete its IMEI rows and re-create them
+// blank. The old rows still hold the flags and dates, so the state can be
+// lifted back onto the live rows. Defaults to a dry run so the result can be
+// reviewed before anything is written.
+router.post('/restore-activations', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
+  const dryRun = req.body?.dryRun !== false;
+  const since = req.body?.since ? new Date(String(req.body.since)) : undefined;
+
+  const deleted = await prisma.imeiInventory.findMany({
+    where: {
+      isDeleted: true,
+      OR: [{ activated: true }, { swiped: true }],
+      ...(since ? { deletedAt: { gte: since } } : {}),
+    },
+    select: { imei1: true, swiped: true, swipedAt: true, activated: true, activatedAt: true, updatedAt: true },
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  // Several deleted generations can exist for one IMEI; the newest wins.
+  const best = new Map<string, typeof deleted[number]>();
+  for (const d of deleted) if (!best.has(d.imei1)) best.set(d.imei1, d);
+  const imeis = [...best.keys()];
+  if (!imeis.length) {
+    ok(res, { dryRun, candidates: 0, restored: 0, sample: [] });
+    return;
+  }
+
+  const live = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false, imei1: { in: imeis } },
+    select: { id: true, imei1: true, swiped: true, activated: true },
+  });
+
+  // Only ever fill in blanks — never overwrite a flag someone has since set.
+  const updates: { id: string; imei: string; data: Record<string, unknown> }[] = [];
+  for (const l of live) {
+    const d = best.get(l.imei1)!;
+    const data: Record<string, unknown> = {};
+    if (d.activated && !l.activated) { data.activated = true; data.activatedAt = d.activatedAt; }
+    if (d.swiped && !l.swiped) { data.swiped = true; data.swipedAt = d.swipedAt; }
+    if (Object.keys(data).length) updates.push({ id: l.id, imei: l.imei1, data });
+  }
+
+  if (!dryRun) {
+    for (const u of updates) {
+      await prisma.imeiInventory.update({ where: { id: u.id }, data: u.data });
+    }
+  }
+
+  ok(res, {
+    dryRun,
+    candidates: best.size,
+    liveMatched: live.length,
+    restored: updates.length,
+    sample: updates.slice(0, 25).map(u => ({ imei: u.imei, ...u.data })),
+  });
+}));
+
 router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'query'), imeiController.list);
 router.get('/:imei', authorize(PERMISSIONS.IMEI_READ), validate(imeiParamSchema, 'params'), imeiController.lookup);
 
