@@ -567,17 +567,30 @@ Object.assign(inventoryService, {
           where: { stockInTxnId: txnId, isDeleted: false },
           data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
         });
-        // LEGACY FALLBACK: delete ALL in-stock IMEIs for this product+warehouse
-        // No supplierId filter — it may be NULL due to old race condition
+        // LEGACY FALLBACK for rows created before stockInTxnId existed.
+        // Scoped deliberately: an unscoped delete here would wipe every
+        // in-stock unit of the product, including ones from other entries,
+        // taking their swipe/activation history with it. Limit to this
+        // transaction's own quantity, oldest first, so only the units this
+        // entry actually brought in are removed.
         if (byTxnId.count === 0) {
-          await tx.imeiInventory.updateMany({
+          const legacy = await tx.imeiInventory.findMany({
             where: {
               productId: txn.productId,
               warehouseId: txn.warehouseId,
               isDeleted: false,
+              stockInTxnId: null,
             },
-            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            select: { id: true },
+            orderBy: { createdAt: 'asc' },
+            take: txn.quantity,
           });
+          if (legacy.length) {
+            await tx.imeiInventory.updateMany({
+              where: { id: { in: legacy.map(l => l.id) } },
+              data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            });
+          }
         }
       }
 

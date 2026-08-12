@@ -11,7 +11,7 @@ export interface LockedImei {
 }
 
 export const imeiRepository = {
-  createReceived(
+  async createReceived(
     tx: Prisma.TransactionClient,
     productId: string,
     warehouseId: string,
@@ -20,18 +20,37 @@ export const imeiRepository = {
     vendorId?: string,
     stockInTxnId?: string,
   ) {
+    // Editing a stock-in entry soft-deletes its IMEI rows and re-creates them.
+    // Swipe/activation state lives on those rows, so without carrying it over
+    // an unrelated edit silently wipes months of activation history. Look up
+    // the most recent soft-deleted row per IMEI and restore its flags.
+    const prior = await tx.imeiInventory.findMany({
+      where: { imei1: { in: imeis.map(i => i.imei1) }, isDeleted: true },
+      select: { imei1: true, swiped: true, swipedAt: true, activated: true, activatedAt: true, updatedAt: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const priorByImei = new Map<string, typeof prior[number]>();
+    for (const p of prior) if (!priorByImei.has(p.imei1)) priorByImei.set(p.imei1, p);
+
     return tx.imeiInventory.createMany({
-      data: imeis.map((i) => ({
-        productId,
-        warehouseId,
-        imei1: i.imei1,
-        imei2: i.imei2 ?? null,
-        imeiType: i.imeiType ?? 'NIL',
-        status: ImeiStatus.IN_STOCK,
-        supplierId: vendorId ?? null,
-        stockInTxnId: stockInTxnId ?? null,
-        createdBy,
-      })),
+      data: imeis.map((i) => {
+        const p = priorByImei.get(i.imei1);
+        return {
+          productId,
+          warehouseId,
+          imei1: i.imei1,
+          imei2: i.imei2 ?? null,
+          imeiType: i.imeiType ?? 'NIL',
+          status: ImeiStatus.IN_STOCK,
+          supplierId: vendorId ?? null,
+          stockInTxnId: stockInTxnId ?? null,
+          swiped: p?.swiped ?? false,
+          swipedAt: p?.swipedAt ?? null,
+          activated: p?.activated ?? false,
+          activatedAt: p?.activatedAt ?? null,
+          createdBy,
+        };
+      }),
     });
   },
 
