@@ -1,20 +1,26 @@
 import { z } from 'zod';
 import { ImeiStatus } from '@prisma/client';
 
-// Phones carry a 14-17 digit IMEI; tablets and Wi-Fi-only devices carry an
-// alphanumeric serial number instead. Both are tracked in the same table so
-// swipe/activation works identically for either.
+// Phones carry a 14-17 digit IMEI; tablets, laptops and Wi-Fi-only devices
+// carry an alphanumeric serial number instead. Both are tracked in the same
+// table so swipe/activation works identically for either.
+//
+// The character set is deliberately permissive: manufacturers print serials
+// with slashes, dots and underscores (Samsung laptops use forms like
+// "34205/31WA00945"), and rejecting those blocks perfectly valid stock.
+const SERIAL_CHARS = /^[A-Za-z0-9\-\/._]+$/;
+
 const imei = z.string()
   .trim()
   .min(4, 'IMEI / Serial number is too short')
-  .max(32, 'IMEI / Serial number is too long')
-  .regex(/^[A-Za-z0-9-]+$/, 'IMEI / Serial number may only contain letters, digits and hyphens');
+  .max(48, 'IMEI / Serial number is too long')
+  .regex(SERIAL_CHARS, 'IMEI / Serial number may only contain letters, digits and - / . _');
 
 const imeiParam = z.string()
   .trim()
   .min(4)
-  .max(32)
-  .regex(/^[A-Za-z0-9-]+$/);
+  .max(48)
+  .regex(SERIAL_CHARS);
 
 export const receiveImeiSchema = z.object({
   productId: z.string().uuid(),
