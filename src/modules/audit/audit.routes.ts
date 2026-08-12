@@ -15,7 +15,12 @@ router.get('/', authorize(PERMISSIONS.PRODUCTS_READ), asyncHandler(async (req, r
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30));
   const entityName = req.query.entityName ? String(req.query.entityName) : undefined;
   const action = req.query.action ? String(req.query.action) : undefined;
-  ok(res, await auditService.list({ page, limit, entityName, action }));
+  // Grouped is the default: an ungrouped feed is unreadable once a single
+  // stock-in writes a hundred rows. ?grouped=false restores the flat view.
+  const grouped = String(req.query.grouped ?? 'true') !== 'false';
+  ok(res, grouped
+    ? await auditService.listGrouped({ page, limit, entityName, action })
+    : await auditService.list({ page, limit, entityName, action }));
 }));
 
 router.post('/:id/restore', authorize(PERMISSIONS.PRODUCTS_UPDATE), asyncHandler(async (req, res) => {

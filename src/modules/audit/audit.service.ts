@@ -50,6 +50,128 @@ export const auditService = {
     return { items, total, page: params.page, limit: params.limit, totalPages: Math.ceil(total / params.limit) };
   },
 
+  // Grouped feed: one row per batch of related changes.
+  //
+  // A single stock-in of 100 units writes 100 audit rows. Listed individually
+  // they bury everything else and give no sense of what was actually done, so
+  // changes made by the same user, to the same entity, with the same action,
+  // within the same minute are collapsed into one entry carrying the product
+  // names and quantities.
+  async listGrouped(params: { page: number; limit: number; entityName?: string; action?: string }) {
+    const conds: string[] = [];
+    const vals: any[] = [];
+    if (params.entityName) { vals.push(params.entityName); conds.push(`"entityName" = $${vals.length}`); }
+    if (params.action)     { vals.push(params.action);     conds.push(`action = $${vals.length}`); }
+    const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const offset = (params.page - 1) * params.limit;
+
+    const groups = (await (prisma as any).$queryRawUnsafe(
+      `SELECT
+         MIN(id::text)                          AS "anchorId",
+         "userId",
+         "entityName",
+         action,
+         date_trunc('minute', "createdAt")       AS bucket,
+         COUNT(*)::int                           AS "changeCount",
+         MAX("createdAt")                        AS "createdAt",
+         array_agg(id::text ORDER BY "createdAt") AS ids
+       FROM audit_logs
+       ${whereSql}
+       GROUP BY "userId", "entityName", action, date_trunc('minute', "createdAt")
+       ORDER BY MAX("createdAt") DESC
+       LIMIT ${params.limit} OFFSET ${offset}`,
+      ...vals,
+    )) as any[];
+
+    const totalRows = (await (prisma as any).$queryRawUnsafe(
+      `SELECT COUNT(*)::int AS n FROM (
+         SELECT 1 FROM audit_logs ${whereSql}
+         GROUP BY "userId", "entityName", action, date_trunc('minute', "createdAt")
+       ) g`,
+      ...vals,
+    )) as any[];
+    const total = Number(totalRows[0]?.n ?? 0);
+
+    if (!groups.length) {
+      return { items: [], total, page: params.page, limit: params.limit, totalPages: Math.ceil(total / params.limit) };
+    }
+
+    // Pull the member rows so each group can describe itself.
+    const allIds = groups.flatMap(g => (g.ids as string[]).slice(0, 200));
+    const logs = await prisma.auditLog.findMany({ where: { id: { in: allIds } } });
+    const logById = new Map(logs.map(l => [l.id, l]));
+
+    // Resolve display names in one pass rather than per group.
+    const productIds = new Set<string>();
+    for (const l of logs) {
+      const nv: any = l.newValue || {};
+      const ov: any = l.oldValue || {};
+      if (l.entityName === 'products') productIds.add(l.entityId);
+      if (nv.productId) productIds.add(nv.productId);
+      if (ov.productId) productIds.add(ov.productId);
+    }
+    const products = productIds.size
+      ? await prisma.product.findMany({ where: { id: { in: [...productIds] } }, select: { id: true, model: true, ean: true } })
+      : [];
+    const productMap = new Map<string, { id: string; model: string; ean: string }>(
+      products.map((p: any) => [p.id as string, p as { id: string; model: string; ean: string }]));
+
+    const userIds = [...new Set(groups.map(g => g.userId).filter(Boolean))] as string[];
+    const users = userIds.length
+      ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true, email: true } })
+      : [];
+    const userMap = new Map(users.map(u => [u.id, u.fullName || u.email]));
+
+    const items = groups.map(g => {
+      const members = (g.ids as string[]).map(id => logById.get(id)).filter(Boolean) as typeof logs;
+
+      // Roll members up into "product → units" so the entry reads like the
+      // action the operator actually performed.
+      const perProduct = new Map<string, number>();
+      let unitTotal = 0;
+      for (const m of members) {
+        const nv: any = m.newValue || {};
+        const ov: any = m.oldValue || {};
+
+        // A bulk-delete row already carries its own product breakdown.
+        if (ov.bulk && ov.products) {
+          for (const [model, qty] of Object.entries(ov.products as Record<string, number>)) {
+            perProduct.set(model, (perProduct.get(model) || 0) + Number(qty));
+            unitTotal += Number(qty);
+          }
+          continue;
+        }
+
+        const pid = nv.productId || ov.productId || (m.entityName === 'products' ? m.entityId : null);
+        const name = ov.product || nv.model || ov.model || (pid ? productMap.get(pid)?.model : null) || 'Unknown item';
+        const qty = Math.abs(Number(nv.quantity ?? ov.quantity ?? 0)) || 1;
+        perProduct.set(name, (perProduct.get(name) || 0) + qty);
+        unitTotal += qty;
+      }
+
+      const lines = [...perProduct.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([model, qty]) => ({ model, qty }));
+
+      return {
+        id: g.anchorId,
+        ids: g.ids,
+        action: g.action,
+        entityName: g.entityName,
+        createdAt: g.createdAt,
+        userName: g.userId ? (userMap.get(g.userId) || 'Unknown user') : 'System',
+        changeCount: g.changeCount,
+        unitTotal,
+        products: lines,
+        // Single-change groups behave exactly like the old flat rows.
+        single: g.changeCount === 1 ? logById.get((g.ids as string[])[0]) ?? null : null,
+      };
+    });
+
+    return { items, total, page: params.page, limit: params.limit, totalPages: Math.ceil(total / params.limit) };
+  },
+
   // Restore a single audit entry:
   //  - DELETE-flavoured entries (action DELETE, or an UPDATE that set isDeleted:true) → undelete the row
   //  - UPDATE entries → revert every field captured in oldValue back onto the row
