@@ -51,7 +51,7 @@ async function main() {
 
   // 2. Roles
   await client.query(`INSERT INTO roles(id,name,description,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,'ADMIN','Full access',now(),now()) ON CONFLICT(name) DO NOTHING`);
-  await client.query(`INSERT INTO roles(id,name,description,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,'STAFF','Read-only',now(),now()) ON CONFLICT(name) DO NOTHING`);
+  await client.query(`INSERT INTO roles(id,name,description,"createdAt","updatedAt") VALUES(gen_random_uuid()::text,'STAFF','Showroom staff — configure permissions in Users & Access',now(),now()) ON CONFLICT(name) DO NOTHING`);
 
   // 3. Get IDs
   const adminRole = await client.query(`SELECT id FROM roles WHERE name='ADMIN' LIMIT 1`);
@@ -61,32 +61,42 @@ async function main() {
   if (!adminRoleId || !wildPermId) throw new Error('ADMIN role or * permission missing');
   console.log(`[seed] ADMIN role: ${adminRoleId.slice(0,8)}, * perm: ${wildPermId.slice(0,8)}`);
 
-  // 4. Clear junction tables
-  await client.query(`DELETE FROM "_RolePermissions"`);
-  await client.query(`DELETE FROM "_UserRoles"`);
-  console.log('[seed] Junction tables cleared.');
-
-  // 5. _RolePermissions: A=Permission.id, B=Role.id  (Prisma alphabetical: Permission < Role)
+  // 4. Link ADMIN to the wildcard permission.
+  //
+  // This block used to DELETE every row from _RolePermissions and _UserRoles
+  // before rebuilding them. Because the seed runs on every deploy and every
+  // Render restart, that silently wiped the permissions an admin had granted
+  // and un-assigned every staff member's role — which looked like permissions
+  // "turning themselves off" hours after being set. The seed now only ensures
+  // the bootstrap admin can always get in, and never removes anything.
   await client.query(
-    `INSERT INTO "_RolePermissions"("A","B") VALUES($1,$2)`,
+    `INSERT INTO "_RolePermissions"("A","B") VALUES($1,$2) ON CONFLICT DO NOTHING`,
     [wildPermId, adminRoleId]  // A=permission, B=role
   );
-  console.log('[seed] ADMIN -> * linked (A=permId, B=roleId).');
+  console.log('[seed] ADMIN -> * ensured.');
 
-  // STAFF read permissions
-  const readPerms = await client.query(
-    `SELECT id FROM permissions WHERE code IN ('products.read','vendors.read','warehouses.read','inventory.read','imei.read','marketplace.read')`
-  );
+  // 5. STAFF starting permissions — applied only when the role has none yet,
+  // so an administrator's later edits are never reverted.
   const staffRole = await client.query(`SELECT id FROM roles WHERE name='STAFF' LIMIT 1`);
   const staffRoleId = staffRole.rows[0]?.id;
   if (staffRoleId) {
-    for (const row of readPerms.rows) {
-      await client.query(
-        `INSERT INTO "_RolePermissions"("A","B") VALUES($1,$2) ON CONFLICT DO NOTHING`,
-        [row.id, staffRoleId]  // A=permission, B=role
+    const existingStaffPerms = await client.query(
+      `SELECT COUNT(*)::int AS n FROM "_RolePermissions" WHERE "B"=$1`, [staffRoleId]
+    );
+    if ((existingStaffPerms.rows[0]?.n ?? 0) === 0) {
+      const readPerms = await client.query(
+        `SELECT id FROM permissions WHERE code IN ('products.read','vendors.read','warehouses.read','inventory.read','imei.read','marketplace.read')`
       );
+      for (const row of readPerms.rows) {
+        await client.query(
+          `INSERT INTO "_RolePermissions"("A","B") VALUES($1,$2) ON CONFLICT DO NOTHING`,
+          [row.id, staffRoleId]
+        );
+      }
+      console.log(`[seed] STAFF seeded with ${readPerms.rows.length} starter perms (first run only).`);
+    } else {
+      console.log('[seed] STAFF already configured — left untouched.');
     }
-    console.log(`[seed] STAFF -> ${readPerms.rows.length} read perms linked.`);
   }
 
   // 6. Admin user
