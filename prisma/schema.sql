@@ -52,15 +52,18 @@ CREATE TABLE IF NOT EXISTS permissions (
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-DROP TABLE IF EXISTS "_UserRoles" CASCADE;
-CREATE TABLE "_UserRoles" (
+-- These two tables hold every role assignment and every granted permission.
+-- They were previously DROPped and recreated on each deploy, which ran on every
+-- Render restart — so an admin's grants and staff role assignments vanished a
+-- few hours after being set. Create-if-absent only: this file runs constantly
+-- and must never destroy live data.
+CREATE TABLE IF NOT EXISTS "_UserRoles" (
   "A" TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
   "B" TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   UNIQUE("A","B")
 );
 
-DROP TABLE IF EXISTS "_RolePermissions" CASCADE;
-CREATE TABLE "_RolePermissions" (
+CREATE TABLE IF NOT EXISTS "_RolePermissions" (
   "A" TEXT NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
   "B" TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
   UNIQUE("A","B")

@@ -80,7 +80,18 @@ async function main() {
   const sql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
   const statements = sql.split(';')
     .map(s => s.replace(/^(\s*--[^\n]*\n)+/gm, '').trim())
-    .filter(s => s.length > 5 && !s.startsWith('--'));
+    .filter(s => {
+      if (s.length <= 5 || s.startsWith('--')) return false;
+      // Never run a DROP from this file. It executes on every deploy, and a
+      // single DROP of a junction table takes every role assignment and granted
+      // permission with it. schema.sql no longer contains any, but this runs
+      // unattended against production — the guard stays.
+      if (s.trimStart().toUpperCase().startsWith('DROP ')) {
+        console.log('[schema] Skipped DROP statement (destructive):', s.slice(0, 60));
+        return false;
+      }
+      return true;
+    });
 
   console.log(`Applying ${statements.length} statements...`);
   let ok = 0, skip = 0, err = 0;
