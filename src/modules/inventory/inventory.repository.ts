@@ -49,6 +49,8 @@ export const inventoryRepository = {
       referenceId: params.referenceId ?? null,
       remarks: params.remarks ?? null,
       createdBy: params.createdBy,
+      // Only set when supplied, so live entries keep the DB default of now().
+      ...(params.occurredAt ? { createdAt: params.occurredAt } : {}),
     };
     return tx.inventoryTransaction.create({ data });
   },

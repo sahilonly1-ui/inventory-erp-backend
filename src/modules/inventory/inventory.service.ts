@@ -7,6 +7,21 @@ import { inventoryRepository as repo } from './inventory.repository';
 import { imeiRepository } from '../imei/imei.repository';
 import { Actor, LedgerMovementParams, MovementResult, EanLookupResult } from './inventory.dto';
 
+/**
+ * Turn a "YYYY-MM-DD" from the entry screen into a timestamp.
+ *
+ * Anchored at UTC noon, the same convention used for swipe/activation dates,
+ * so the calendar day is identical no matter where it is displayed. Returns
+ * null for today's entries so the database default applies.
+ */
+function parseTxnDate(d?: string | null): Date | null {
+  if (!d) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d.trim());
+  if (!m) return null;
+  const when = new Date(`${d.trim()}T12:00:00.000Z`);
+  return Number.isNaN(when.getTime()) ? null : when;
+}
+
 const INBOUND = new Set<TransactionType>([
   TransactionType.STOCK_IN,
   TransactionType.RETURN,
@@ -77,7 +92,7 @@ async function ensureNonImeiProduct(productId: string) {
 export const inventoryService = {
   async stockIn(input: {
     productId: string; warehouseId: string; quantity: number;
-    unitCost?: number; vendorId?: string; remarks?: string;
+    unitCost?: number; vendorId?: string; remarks?: string; txnDate?: string;
   }, actor: Actor): Promise<MovementResult> {
     await ensureNonImeiProduct(input.productId);
     const result = await prisma.$transaction((tx) =>
@@ -89,6 +104,7 @@ export const inventoryService = {
         unitCost: input.unitCost ?? null,
         vendorId: input.vendorId ?? null,
         remarks: input.remarks ?? null,
+        occurredAt: parseTxnDate(input.txnDate),
       }, actor),
     );
     emitStockChanged({ productId: input.productId, warehouseId: input.warehouseId, quantity: result.newQuantity, type: 'STOCK_IN' });
@@ -97,6 +113,7 @@ export const inventoryService = {
 
   async stockOut(input: {
     productId: string; warehouseId: string; quantity: number; remarks?: string;
+    vendorId?: string; txnDate?: string;
   }, actor: Actor): Promise<MovementResult> {
     await ensureNonImeiProduct(input.productId);
     const result = await prisma.$transaction((tx) =>
@@ -106,6 +123,8 @@ export const inventoryService = {
         type: TransactionType.STOCK_OUT,
         signedQty: toSigned(TransactionType.STOCK_OUT, input.quantity),
         remarks: input.remarks ?? null,
+        vendorId: input.vendorId ?? null,
+        occurredAt: parseTxnDate(input.txnDate),
       }, actor),
     );
     emitStockChanged({ productId: input.productId, warehouseId: input.warehouseId, quantity: result.newQuantity, type: 'STOCK_OUT' });

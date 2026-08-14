@@ -17,6 +17,14 @@ export function statusStockDelta(from: ImeiStatus, to: ImeiStatus): number {
   return (isInStock(to) ? 1 : 0) - (isInStock(from) ? 1 : 0);
 }
 
+/** "YYYY-MM-DD" from the dispatch screen → UTC noon, matching the ledger. */
+function parseDispatchDate(d?: string | null): Date | null {
+  if (!d) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.trim())) return null;
+  const when = new Date(`${d.trim()}T12:00:00.000Z`);
+  return Number.isNaN(when.getTime()) ? null : when;
+}
+
 export const imeiService = {
   // Stock-in for IMEI products: create units + ledger inbound, same transaction.
   async receive(input: ReceiveImeiInput, actor: Actor) {
@@ -64,6 +72,7 @@ export const imeiService = {
         vendorId: input.vendorId ?? (input as any).vendorId ?? null,
         referenceType: 'IMEI_RECEIVE',
         remarks: input.remarks ?? null,
+        occurredAt: parseDispatchDate((input as any).txnDate),
       }, actor);
       // Create IMEI records linked to this exact transaction — enables time-independent edit
       await imeiRepository.createReceived(
@@ -116,6 +125,10 @@ export const imeiService = {
           referenceType: input.referenceType ?? 'IMEI_DISPATCH',
           referenceId: input.referenceId ?? null,
           remarks: input.remarks ?? null,
+          // Recorded against the customer and the date the goods actually left,
+          // not against nobody on whatever day the entry was typed.
+          vendorId: (input as any).vendorId ?? null,
+          occurredAt: parseDispatchDate((input as any).txnDate),
         }, actor);
         await assertConsistentTx(tx, productId, warehouseId, true, { strict: true });
         out.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });

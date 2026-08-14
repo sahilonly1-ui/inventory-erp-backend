@@ -34,6 +34,8 @@ export const receiveImeiSchema = z.object({
     .min(1)
     .max(2000),
   vendorId: z.string().uuid().optional(),
+  // Stock received yesterday must be recorded against yesterday.
+  txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   remarks: z.string().max(500).optional(),
   force: z.boolean().optional(), // bypass imeiRequired check (user explicitly chose IMEI column)
   type: z.enum(['STOCK_IN', 'OPENING']).optional(), // OPENING = Opening Stock entry, not a normal receive
@@ -44,6 +46,9 @@ export const dispatchImeiSchema = z.object({
   channel: z.enum(['STOCK_OUT', 'MARKETPLACE']).default('STOCK_OUT'),
   referenceType: z.string().max(60).optional(),
   referenceId: z.string().max(120).optional(),
+  // Who it went to, and when it actually went out.
+  vendorId: z.string().uuid().optional(),
+  txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   remarks: z.string().max(500).optional(),
 });
 

@@ -16,6 +16,12 @@ export interface LedgerMovementParams {
   referenceType?: string | null;
   referenceId?: string | null;
   remarks?: string | null;
+  /**
+   * When the movement actually happened. Entries are often recorded a day or
+   * two after the fact, and without this every one of them lands on today —
+   * which is what made a backdated dispatch show up under the wrong date.
+   */
+  occurredAt?: Date | null;
 }
 
 export interface MovementResult {

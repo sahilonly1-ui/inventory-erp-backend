@@ -10,13 +10,21 @@ export const stockInSchema = z.object({
   quantity: qty,
   unitCost: z.coerce.number().nonnegative().optional(),
   vendorId: uuid.optional(),
+  txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   remarks: z.string().max(500).optional(),
 });
+
+const txnDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
 
 export const stockOutSchema = z.object({
   productId: uuid,
   warehouseId: uuid,
   quantity: qty,
+  // The counterparty (customer) and the date the movement actually happened.
+  // Without these a backdated dispatch to a named customer was recorded as
+  // today's, against no vendor at all.
+  vendorId: uuid.optional(),
+  txnDate,
   remarks: z.string().max(500).optional(),
 });
 
