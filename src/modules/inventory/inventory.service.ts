@@ -694,21 +694,65 @@ Object.assign(inventoryService, {
         }
       }
 
-      // 3. Soft-delete ALL linked IMEI records in ONE bulk query
-      const byTxnId = await tx.imeiInventory.updateMany({
-        where: { stockInTxnId: { in: txnIds }, isDeleted: false },
-        data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
-      });
+      // 3. Undo the IMEI side of each transaction — in the right direction.
+      //
+      // Deleting a receipt should remove the units it created. Deleting a
+      // dispatch should put the units back IN_STOCK: they are physically in
+      // the showroom again, and their history has to survive. Treating both
+      // the same way was erasing serials from the tracker whenever a Stock Out
+      // entry was deleted, even though the stock itself came back.
+      const inboundTxnIds = txns.filter(t => t.quantity > 0).map(t => t.id);
+      const outboundTxns = txns.filter(t => t.quantity < 0);
 
-      // 4. LEGACY FALLBACK: for any product+warehouse pair where no IMEI matched
-      //    by stockInTxnId (old records missing the link), soft-delete by
-      //    product+warehouse instead — batched per unique pair, not per txn.
-      if (byTxnId.count === 0) {
-        for (const { productId, warehouseId } of deltaByKey.values()) {
+      let byTxnId = { count: 0 };
+      if (inboundTxnIds.length) {
+        byTxnId = await tx.imeiInventory.updateMany({
+          where: { stockInTxnId: { in: inboundTxnIds }, isDeleted: false },
+          data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+        });
+      }
+
+      // Reverse each dispatch: return the units it sold to stock. Dispatches
+      // carry no per-unit link, so take the most recently sold units of that
+      // product in that warehouse, capped at the quantity being reversed.
+      for (const t of outboundTxns) {
+        const sold = await tx.imeiInventory.findMany({
+          where: {
+            productId: t.productId,
+            warehouseId: t.warehouseId,
+            isDeleted: false,
+            status: 'SOLD',
+          },
+          select: { id: true },
+          orderBy: { updatedAt: 'desc' },
+          take: Math.abs(t.quantity),
+        });
+        if (sold.length) {
           await tx.imeiInventory.updateMany({
-            where: { productId, warehouseId, isDeleted: false },
-            data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            where: { id: { in: sold.map(r => r.id) } },
+            data: { status: 'IN_STOCK', updatedBy: actor.id },
           });
+        }
+      }
+
+      // 4. LEGACY FALLBACK: receipts predating the stockInTxnId link. Scoped to
+      //    the quantity actually being removed — an unscoped delete here used
+      //    to take every unit of the product with it.
+      if (inboundTxnIds.length && byTxnId.count === 0) {
+        for (const { productId, warehouseId, qty } of deltaByKey.values()) {
+          if (qty <= 0) continue;
+          const legacy = await tx.imeiInventory.findMany({
+            where: { productId, warehouseId, isDeleted: false, stockInTxnId: null },
+            select: { id: true },
+            orderBy: { createdAt: 'desc' },
+            take: qty,
+          });
+          if (legacy.length) {
+            await tx.imeiInventory.updateMany({
+              where: { id: { in: legacy.map(l => l.id) } },
+              data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+            });
+          }
         }
       }
 

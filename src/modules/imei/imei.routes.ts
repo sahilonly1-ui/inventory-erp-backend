@@ -156,6 +156,59 @@ router.post('/restore-activations', authorize(PERMISSIONS.IMEI_MANAGE), asyncHan
 }));
 
 router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'query'), imeiController.list);
+// Bring back IMEI/serial records that a deleted Stock Out entry wrongly
+// removed from the tracker.
+//
+// Deleting a dispatch used to soft-delete its units instead of returning them
+// to stock, so the serials vanished even though the goods were back on the
+// shelf. This restores those rows. A unit is only restored when no live record
+// already holds the same IMEI, so it can never create a duplicate.
+router.post('/restore-deleted', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req, res) => {
+  const dryRun = req.body?.dryRun !== false;
+  const since = req.body?.since ? new Date(String(req.body.since)) : undefined;
+
+  const deleted = await prisma.imeiInventory.findMany({
+    where: { isDeleted: true, ...(since ? { deletedAt: { gte: since } } : {}) },
+    select: { id: true, imei1: true, status: true, deletedAt: true, product: { select: { model: true } } },
+    orderBy: { deletedAt: 'desc' },
+    take: 5000,
+  });
+  if (!deleted.length) { ok(res, { dryRun, candidates: 0, restorable: 0, restored: 0, sample: [] }); return; }
+
+  // Skip any IMEI that already exists as a live record.
+  const live = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false, imei1: { in: deleted.map(d => d.imei1) } },
+    select: { imei1: true },
+  });
+  const taken = new Set(live.map(l => l.imei1));
+
+  // One deleted generation per IMEI — the newest.
+  const seen = new Set<string>();
+  const plan: typeof deleted = [];
+  for (const d of deleted) {
+    if (taken.has(d.imei1) || seen.has(d.imei1)) continue;
+    seen.add(d.imei1);
+    plan.push(d);
+  }
+
+  if (!dryRun && plan.length) {
+    await prisma.imeiInventory.updateMany({
+      where: { id: { in: plan.map(p => p.id) } },
+      // Back on the shelf, and visible in the tracker again.
+      data: { isDeleted: false, deletedAt: null, deletedBy: null, status: 'IN_STOCK', updatedBy: req.user!.id },
+    });
+  }
+
+  ok(res, {
+    dryRun,
+    candidates: deleted.length,
+    restorable: plan.length,
+    restored: dryRun ? 0 : plan.length,
+    skipped: deleted.length - plan.length,
+    sample: plan.slice(0, 25).map(p => ({ imei: p.imei1, product: p.product?.model ?? '', deletedAt: p.deletedAt })),
+  });
+}));
+
 // Brands that actually have units in the tracker. The full Product Master list
 // runs to dozens of brands that carry no IMEI or serial at all, which makes the
 // filter useless to scan. Declared before '/:imei' so the literal path wins.
