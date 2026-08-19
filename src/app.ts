@@ -91,6 +91,17 @@ export function createApp(): Application {
   });
   // ── End Shopify OAuth ───────────────────────────────────────────────────────
 
+  // ── Shopify post-install landing ────────────────────────────────────────────
+  app.get('/', (req, res) => {
+    const shop = req.query.shop as string;
+    return res.send(`
+      <h2>✅ iTechArena Content Automation</h2>
+      <p>App is installed and running for: <strong>${shop || 'your store'}</strong></p>
+      <p>You can close this tab.</p>
+    `);
+  });
+  // ── End Shopify post-install landing ────────────────────────────────────────
+
   app.use(notFoundHandler);
   app.use(errorHandler);
   return app;
