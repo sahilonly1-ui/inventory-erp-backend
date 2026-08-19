@@ -14,7 +14,10 @@ export function createApp(): Application {
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
   app.use(pinoHttp({ logger }));
-  app.use(helmet());
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    frameguard: false,
+  }));
   app.use(
     cors({
       origin: env.CORS_ORIGINS === '*' ? true : env.CORS_ORIGINS.split(',').map((o) => o.trim()),
