@@ -206,13 +206,13 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
     if (t.quantity > 0) {
-      // PRIMARY: stockInTxnId — set at scan time, exact match always
+      // Stock In — PRIMARY: exact link set at scan time
       imeis = await prisma.imeiInventory.findMany({
         where: { stockInTxnId: t.id, isDeleted: false },
         select: { id: true, imei1: true, imeiType: true, status: true },
         orderBy: { createdAt: 'asc' },
       });
-      // LEGACY: for entries before stockInTxnId was added
+      // LEGACY: entries before stockInTxnId existed
       if (imeis.length === 0) {
         imeis = await prisma.imeiInventory.findMany({
           where: {
@@ -226,6 +226,30 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
           take: Math.abs(t.quantity),
         });
       }
+    } else {
+      // Stock Out — the dispatched units are now SOLD; fetch them by product +
+      // warehouse + approximate time window so the edit screen shows the right
+      // IMEIs and can re-dispatch them when saved.
+      //
+      // The fix that was missing: quantity < 0 was treated as "no IMEIs",
+      // which left the IMEI column blank in edit mode and made re-save look
+      // like a fresh dispatch of random in-stock units rather than the
+      // original ones.
+      const absQty = Math.abs(t.quantity);
+      const windowStart = new Date(t.createdAt.getTime() - 60 * 60 * 1000);
+      const windowEnd   = new Date(t.createdAt.getTime() + 60 * 60 * 1000);
+      imeis = await prisma.imeiInventory.findMany({
+        where: {
+          productId: t.productId,
+          warehouseId: t.warehouseId,
+          status: 'SOLD',
+          isDeleted: false,
+          updatedAt: { gte: windowStart, lte: windowEnd },
+        },
+        select: { id: true, imei1: true, imeiType: true, status: true },
+        orderBy: { updatedAt: 'desc' },
+        take: absQty,
+      });
     }
     return {
       id: t.id,

@@ -59,11 +59,17 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
   const windowStart = new Date(stockedInAt.getTime() - 60 * 60 * 1000);
   const windowEnd = new Date(stockedInAt.getTime() + 60 * 60 * 1000);
 
+  // For Stock In entries the units were created in the window; for Stock Out
+  // they were SOLD (status updated) in the window. Check both so the export
+  // works correctly for either direction.
+  const isOutbound = txns.every(t => t.quantity < 0);
   const units = await prisma.imeiInventory.findMany({
     where: {
       isDeleted: false,
       productId: { in: productIds },
-      createdAt: { gte: windowStart, lte: windowEnd },
+      ...(isOutbound
+        ? { status: 'SOLD', updatedAt: { gte: windowStart, lte: windowEnd } }
+        : { createdAt: { gte: windowStart, lte: windowEnd } }),
     },
     include: { product: { select: { id: true, ean: true, model: true } } },
     orderBy: [{ product: { model: 'asc' } }, { imei1: 'asc' }],
@@ -88,7 +94,7 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
   for (const r of rows) codedByProduct.set(r.productId, (codedByProduct.get(r.productId) || 0) + 1);
   for (const t of txns) {
     const covered = codedByProduct.get(t.productId) || 0;
-    const missing = Math.max(0, t.quantity - covered);
+    const missing = Math.max(0, Math.abs(t.quantity) - covered);
     for (let i = 0; i < missing; i++) {
       rows.push({ productId: t.productId, ean: t.product.ean, model: t.product.model, code: '—', imeiType: 'NIL' });
     }
