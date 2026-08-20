@@ -716,21 +716,30 @@ Object.assign(inventoryService, {
       // carry no per-unit link, so take the most recently sold units of that
       // product in that warehouse, capped at the quantity being reversed.
       for (const t of outboundTxns) {
-        const sold = await tx.imeiInventory.findMany({
-          where: {
-            productId: t.productId,
-            warehouseId: t.warehouseId,
-            isDeleted: false,
-            status: 'SOLD',
-          },
+        // Prefer the exact link; fall back to most-recently-sold for dispatches
+        // made before the link column existed.
+        let sold = await tx.imeiInventory.findMany({
+          where: { stockOutTxnId: t.id, isDeleted: false },
           select: { id: true },
-          orderBy: { updatedAt: 'desc' },
-          take: Math.abs(t.quantity),
         });
+        if (sold.length === 0) {
+          sold = await tx.imeiInventory.findMany({
+            where: {
+              productId: t.productId,
+              warehouseId: t.warehouseId,
+              isDeleted: false,
+              status: 'SOLD',
+              stockOutTxnId: null,
+            },
+            select: { id: true },
+            orderBy: { updatedAt: 'desc' },
+            take: Math.abs(t.quantity),
+          });
+        }
         if (sold.length) {
           await tx.imeiInventory.updateMany({
             where: { id: { in: sold.map(r => r.id) } },
-            data: { status: 'IN_STOCK', updatedBy: actor.id },
+            data: { status: 'IN_STOCK', updatedBy: actor.id, stockOutTxnId: null },
           });
         }
       }

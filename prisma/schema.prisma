@@ -413,6 +413,8 @@ model ImeiInventory {
   supplierId  String?
   supplier    Vendor? @relation(fields: [supplierId], references: [id])
   stockInTxnId  String? // links this IMEI to the exact InventoryTransaction it came from
+  stockOutTxnId String? // links this IMEI to the dispatch that sold it — a time
+                        // window cannot be used because entries may be backdated
   purchaseDate DateTime?
   invoiceNo   String?
 

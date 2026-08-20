@@ -63,17 +63,33 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
   // they were SOLD (status updated) in the window. Check both so the export
   // works correctly for either direction.
   const isOutbound = txns.every(t => t.quantity < 0);
-  const units = await prisma.imeiInventory.findMany({
+
+  // Prefer the explicit per-unit link; fall back to a time window only for
+  // entries recorded before those links existed. A window alone is wrong for
+  // backdated entries, where the unit was sold on a different day than the
+  // entry claims.
+  let units = await prisma.imeiInventory.findMany({
     where: {
       isDeleted: false,
-      productId: { in: productIds },
-      ...(isOutbound
-        ? { status: 'SOLD', updatedAt: { gte: windowStart, lte: windowEnd } }
-        : { createdAt: { gte: windowStart, lte: windowEnd } }),
+      ...(isOutbound ? { stockOutTxnId: { in: txnIds } } : { stockInTxnId: { in: txnIds } }),
     },
     include: { product: { select: { id: true, ean: true, model: true } } },
     orderBy: [{ product: { model: 'asc' } }, { imei1: 'asc' }],
   });
+
+  if (units.length === 0) {
+    units = await prisma.imeiInventory.findMany({
+      where: {
+        isDeleted: false,
+        productId: { in: productIds },
+        ...(isOutbound
+          ? { status: 'SOLD', updatedAt: { gte: windowStart, lte: windowEnd } }
+          : { createdAt: { gte: windowStart, lte: windowEnd } }),
+      },
+      include: { product: { select: { id: true, ean: true, model: true } } },
+      orderBy: [{ product: { model: 'asc' } }, { imei1: 'asc' }],
+    });
+  }
 
   const invoiceNo =
     units.find(u => (u as any).invoiceNo)?.['invoiceNo' as keyof typeof units[number]] as string ||

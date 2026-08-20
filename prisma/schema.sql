@@ -336,6 +336,12 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 
 -- Fix tables created in earlier runs without timestamp defaults
+-- Links a dispatched unit to the transaction that sold it. Matching by time
+-- window breaks as soon as an entry is backdated, which left the edit screen
+-- and the per-entry export showing no IMEIs at all for Stock Out.
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "stockOutTxnId" TEXT;
+CREATE INDEX IF NOT EXISTS idx_imei_stock_out_txn ON imei_inventory("stockOutTxnId");
+
 ALTER TABLE permissions ALTER COLUMN "updatedAt" SET DEFAULT now();
 ALTER TABLE permissions ALTER COLUMN "createdAt" SET DEFAULT now();
 ALTER TABLE roles ALTER COLUMN "updatedAt" SET DEFAULT now();

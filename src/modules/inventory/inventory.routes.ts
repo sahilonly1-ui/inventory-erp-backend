@@ -236,20 +236,31 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
       // like a fresh dispatch of random in-stock units rather than the
       // original ones.
       const absQty = Math.abs(t.quantity);
-      const windowStart = new Date(t.createdAt.getTime() - 60 * 60 * 1000);
-      const windowEnd   = new Date(t.createdAt.getTime() + 60 * 60 * 1000);
+
+      // PRIMARY: the exact link written at dispatch time.
       imeis = await prisma.imeiInventory.findMany({
-        where: {
-          productId: t.productId,
-          warehouseId: t.warehouseId,
-          status: 'SOLD',
-          isDeleted: false,
-          updatedAt: { gte: windowStart, lte: windowEnd },
-        },
+        where: { stockOutTxnId: t.id, isDeleted: false },
         select: { id: true, imei1: true, imeiType: true, status: true },
-        orderBy: { updatedAt: 'desc' },
-        take: absQty,
+        orderBy: { updatedAt: 'asc' },
       });
+
+      // LEGACY: dispatches made before the link existed. The window is keyed on
+      // updatedAt (when the unit was sold) and deliberately wide, because the
+      // transaction may have been backdated to a completely different day.
+      if (imeis.length === 0) {
+        imeis = await prisma.imeiInventory.findMany({
+          where: {
+            productId: t.productId,
+            warehouseId: t.warehouseId,
+            status: 'SOLD',
+            isDeleted: false,
+            stockOutTxnId: null,
+          },
+          select: { id: true, imei1: true, imeiType: true, status: true },
+          orderBy: { updatedAt: 'desc' },
+          take: absQty,
+        });
+      }
     }
     return {
       id: t.id,

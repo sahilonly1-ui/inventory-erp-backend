@@ -130,6 +130,16 @@ export const imeiService = {
           vendorId: (input as any).vendorId ?? null,
           occurredAt: parseDispatchDate((input as any).txnDate),
         }, actor);
+
+        // Link each dispatched unit to the transaction that sold it. Without
+        // this the only way back was a time window around the entry date, which
+        // fails the moment an entry is backdated — the edit screen and the
+        // per-entry export both came up empty for Stock Out because of it.
+        await tx.imeiInventory.updateMany({
+          where: { id: { in: rows.map((r: any) => r.id) } },
+          data: { stockOutTxnId: move.transactionId ?? null },
+        });
+
         await assertConsistentTx(tx, productId, warehouseId, true, { strict: true });
         out.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });
       }
