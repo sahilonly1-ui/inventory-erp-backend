@@ -33,23 +33,43 @@ export async function assertConsistentTx(
   const level = levelRow?.quantity ?? 0;
   const imeiCount = imeiRequired ? await imeiRepository.countInStock(tx, productId, warehouseId) : null;
 
-  const consistent = ledger === level && (imeiCount === null || imeiCount === level);
+  // The ledger and the stock level must always agree exactly — a difference
+  // there is a real accounting bug.
+  const ledgerOk = ledger === level;
+
+  // Tracked units are a different matter. A product's stock is often part
+  // tracked and part not: accessories and older receipts were recorded as a
+  // plain quantity with no unit records, and serials only started being stored
+  // as units recently. Demanding imeiCount === level therefore blocked
+  // perfectly valid entries — adding five serialised TVs to a product that
+  // already held five untracked ones failed, even though nothing was wrong.
+  //
+  // The real invariant is that there can never be MORE tracked units than
+  // stock. Fewer is expected, and is surfaced as a notification rather than
+  // stopping the operator mid-entry.
+  const imeiOverflow = imeiCount !== null && imeiCount > level;
+  const imeiUnderCount = imeiCount !== null && imeiCount < level;
+
+  const consistent = ledgerOk && !imeiOverflow && !imeiUnderCount;
+  const blocking = !ledgerOk || imeiOverflow;
 
   if (!consistent) {
     const detail = { productId, warehouseId, ledger, level, imeiCount };
-    if (opts.strict) throw new ReconciliationError(detail);
+    if (opts.strict && blocking) throw new ReconciliationError(detail);
 
     await writeAudit(tx, {
       action: 'UPDATE',
       entityName: 'reconciliation',
       entityId: `${productId}:${warehouseId}`,
-      newValue: { ...detail, status: 'MISMATCH' },
+      newValue: { ...detail, status: imeiUnderCount && ledgerOk ? 'PARTIALLY_TRACKED' : 'MISMATCH' },
     });
     await tx.notification.create({
       data: {
         type: 'SYSTEM',
-        title: 'Stock reconciliation mismatch',
-        message: `Product ${productId} @ ${warehouseId}: ledger=${ledger}, level=${level}, imei=${imeiCount}`,
+        title: imeiUnderCount && ledgerOk ? 'Stock partially tracked' : 'Stock reconciliation mismatch',
+        message: imeiUnderCount && ledgerOk
+          ? `Product ${productId} @ ${warehouseId}: ${imeiCount} of ${level} units have an IMEI or serial recorded.`
+          : `Product ${productId} @ ${warehouseId}: ledger=${ledger}, level=${level}, imei=${imeiCount}`,
         meta: detail,
       },
     });
