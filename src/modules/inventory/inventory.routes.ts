@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import { BadRequestError, NotFoundError } from '../../common/errors';
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
@@ -188,6 +189,92 @@ router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_AD
 
 
 // ── Fetch full entry detail for editing (products + IMEIs per transaction) ──
+// Full movement history for one product.
+//
+// The IMEI Tracker only answers "where is this unit", and only for units that
+// carry a code. It cannot answer "how did this product's stock get to five" —
+// which is what you need when a count looks wrong, or when accessories and
+// older quantity-only receipts are involved. This lists every movement for a
+// product with a running balance, so the entry responsible for any figure can
+// be found and opened.
+router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
+  const productId = req.query.productId ? String(req.query.productId) : '';
+  const ean = req.query.ean ? String(req.query.ean).trim() : '';
+  if (!productId && !ean) throw new BadRequestError('productId or ean is required');
+
+  const product = await prisma.product.findFirst({
+    where: productId ? { id: productId } : { ean },
+    select: { id: true, ean: true, model: true, brand: true, imeiRequired: true },
+  });
+  if (!product) throw new NotFoundError('Product not found');
+
+  const txns = await prisma.inventoryTransaction.findMany({
+    where: { productId: product.id },
+    include: {
+      vendor: { select: { name: true } },
+      warehouse: { select: { name: true } },
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  // Resolve who made each movement in one query rather than per row.
+  const userIds = [...new Set(txns.map(t => t.createdBy).filter(Boolean))] as string[];
+  const users = userIds.length
+    ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true, email: true } })
+    : [];
+  const userName = new Map<string, string>(users.map((u: any) => [u.id as string, (u.fullName || u.email) as string]));
+
+  // Units carrying a code, so the history can show which movements are
+  // unit-tracked and which were plain quantities.
+  const units = await prisma.imeiInventory.findMany({
+    where: { productId: product.id, isDeleted: false },
+    select: { imei1: true, status: true, stockInTxnId: true, stockOutTxnId: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  const inByTxn = new Map<string, string[]>();
+  const outByTxn = new Map<string, string[]>();
+  for (const u of units) {
+    if (u.stockInTxnId) { if (!inByTxn.has(u.stockInTxnId)) inByTxn.set(u.stockInTxnId, []); inByTxn.get(u.stockInTxnId)!.push(u.imei1); }
+    if (u.stockOutTxnId) { if (!outByTxn.has(u.stockOutTxnId)) outByTxn.set(u.stockOutTxnId, []); outByTxn.get(u.stockOutTxnId)!.push(u.imei1); }
+  }
+
+  let balance = 0;
+  const movements = txns.map(t => {
+    balance += t.quantity;
+    const codes = t.quantity > 0 ? (inByTxn.get(t.id) ?? []) : (outByTxn.get(t.id) ?? []);
+    return {
+      id: t.id,
+      date: t.createdAt,
+      type: t.type,
+      quantity: t.quantity,
+      balanceAfter: balance,
+      counterparty: t.vendor?.name ?? null,
+      warehouse: t.warehouse?.name ?? null,
+      user: t.createdBy ? (userName.get(t.createdBy) ?? null) : null,
+      remarks: t.remarks ?? null,
+      codes,
+      // Flags a movement whose units were never recorded individually, which is
+      // usually the explanation for a count that cannot be traced.
+      untracked: codes.length === 0,
+    };
+  });
+
+  const levels = await prisma.stockLevel.findMany({
+    where: { productId: product.id },
+    include: { warehouse: { select: { name: true } } },
+  });
+
+  ok(res, {
+    product,
+    currentStock: levels.reduce((n, l) => n + l.quantity, 0),
+    byWarehouse: levels.map(l => ({ warehouse: l.warehouse?.name ?? '', quantity: l.quantity })),
+    trackedUnits: units.filter(u => u.status === 'IN_STOCK').length,
+    totalIn: txns.filter(t => t.quantity > 0).reduce((n, t) => n + t.quantity, 0),
+    totalOut: Math.abs(txns.filter(t => t.quantity < 0).reduce((n, t) => n + t.quantity, 0)),
+    movements: movements.reverse(),   // newest first for reading
+  });
+}));
+
 router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
   const ids = String(req.query.ids || '').split(',').filter(Boolean);
   if (!ids.length) throw new BadRequestError('ids query param required');
