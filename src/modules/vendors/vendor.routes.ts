@@ -34,8 +34,8 @@ router.get('/',         authorize(PERMISSIONS.VENDORS_READ),   asyncHandler(asyn
 
 // Smart find-or-create (Stock In/Out auto-create)
 router.post('/find-or-create', authorize(PERMISSIONS.VENDORS_READ), asyncHandler(async (req: Request, res: Response) => {
-  const { name, state } = req.body;
-  ok(res, await vendorService.findOrCreate(name, state, actor(req)));
+  const { name, state, allowWithoutState } = req.body;
+  ok(res, await vendorService.findOrCreate(name, state, actor(req), allowWithoutState === true));
 }));
 
 // Bulk clear all

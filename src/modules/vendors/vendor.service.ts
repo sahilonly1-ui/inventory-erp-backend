@@ -64,19 +64,32 @@ export const vendorService = {
 
   // ── Smart find-or-create (used by Stock In/Out) ───────────────────────────
   // Returns { vendor, created: boolean, needsState: boolean }
-  async findOrCreate(name: string, state: string | undefined, actor: Actor) {
+  /**
+   * Find a counterparty by name, creating it when it doesn't exist.
+   *
+   * `allowWithoutState` exists for the customer side of Stock Out. A supplier
+   * needs a state for GST purposes and Stock In prompts for one, but asking a
+   * shop assistant for the home state of a walk-in customer is meaningless —
+   * and refusing to create the record meant every named customer silently
+   * saved as "No Vendor".
+   */
+  async findOrCreate(name: string, state: string | undefined, actor: Actor, allowWithoutState = false) {
     const displayName = toTitleCase(name);
     const norm = normalizeName(displayName);
 
     const existing = await prisma.vendor.findFirst({ where: { normalizedName: norm, isDeleted: false } });
     if (existing) return { vendor: existing, created: false, needsState: false };
 
-    if (!state) return { vendor: null, created: false, needsState: true, suggestedName: displayName };
+    if (!state && !allowWithoutState) {
+      return { vendor: null, created: false, needsState: true, suggestedName: displayName };
+    }
 
     const code = norm.slice(0, 10).toUpperCase() + Date.now().toString().slice(-6);
     const vendor = await prisma.$transaction(async (tx) => {
-      const v = await tx.vendor.create({ data: { name: displayName, code, normalizedName: norm, state, createdBy: actor.id } });
-      await writeAudit(tx, { userId: actor.id, action: 'CREATE', entityName: 'vendors', entityId: v.id, newValue: { name: v.name, state, autoCreated: true }, ipAddress: actor.ip });
+      const v = await tx.vendor.create({
+        data: { name: displayName, code, normalizedName: norm, state: state ?? null, createdBy: actor.id },
+      });
+      await writeAudit(tx, { userId: actor.id, action: 'CREATE', entityName: 'vendors', entityId: v.id, newValue: { name: v.name, state: state ?? null, autoCreated: true }, ipAddress: actor.ip });
       return v;
     });
     return { vendor, created: true, needsState: false };
