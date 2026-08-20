@@ -238,11 +238,44 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
     if (u.stockOutTxnId) { if (!outByTxn.has(u.stockOutTxnId)) outByTxn.set(u.stockOutTxnId, []); outByTxn.get(u.stockOutTxnId)!.push(u.imei1); }
   }
 
+  // Units that were never linked to a transaction — receipts made before the
+  // link existed. They are matched by time instead, which is imprecise but far
+  // better than reporting "no unit codes" for an entry that plainly had some.
+  const unlinked = units.filter(u => !u.stockInTxnId && !u.stockOutTxnId);
+
+  // Older entries recorded serials only inside the remarks text, in the form
+  // "... | S/N:abc,def". Those units were never stored individually, so the
+  // text is the only record of them and is worth surfacing.
+  const serialsFromRemarks = (remarks?: string | null): string[] => {
+    if (!remarks) return [];
+    const m = /S\/N:\s*([^|]+)/i.exec(remarks);
+    if (!m) return [];
+    return m[1].split(',').map(x => x.trim()).filter(Boolean);
+  };
+
   let balance = 0;
   const movements = txns.map(t => {
     balance += t.quantity;
-    const codes = t.quantity > 0 ? (inByTxn.get(t.id) ?? []) : (outByTxn.get(t.id) ?? []);
+
+    let codes = t.quantity > 0 ? (inByTxn.get(t.id) ?? []) : (outByTxn.get(t.id) ?? []);
+    let codeSource: 'linked' | 'matched' | 'remarks' | 'none' = codes.length ? 'linked' : 'none';
+
+    if (!codes.length && t.quantity > 0) {
+      const from = new Date(t.createdAt.getTime() - 60 * 60 * 1000);
+      const to   = new Date(t.createdAt.getTime() + 60 * 60 * 1000);
+      const near = unlinked
+        .filter(u => u.createdAt >= from && u.createdAt <= to)
+        .slice(0, Math.abs(t.quantity));
+      if (near.length) { codes = near.map(u => u.imei1); codeSource = 'matched'; }
+    }
+
+    if (!codes.length) {
+      const fromRemarks = serialsFromRemarks(t.remarks);
+      if (fromRemarks.length) { codes = fromRemarks; codeSource = 'remarks'; }
+    }
+
     return {
+      codeSource,
       id: t.id,
       date: t.createdAt,
       type: t.type,
