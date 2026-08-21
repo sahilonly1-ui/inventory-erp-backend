@@ -100,7 +100,10 @@ export const imeiService = {
       const locked = await imeiRepository.lockByImei1(tx, input.imeis);
       const foundSet = new Set(locked.map((r) => r.imei1));
       const missing = input.imeis.filter((i) => !foundSet.has(i));
-      if (missing.length) throw new BadRequestError('Unknown IMEI(s)', { missing });
+      if (missing.length) throw new BadRequestError(
+        `IMEI / Sr. No. not found in IMEI Tracker — these units were never scanned in:\n${missing.join(', ')}\n\nScan them in via Stock In first, or remove them from this dispatch.`,
+        { missing },
+      );
 
       const unavailable = locked.filter((r) => !isInStock(r.status));
       if (unavailable.length) {
