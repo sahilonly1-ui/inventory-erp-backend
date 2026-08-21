@@ -189,6 +189,79 @@ router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_AD
 
 
 // ── Fetch full entry detail for editing (products + IMEIs per transaction) ──
+// One-time migration: turn serials that older code wrote into the remarks text
+// into real unit records.
+//
+// Before serials were routed through /imei/receive, a serial-only row took the
+// plain-quantity path and its serial was appended to the transaction remarks as
+// "... | S/N:a,b,c". Those units therefore exist nowhere in the tracker, do not
+// appear when the entry is reopened, and cannot be dispatched by serial. This
+// reads them back out and creates the missing records, linked to the exact
+// transaction they came from. Dry run by default.
+router.post('/migrate-remark-serials', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+
+  const txns = await prisma.inventoryTransaction.findMany({
+    where: { quantity: { gt: 0 }, remarks: { contains: 'S/N:' } },
+    select: { id: true, productId: true, warehouseId: true, quantity: true, remarks: true, createdAt: true, vendorId: true },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  const planned: { txnId: string; serials: string[] }[] = [];
+  let skippedExisting = 0;
+
+  for (const t of txns) {
+    const m = /S\/N:\s*([^|]+)/i.exec(t.remarks ?? '');
+    if (!m) continue;
+    const serials = m[1].split(',').map(x => x.trim()).filter(Boolean);
+    if (!serials.length) continue;
+
+    // Never create a second record for a serial that already exists.
+    const already = await prisma.imeiInventory.findMany({
+      where: { imei1: { in: serials }, isDeleted: false },
+      select: { imei1: true },
+    });
+    const taken = new Set(already.map(a => a.imei1));
+    const missing = serials.filter(sn => !taken.has(sn));
+    skippedExisting += serials.length - missing.length;
+    if (missing.length) planned.push({ txnId: t.id, serials: missing });
+  }
+
+  let created = 0;
+  if (!dryRun) {
+    for (const p of planned) {
+      const t = txns.find(x => x.id === p.txnId)!;
+      await prisma.imeiInventory.createMany({
+        data: p.serials.map(sn => ({
+          productId: t.productId,
+          warehouseId: t.warehouseId,
+          imei1: sn,
+          imeiType: 'NIL',
+          status: 'IN_STOCK' as const,
+          supplierId: t.vendorId ?? null,
+          stockInTxnId: t.id,
+          // Dated to the movement, not to the migration run, so the tracker
+          // reflects when the unit actually arrived.
+          createdAt: t.createdAt,
+          createdBy: req.user!.id,
+        })),
+        skipDuplicates: true,
+      });
+      created += p.serials.length;
+    }
+  }
+
+  ok(res, {
+    dryRun,
+    entriesScanned: txns.length,
+    entriesWithMissingUnits: planned.length,
+    serialsToCreate: planned.reduce((n, p) => n + p.serials.length, 0),
+    created,
+    skippedAlreadyPresent: skippedExisting,
+    sample: planned.slice(0, 15),
+  });
+}));
+
 // Full movement history for one product.
 //
 // The IMEI Tracker only answers "where is this unit", and only for units that
@@ -345,6 +418,19 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
           orderBy: { createdAt: 'asc' },
           take: Math.abs(t.quantity),
         });
+      }
+
+      // LAST RESORT: serials that older code stored only in the remarks text.
+      // Surfacing them here means reopening the entry shows the serials that
+      // were actually scanned, and saving it writes them in properly — the
+      // entry repairs itself.
+      if (imeis.length === 0 && t.remarks) {
+        const m = /S\/N:\s*([^|]+)/i.exec(t.remarks);
+        if (m) {
+          imeis = m[1].split(',').map(x => x.trim()).filter(Boolean).map(sn => ({
+            id: '', imei1: sn, imeiType: 'NIL', status: 'IN_STOCK',
+          }));
+        }
       }
     } else {
       // Stock Out — the dispatched units are now SOLD; fetch them by product +
