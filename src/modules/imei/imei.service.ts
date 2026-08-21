@@ -78,6 +78,7 @@ export const imeiService = {
       await imeiRepository.createReceived(
         tx, input.productId, input.warehouseId, input.imeis,
         actor.id, (input as any).vendorId, move.transactionId,
+        parseDispatchDate((input as any).txnDate) ?? undefined,
       );
       // strict: same-tx writes must reconcile, or we roll back.
       await assertConsistentTx(tx, input.productId, input.warehouseId, true, { strict: true });

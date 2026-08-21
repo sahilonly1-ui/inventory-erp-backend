@@ -80,4 +80,6 @@ export const openingStockSchema = z.object({
   warehouseId: uuid,
   quantity: z.coerce.number().int().nonnegative().default(0),
   unitCost: z.coerce.number().nonnegative().optional(),
+  txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  remarks: z.string().max(500).optional(),
 });

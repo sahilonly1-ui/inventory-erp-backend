@@ -19,6 +19,7 @@ export const imeiRepository = {
     createdBy: string,
     vendorId?: string,
     stockInTxnId?: string,
+    occurredAt?: Date,
   ) {
     // Editing a stock-in entry soft-deletes its IMEI rows and re-creates them.
     // Swipe/activation state lives on those rows, so without carrying it over
@@ -49,6 +50,9 @@ export const imeiRepository = {
           activated: p?.activated ?? false,
           activatedAt: p?.activatedAt ?? null,
           createdBy,
+          // Use the backdated timestamp so the unit appears under the correct
+          // day in the IMEI Tracker and the Product History.
+          ...(occurredAt ? { createdAt: occurredAt } : {}),
         };
       }),
     });

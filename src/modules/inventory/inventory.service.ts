@@ -164,6 +164,8 @@ export const inventoryService = {
         type: TransactionType.OPENING,
         signedQty: input.quantity,
         unitCost: input.unitCost ?? null,
+        remarks: input.remarks ?? null,
+        occurredAt: parseTxnDate(input.txnDate),
         vendorId: null,
         remarks: 'Opening stock — warehouse mapping',
       }, actor),
