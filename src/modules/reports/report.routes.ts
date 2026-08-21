@@ -56,29 +56,37 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('IMEI Export');
   // Required columns only in specified order:
-  // EAN | IMEI | Model | Brand | Status | Swiped | Supplier | Stock In Date | Last Updated
+  // All columns requested by the business
   ws.columns = [
-    { header: 'EAN',            key: 'ean',       width: 16 },
-    { header: 'IMEI / Serial',  key: 'imei',      width: 22 },
-    { header: 'Model',          key: 'model',     width: 36 },
-    { header: 'Brand',          key: 'brand',     width: 16 },
-    { header: 'Status',         key: 'status',    width: 14 },
-    { header: 'Swiped',         key: 'swiped',    width: 10 },
-    { header: 'Supplier',       key: 'supplier',  width: 24 },
-    { header: 'Stock In Date',  key: 'stockIn',   width: 16 },
-    { header: 'Last Updated',   key: 'updated',   width: 16 },
+    { header: 'EAN',              key: 'ean',         width: 16 },
+    { header: 'IMEI / Serial',    key: 'imei',        width: 22 },
+    { header: 'Model',            key: 'model',       width: 36 },
+    { header: 'Brand',            key: 'brand',       width: 16 },
+    { header: 'Status',           key: 'status',      width: 14 },
+    { header: 'IMEI Type',        key: 'imeiType',    width: 14 },
+    { header: 'Swiped',           key: 'swiped',      width: 10 },
+    { header: 'Swiped On',        key: 'swipedAt',    width: 16 },
+    { header: 'Activated',        key: 'activated',   width: 12 },
+    { header: 'Activated On',     key: 'activatedAt', width: 16 },
+    { header: 'Supplier',         key: 'supplier',    width: 24 },
+    { header: 'Stock In Date',    key: 'stockIn',     width: 16 },
+    { header: 'Last Updated',     key: 'updated',     width: 16 },
   ];
   for (const r of rows) {
     ws.addRow({
-      ean:      r.product.ean,
-      imei:     r.imei1,
-      model:    r.product.model,
-      brand:    r.product.brand,
-      status:   r.status,
-      swiped:   (r as any).swiped ? 'Yes' : 'No',
-      supplier: (r as any).supplier?.name ?? '',
-      stockIn:  r.createdAt.toISOString().slice(0, 10),
-      updated:  r.updatedAt.toISOString().slice(0, 10),
+      ean:         r.product.ean,
+      imei:        r.imei1,
+      model:       r.product.model,
+      brand:       r.product.brand,
+      status:      r.status,
+      imeiType:    (r as any).imeiType ?? '',
+      swiped:      (r as any).swiped      ? 'Yes' : 'No',
+      swipedAt:    (r as any).swipedAt    ? new Date((r as any).swipedAt).toISOString().slice(0, 10) : '',
+      activated:   (r as any).activated   ? 'Yes' : 'No',
+      activatedAt: (r as any).activatedAt ? new Date((r as any).activatedAt).toISOString().slice(0, 10) : '',
+      supplier:    (r as any).supplier?.name ?? '',
+      stockIn:     r.createdAt.toISOString().slice(0, 10),
+      updated:     r.updatedAt.toISOString().slice(0, 10),
     });
   }
   const buf = Buffer.from(await wb.xlsx.writeBuffer() as ArrayBuffer);
