@@ -56,6 +56,13 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('IMEI Export');
   // Required columns only in specified order:
+  const dmy = (d: Date) => {
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const yyyy = d.getUTCFullYear();
+    return `${dd}-${mm}-${yyyy}`;
+  };
+
   // All columns requested by the business
   ws.columns = [
     { header: 'EAN',              key: 'ean',         width: 16 },
@@ -81,12 +88,12 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
       status:      r.status,
       imeiType:    (r as any).imeiType ?? '',
       swiped:      (r as any).swiped      ? 'Yes' : 'No',
-      swipedAt:    (r as any).swipedAt    ? new Date((r as any).swipedAt).toISOString().slice(0, 10) : '',
+      swipedAt:    (r as any).swipedAt    ? dmy(new Date((r as any).swipedAt)) : '',
       activated:   (r as any).activated   ? 'Yes' : 'No',
-      activatedAt: (r as any).activatedAt ? new Date((r as any).activatedAt).toISOString().slice(0, 10) : '',
+      activatedAt: (r as any).activatedAt ? dmy(new Date((r as any).activatedAt)) : '',
       supplier:    (r as any).supplier?.name ?? '',
-      stockIn:     r.createdAt.toISOString().slice(0, 10),
-      updated:     r.updatedAt.toISOString().slice(0, 10),
+      stockIn:     dmy(r.createdAt),
+      updated:     dmy(r.updatedAt),
     });
   }
   const buf = Buffer.from(await wb.xlsx.writeBuffer() as ArrayBuffer);
