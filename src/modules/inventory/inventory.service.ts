@@ -104,6 +104,8 @@ export const inventoryService = {
         unitCost: input.unitCost ?? null,
         vendorId: input.vendorId ?? null,
         remarks: input.remarks ?? null,
+        referenceType: input.invoiceNo ? 'INVOICE' : null,
+        referenceId: input.invoiceNo ?? null,
         occurredAt: parseTxnDate(input.txnDate),
       }, actor),
     );
@@ -124,6 +126,8 @@ export const inventoryService = {
         signedQty: toSigned(TransactionType.STOCK_OUT, input.quantity),
         remarks: input.remarks ?? null,
         vendorId: input.vendorId ?? null,
+        referenceType: input.invoiceNo ? 'INVOICE' : null,
+        referenceId: input.invoiceNo ?? null,
         occurredAt: parseTxnDate(input.txnDate),
       }, actor),
     );

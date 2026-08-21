@@ -11,6 +11,7 @@ export const stockInSchema = z.object({
   unitCost: z.coerce.number().nonnegative().optional(),
   vendorId: uuid.optional(),
   txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  invoiceNo: z.string().max(120).optional(),
   remarks: z.string().max(500).optional(),
 });
 
