@@ -28,12 +28,14 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
     if (words.length > 1) {
       where.AND = words.map((w: string) => ({ OR: [
         { imei1: { contains: w } },
+        { product: { ean: { contains: w } } },
         { product: { model: { contains: w, mode: 'insensitive' } } },
         { product: { brand: { contains: w, mode: 'insensitive' } } },
       ]}));
     } else {
       where.OR = [
         { imei1: { contains: search } },
+        { product: { ean: { contains: search } } },
         { product: { model: { contains: search, mode: 'insensitive' } } },
         { product: { brand: { contains: search, mode: 'insensitive' } } },
       ];
