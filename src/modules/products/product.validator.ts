@@ -18,8 +18,6 @@ export const createProductSchema = z.object({
   gstRate:       z.coerce.number().min(0).max(100).default(0),
   hsnCode:       z.string().max(20).optional(),
   vendorId:      uuid.optional(),
-  imeiRequired:  z.boolean().optional(),
-  srnoRequired:  z.boolean().optional(),
   imeiRequired:  booleanish.default(false),
   serialRequired:booleanish.default(false),
   minStock:      z.coerce.number().int().nonnegative().default(0),
