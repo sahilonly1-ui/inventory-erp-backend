@@ -132,6 +132,8 @@ export const imeiService = {
           // Recorded against the customer and the date the goods actually left,
           // not against nobody on whatever day the entry was typed.
           vendorId: (input as any).vendorId ?? null,
+          referenceType: (input as any).invoiceNo ? 'INVOICE' : 'IMEI_DISPATCH',
+          referenceId: (input as any).invoiceNo ?? null,
           occurredAt: parseDispatchDate((input as any).txnDate),
         }, actor);
 

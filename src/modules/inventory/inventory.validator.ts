@@ -26,6 +26,7 @@ export const stockOutSchema = z.object({
   // today's, against no vendor at all.
   vendorId: uuid.optional(),
   txnDate,
+  invoiceNo: z.string().max(120).optional(),
   remarks: z.string().max(500).optional(),
 });
 
@@ -82,5 +83,6 @@ export const openingStockSchema = z.object({
   quantity: z.coerce.number().int().nonnegative().default(0),
   unitCost: z.coerce.number().nonnegative().optional(),
   txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  invoiceNo: z.string().max(120).optional(),
   remarks: z.string().max(500).optional(),
 });
