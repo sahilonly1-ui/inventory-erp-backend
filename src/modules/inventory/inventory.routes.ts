@@ -262,6 +262,69 @@ router.post('/migrate-remark-serials', authorize(PERMISSIONS.IMEI_MANAGE), async
   });
 }));
 
+// Clean up a product whose stock and units survived without any transaction.
+//
+// A failed edit could remove the transaction while leaving the stock level and
+// the IMEI units behind, so the product shows stock with no movement history
+// and cannot be re-entered (the serials are still taken). This removes the
+// orphaned units and zeroes the level for that product so the entry can be
+// recorded again from scratch.
+//
+// Refuses to run when transactions still exist, so it can never be used to
+// wipe a product that has real history. Dry run by default.
+router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const ean = String(req.body?.ean ?? '').trim();
+  if (!ean) throw new BadRequestError('ean is required');
+
+  const product = await prisma.product.findFirst({ where: { ean }, select: { id: true, model: true, ean: true } });
+  if (!product) throw new NotFoundError('Product not found');
+
+  const txnCount = await prisma.inventoryTransaction.count({ where: { productId: product.id } });
+  if (txnCount > 0) {
+    throw new BadRequestError(
+      `This product has ${txnCount} transaction(s), so nothing here is orphaned. ` +
+      `Delete the entry from the Dashboard instead.`,
+    );
+  }
+
+  const units = await prisma.imeiInventory.findMany({
+    where: { productId: product.id, isDeleted: false },
+    select: { id: true, imei1: true },
+  });
+  const levels = await prisma.stockLevel.findMany({
+    where: { productId: product.id },
+    select: { id: true, warehouseId: true, quantity: true },
+  });
+
+  if (!dryRun) {
+    if (units.length) {
+      await prisma.imeiInventory.deleteMany({ where: { id: { in: units.map(u => u.id) } } });
+    }
+    for (const l of levels) {
+      if (l.quantity !== 0) {
+        await prisma.stockLevel.update({ where: { id: l.id }, data: { quantity: 0 } });
+      }
+    }
+    await writeAudit(prisma, {
+      userId: req.user!.id,
+      action: 'DELETE',
+      entityName: 'inventory_orphan_cleanup',
+      entityId: product.id,
+      oldValue: { ean: product.ean, model: product.model, units: units.length, levels: levels.map(l => l.quantity) },
+    });
+  }
+
+  ok(res, {
+    dryRun,
+    product: { ean: product.ean, model: product.model },
+    unitsRemoved: dryRun ? 0 : units.length,
+    unitsFound: units.length,
+    stockZeroed: levels.map(l => ({ warehouseId: l.warehouseId, was: l.quantity })),
+    sample: units.slice(0, 10).map(u => u.imei1),
+  });
+}));
+
 // Full movement history for one product.
 //
 // The IMEI Tracker only answers "where is this unit", and only for units that
