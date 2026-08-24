@@ -298,21 +298,31 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 
   if (!dryRun) {
+    // Soft-delete rather than hard-delete. Other tables reference these rows,
+    // so removing them outright fails on a foreign key; soft-deleting also
+    // frees the serial for re-entry, because the uniqueness rule on imei1
+    // only applies to rows that are not deleted.
     if (units.length) {
-      await prisma.imeiInventory.deleteMany({ where: { id: { in: units.map(u => u.id) } } });
+      await prisma.imeiInventory.updateMany({
+        where: { id: { in: units.map(u => u.id) } },
+        data: { isDeleted: true, deletedAt: new Date(), deletedBy: req.user!.id },
+      });
     }
     for (const l of levels) {
       if (l.quantity !== 0) {
         await prisma.stockLevel.update({ where: { id: l.id }, data: { quantity: 0 } });
       }
     }
-    await writeAudit(prisma, {
-      userId: req.user!.id,
-      action: 'DELETE',
-      entityName: 'inventory_orphan_cleanup',
-      entityId: product.id,
-      oldValue: { ean: product.ean, model: product.model, units: units.length, levels: levels.map(l => l.quantity) },
-    });
+    // The audit trail is useful but must never be what fails the cleanup.
+    try {
+      await writeAudit(prisma, {
+        userId: req.user!.id,
+        action: 'DELETE',
+        entityName: 'imei_inventory',
+        entityId: product.id,
+        oldValue: { ean: product.ean, model: product.model, units: units.length, levels: levels.map(l => l.quantity) },
+      });
+    } catch { /* cleanup already applied */ }
   }
 
   ok(res, {
