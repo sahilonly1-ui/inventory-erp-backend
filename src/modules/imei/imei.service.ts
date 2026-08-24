@@ -70,7 +70,10 @@ export const imeiService = {
         type: txnType,
         signedQty: input.imeis.length,
         vendorId: input.vendorId ?? (input as any).vendorId ?? null,
-        referenceType: 'IMEI_RECEIVE',
+        // The invoice belongs on the transaction, not buried in the remarks
+        // text, so it can be read back when the entry is reopened or exported.
+        referenceType: (input as any).invoiceNo ? 'INVOICE' : 'IMEI_RECEIVE',
+        referenceId: (input as any).invoiceNo ?? null,
         remarks: input.remarks ?? null,
         occurredAt: parseDispatchDate((input as any).txnDate),
       }, actor);
@@ -126,14 +129,14 @@ export const imeiService = {
         const move = await applyLedgerMovementTx(tx, {
           productId, warehouseId, type,
           signedQty: -rows.length,
-          referenceType: input.referenceType ?? 'IMEI_DISPATCH',
-          referenceId: input.referenceId ?? null,
           remarks: input.remarks ?? null,
           // Recorded against the customer and the date the goods actually left,
           // not against nobody on whatever day the entry was typed.
           vendorId: (input as any).vendorId ?? null,
-          referenceType: (input as any).invoiceNo ? 'INVOICE' : 'IMEI_DISPATCH',
-          referenceId: (input as any).invoiceNo ?? null,
+          // An invoice number takes precedence over the generic dispatch marker;
+          // duplicate keys here previously made the intent unreadable.
+          referenceType: (input as any).invoiceNo ? 'INVOICE' : (input.referenceType ?? 'IMEI_DISPATCH'),
+          referenceId: (input as any).invoiceNo ?? input.referenceId ?? null,
           occurredAt: parseDispatchDate((input as any).txnDate),
         }, actor);
 

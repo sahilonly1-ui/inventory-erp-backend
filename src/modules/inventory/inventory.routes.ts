@@ -428,6 +428,9 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
       quantity: t.quantity,
       balanceAfter: balance,
       counterparty: t.vendor?.name ?? null,
+      // Only surface referenceId when it is an invoice; the same column also
+      // carries internal markers like transfer ids, which mean nothing here.
+      invoiceNo: t.referenceType === 'INVOICE' ? t.referenceId : null,
       warehouse: t.warehouse?.name ?? null,
       user: t.createdBy ? (userName.get(t.createdBy) ?? null) : null,
       remarks: t.remarks ?? null,
