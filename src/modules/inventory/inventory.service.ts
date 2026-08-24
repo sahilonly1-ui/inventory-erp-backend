@@ -525,6 +525,7 @@ const inventoryServiceExtensions = {
         warehouse: t.warehouse.name,
         warehouseId: t.warehouseId,
         createdAt: t.createdAt.toISOString(),
+        referenceId: t.referenceId ?? null,
       })),
     };
   },

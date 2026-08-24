@@ -91,8 +91,11 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
     });
   }
 
+  // referenceId holds the invoice when referenceType='INVOICE'; fall back to
+  // the legacy remarks extraction for entries saved before this field existed.
   const invoiceNo =
-    units.find(u => (u as any).invoiceNo)?.['invoiceNo' as keyof typeof units[number]] as string ||
+    txns.find(t => t.referenceType === 'INVOICE' && t.referenceId)?.referenceId?.trim() ||
+    (txns.find(t => t.remarks?.match(/INV:\s*([^|]+)/i))?.remarks?.match(/INV:\s*([^|]+)/i)?.[1] || '').trim() ||
     (txns.find(t => t.remarks?.match(/Invoice:\s*([^|]+)/i))?.remarks?.match(/Invoice:\s*([^|]+)/i)?.[1] || '').trim() ||
     '';
 
@@ -165,7 +168,11 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
 
   const buffer = Buffer.from(await wb.xlsx.writeBuffer() as ArrayBuffer);
 
-  const parts = [safeFilePart(vendorName), safeFilePart(invoiceNo), fmtDate(stockedInAt)].filter(Boolean);
+  // Format: "Supplier Name - Invoice No - Date" when invoice present,
+  // "Supplier Name - Date" when not — exactly as requested.
+  const parts = invoiceNo
+    ? [safeFilePart(vendorName), safeFilePart(invoiceNo), fmtDate(stockedInAt)]
+    : [safeFilePart(vendorName), fmtDate(stockedInAt)];
   const filename = `${parts.join(' - ')}.xlsx`;
 
   return { buffer, filename, vendorName, invoiceNo, dateLabel: fmtDate(stockedInAt), rowCount: rows.length };
