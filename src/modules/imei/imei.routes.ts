@@ -163,6 +163,67 @@ router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'que
 // to stock, so the serials vanished even though the goods were back on the
 // shelf. This restores those rows. A unit is only restored when no live record
 // already holds the same IMEI, so it can never create a duplicate.
+// Bring the stock level back in line with the units on record.
+//
+// Dispatch refuses to run when a product holds more tracked units than its
+// stock level claims, which is a genuine inconsistency — but one the operator
+// cannot fix from any screen. It happens when units are added or restored
+// without the counter moving with them.
+//
+// The units win: each is a real record with its own IMEI and history, whereas
+// the level is only a running count. This sets the level to the number of
+// units actually in stock. Dry run by default.
+router.post('/reconcile-levels', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const ean = req.body?.ean ? String(req.body.ean).trim() : null;
+
+  const products = await prisma.product.findMany({
+    where: ean ? { ean } : {},
+    select: { id: true, ean: true, model: true },
+  });
+  if (!products.length) throw new NotFoundError('Product not found');
+
+  const productIds = products.map(p => p.id);
+  const byId = new Map(products.map(p => [p.id, p]));
+
+  const levels = await prisma.stockLevel.findMany({
+    where: { productId: { in: productIds } },
+    select: { id: true, productId: true, warehouseId: true, quantity: true },
+  });
+
+  const changes: any[] = [];
+  for (const l of levels) {
+    const unitCount = await prisma.imeiInventory.count({
+      where: { productId: l.productId, warehouseId: l.warehouseId, isDeleted: false, status: 'IN_STOCK' },
+    });
+    // Products with no tracked units at all are quantity-only (accessories);
+    // their level is the only record there is, so leave it alone.
+    if (unitCount === 0) continue;
+    if (unitCount === l.quantity) continue;
+
+    changes.push({
+      ean: byId.get(l.productId)?.ean,
+      model: byId.get(l.productId)?.model,
+      warehouseId: l.warehouseId,
+      levelWas: l.quantity,
+      unitsInStock: unitCount,
+    });
+
+    if (!dryRun) {
+      await prisma.stockLevel.update({ where: { id: l.id }, data: { quantity: unitCount } });
+    }
+  }
+
+  ok(res, {
+    dryRun,
+    scope: ean ?? 'all products',
+    levelsChecked: levels.length,
+    corrected: dryRun ? 0 : changes.length,
+    mismatches: changes.length,
+    changes: changes.slice(0, 100),
+  });
+}));
+
 // Remove specific units by IMEI, and correct the stock level to match.
 //
 // The counterpart to the diagnostic above: once the units that should not be
@@ -195,14 +256,18 @@ router.post('/remove-units', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(as
         where: { id: { in: units.map(u => u.id) } },
         data: { isDeleted: true, deletedAt: new Date(), deletedBy: req.user!.id },
       });
-      for (const [key, n] of decrements) {
+
+      // Recompute the level from the units that remain rather than subtracting.
+      // Subtracting assumes the level and the units agreed to begin with, and
+      // the whole reason for removing units is usually that they did not.
+      for (const key of decrements.keys()) {
         const [productId, warehouseId] = key.split('::');
+        const remaining = await tx.imeiInventory.count({
+          where: { productId, warehouseId, isDeleted: false, status: 'IN_STOCK' },
+        });
         const level = await tx.stockLevel.findFirst({ where: { productId, warehouseId } });
         if (level) {
-          await tx.stockLevel.update({
-            where: { id: level.id },
-            data: { quantity: Math.max(0, level.quantity - n) },
-          });
+          await tx.stockLevel.update({ where: { id: level.id }, data: { quantity: remaining } });
         }
       }
     });
