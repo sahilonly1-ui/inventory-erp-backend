@@ -293,7 +293,7 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
     select: { id: true, imei1: true },
   });
   const levels = await prisma.stockLevel.findMany({
-    where: { productId: product.id },
+    where: { productId: { in: productIds } },
     select: { id: true, warehouseId: true, quantity: true },
   });
 
@@ -348,14 +348,21 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
   const ean = req.query.ean ? String(req.query.ean).trim() : '';
   if (!productId && !ean) throw new BadRequestError('productId or ean is required');
 
-  const product = await prisma.product.findFirst({
+  // EAN is not unique on Product, so the same barcode can exist on several
+  // rows. Picking just one is why the IMEI Tracker and this page disagreed:
+  // the units sat on a different row than the one chosen here. Search by EAN
+  // covers every row carrying it.
+  const products = await prisma.product.findMany({
     where: productId ? { id: productId } : { ean },
     select: { id: true, ean: true, model: true, brand: true, imeiRequired: true },
   });
-  if (!product) throw new NotFoundError('Product not found');
+  if (!products.length) throw new NotFoundError('Product not found');
+
+  const product = products[0];
+  const productIds = products.map(p => p.id);
 
   const txns = await prisma.inventoryTransaction.findMany({
-    where: { productId: product.id },
+    where: { productId: { in: productIds } },
     include: {
       vendor: { select: { name: true } },
       warehouse: { select: { name: true } },
@@ -373,7 +380,7 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
   // Units carrying a code, so the history can show which movements are
   // unit-tracked and which were plain quantities.
   const units = await prisma.imeiInventory.findMany({
-    where: { productId: product.id, isDeleted: false },
+    where: { productId: { in: productIds }, isDeleted: false },
     select: { imei1: true, status: true, stockInTxnId: true, stockOutTxnId: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
   });
@@ -448,6 +455,11 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
 
   ok(res, {
     product,
+    // Surfaced deliberately: duplicate rows for one barcode split a product's
+    // stock and history, and the operator needs to know they exist.
+    duplicateProducts: products.length > 1
+      ? products.map(p => ({ id: p.id, model: p.model }))
+      : null,
     currentStock: levels.reduce((n, l) => n + l.quantity, 0),
     byWarehouse: levels.map(l => ({ warehouse: l.warehouse?.name ?? '', quantity: l.quantity })),
     trackedUnits: units.filter(u => u.status === 'IN_STOCK').length,
