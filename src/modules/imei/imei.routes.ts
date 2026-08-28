@@ -414,11 +414,15 @@ router.post('/restore-deleted', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler
 
   const deleted = await prisma.imeiInventory.findMany({
     where: { isDeleted: true, ...(since ? { deletedAt: { gte: since } } : {}) },
-    select: { id: true, imei1: true, status: true, deletedAt: true, product: { select: { model: true } } },
+    select: {
+      id: true, imei1: true, status: true, deletedAt: true,
+      stockInTxnId: true,
+      product: { select: { model: true } },
+    },
     orderBy: { deletedAt: 'desc' },
     take: 5000,
   });
-  if (!deleted.length) { ok(res, { dryRun, candidates: 0, restorable: 0, restored: 0, sample: [] }); return; }
+  if (!deleted.length) { ok(res, { dryRun, candidates: 0, restorable: 0, restored: 0, skippedNoEntry: 0, sample: [] }); return; }
 
   // Skip any IMEI that already exists as a live record.
   const live = await prisma.imeiInventory.findMany({
@@ -427,12 +431,27 @@ router.post('/restore-deleted', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler
   });
   const taken = new Set(live.map(l => l.imei1));
 
+  // Only restore a unit whose Stock In entry still exists.
+  //
+  // Restoring everything soft-deleted cannot tell a unit lost to a bug from one
+  // the operator deleted on purpose, and it brought back units whose entry had
+  // been removed — they counted as stock with nothing explaining where they
+  // came from, and made those products undispatchable. A surviving transaction
+  // is the evidence that the unit belongs in stock.
+  const txnIds = [...new Set(deleted.map(d => d.stockInTxnId).filter(Boolean))] as string[];
+  const liveTxns = txnIds.length
+    ? await prisma.inventoryTransaction.findMany({ where: { id: { in: txnIds } }, select: { id: true } })
+    : [];
+  const liveTxnIds = new Set(liveTxns.map(t => t.id));
+
   // One deleted generation per IMEI — the newest.
   const seen = new Set<string>();
   const plan: typeof deleted = [];
+  let skippedNoEntry = 0;
   for (const d of deleted) {
     if (taken.has(d.imei1) || seen.has(d.imei1)) continue;
     seen.add(d.imei1);
+    if (!d.stockInTxnId || !liveTxnIds.has(d.stockInTxnId)) { skippedNoEntry++; continue; }
     plan.push(d);
   }
 
@@ -449,6 +468,8 @@ router.post('/restore-deleted', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler
     candidates: deleted.length,
     restorable: plan.length,
     restored: dryRun ? 0 : plan.length,
+    // Units whose Stock In entry no longer exists are left alone on purpose.
+    skippedNoEntry,
     skipped: deleted.length - plan.length,
     sample: plan.slice(0, 25).map(p => ({ imei: p.imei1, product: p.product?.model ?? '', deletedAt: p.deletedAt })),
   });
