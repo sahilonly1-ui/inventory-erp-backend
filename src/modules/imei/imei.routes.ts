@@ -163,6 +163,63 @@ router.get('/', authorize(PERMISSIONS.IMEI_READ), validate(imeiQuerySchema, 'que
 // to stock, so the serials vanished even though the goods were back on the
 // shelf. This restores those rows. A unit is only restored when no live record
 // already holds the same IMEI, so it can never create a duplicate.
+// Attach units to a dispatch that was recorded without their codes.
+//
+// A Stock Out entered as a plain quantity moves the stock but leaves the units
+// sitting IN_STOCK, so the tracker keeps showing goods that have already left
+// and the count no longer matches the units. Dispatching them again would move
+// the stock a second time, which is wrong — the movement already happened.
+//
+// This marks the named units SOLD against that existing transaction, without
+// creating another movement.
+router.post('/attach-to-dispatch', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const txnId = String(req.body?.txnId ?? '').trim();
+  const imeis: string[] = Array.isArray(req.body?.imeis) ? req.body.imeis.filter(Boolean) : [];
+  if (!txnId) throw new BadRequestError('txnId is required');
+  if (!imeis.length) throw new BadRequestError('imeis is required');
+
+  const txn = await prisma.inventoryTransaction.findUnique({
+    where: { id: txnId },
+    select: { id: true, productId: true, warehouseId: true, quantity: true, createdAt: true },
+  });
+  if (!txn) throw new NotFoundError('Transaction not found');
+  if (txn.quantity >= 0) throw new BadRequestError('That transaction is not a dispatch');
+
+  // Case-insensitive: serials are often written down in a different case than
+  // they were scanned.
+  const all = await prisma.imeiInventory.findMany({
+    where: { productId: txn.productId, isDeleted: false },
+    select: { id: true, imei1: true, status: true },
+  });
+  const wanted = imeis.map(i => i.trim().toLowerCase());
+  const matched = all.filter(u => wanted.includes(u.imei1.toLowerCase()));
+  const notFound = imeis.filter(i => !matched.some(m => m.imei1.toLowerCase() === i.trim().toLowerCase()));
+
+  if (matched.length > Math.abs(txn.quantity)) {
+    throw new BadRequestError(
+      `That dispatch moved ${Math.abs(txn.quantity)} unit(s), but ${matched.length} were named. ` +
+      `Attaching more units than the movement covers would misstate the stock.`,
+    );
+  }
+
+  if (!dryRun && matched.length) {
+    await prisma.imeiInventory.updateMany({
+      where: { id: { in: matched.map(m => m.id) } },
+      data: { status: 'SOLD', stockOutTxnId: txn.id, updatedBy: req.user!.id },
+    });
+  }
+
+  ok(res, {
+    dryRun,
+    dispatchDate: txn.createdAt.toISOString().slice(0, 10),
+    dispatchQuantity: Math.abs(txn.quantity),
+    attached: dryRun ? 0 : matched.length,
+    matched: matched.map(m => ({ imei: m.imei1, wasStatus: m.status })),
+    notFound,
+  });
+}));
+
 // Bring the stock level back in line with the units on record.
 //
 // Dispatch refuses to run when a product holds more tracked units than its
