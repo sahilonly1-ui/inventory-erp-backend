@@ -184,7 +184,12 @@ router.post('/attach-to-dispatch', authorize(PERMISSIONS.IMEI_MANAGE), asyncHand
     select: { id: true, productId: true, warehouseId: true, quantity: true, createdAt: true },
   });
   if (!txn) throw new NotFoundError('Transaction not found');
-  if (txn.quantity >= 0) throw new BadRequestError('That transaction is not a dispatch');
+
+  // Inbound entries need the opposite treatment: the units were never created,
+  // so there is nothing to mark SOLD. A quantity-only receipt (an Opening Stock
+  // or Stock In saved without codes) leaves stock on the books with no unit
+  // records, which is why such a product shows fewer tracked units than stock.
+  const inbound = txn.quantity > 0;
 
   // Case-insensitive: serials are often written down in a different case than
   // they were scanned.
@@ -203,6 +208,54 @@ router.post('/attach-to-dispatch', authorize(PERMISSIONS.IMEI_MANAGE), asyncHand
     );
   }
 
+  // For an inbound entry the serials are expected NOT to exist yet — that is
+  // the whole problem being repaired — so anything already on record is a
+  // conflict rather than a match.
+  const existingCount = await prisma.imeiInventory.count({
+    where: { productId: txn.productId, isDeleted: false, stockInTxnId: txn.id },
+  });
+
+  if (inbound) {
+    if (matched.length) {
+      throw new BadRequestError(
+        `Already on record: ${matched.map(m => m.imei1).join(', ')}. ` +
+        `A receipt cannot create units that already exist.`,
+      );
+    }
+    if (existingCount + imeis.length > txn.quantity) {
+      throw new BadRequestError(
+        `That entry received ${txn.quantity} unit(s) and ${existingCount} already have codes. ` +
+        `Adding ${imeis.length} more would exceed what was received.`,
+      );
+    }
+    if (!dryRun) {
+      await prisma.imeiInventory.createMany({
+        data: imeis.map(i => ({
+          productId: txn.productId,
+          warehouseId: txn.warehouseId,
+          imei1: i.trim(),
+          imeiType: 'NIL',
+          status: 'IN_STOCK' as const,
+          stockInTxnId: txn.id,
+          // Dated to the receipt, not to this repair.
+          createdAt: txn.createdAt,
+          createdBy: req.user!.id,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    ok(res, {
+      dryRun,
+      direction: 'received',
+      entryDate: txn.createdAt.toISOString().slice(0, 10),
+      entryQuantity: txn.quantity,
+      alreadyCoded: existingCount,
+      attached: dryRun ? 0 : imeis.length,
+      serials: imeis,
+    });
+    return;
+  }
+
   if (!dryRun && matched.length) {
     await prisma.imeiInventory.updateMany({
       where: { id: { in: matched.map(m => m.id) } },
@@ -212,6 +265,7 @@ router.post('/attach-to-dispatch', authorize(PERMISSIONS.IMEI_MANAGE), asyncHand
 
   ok(res, {
     dryRun,
+    direction: 'dispatched',
     dispatchDate: txn.createdAt.toISOString().slice(0, 10),
     dispatchQuantity: Math.abs(txn.quantity),
     attached: dryRun ? 0 : matched.length,
