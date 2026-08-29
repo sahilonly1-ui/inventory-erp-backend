@@ -335,6 +335,77 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 }));
 
+// Find every barcode that exists on more than one product row.
+//
+// Read-only survey before any merging: a unique constraint cannot be added to
+// EAN while duplicates remain, and merging blind would be worse than the split
+// it fixes. Reports where the stock and history actually sit for each one, so
+// the row worth keeping is obvious.
+router.get('/duplicate-eans', authorize(PERMISSIONS.PRODUCTS_READ), asyncHandler(async (_req: Request, res: Response) => {
+  const rows = await prisma.$queryRawUnsafe<any[]>(`
+    SELECT ean, COUNT(*)::int AS n
+    FROM products
+    WHERE "isDeleted" = false
+    GROUP BY ean
+    HAVING COUNT(*) > 1
+    ORDER BY COUNT(*) DESC, ean
+  `);
+
+  if (!rows.length) { ok(res, { duplicateBarcodes: 0, safeToAddConstraint: true, items: [] }); return; }
+
+  const eans = rows.map(r => r.ean as string);
+  const products = await prisma.product.findMany({
+    where: { ean: { in: eans }, isDeleted: false },
+    select: { id: true, ean: true, model: true, brand: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  const ids = products.map(p => p.id);
+  const [txnCounts, unitCounts, levels] = await Promise.all([
+    prisma.inventoryTransaction.groupBy({ by: ['productId'], where: { productId: { in: ids } }, _count: { _all: true } }),
+    prisma.imeiInventory.groupBy({ by: ['productId'], where: { productId: { in: ids }, isDeleted: false }, _count: { _all: true } }),
+    prisma.stockLevel.groupBy({ by: ['productId'], where: { productId: { in: ids } }, _sum: { quantity: true } }),
+  ]);
+  const txnBy = new Map(txnCounts.map((c: any) => [c.productId, c._count._all]));
+  const unitBy = new Map(unitCounts.map((c: any) => [c.productId, c._count._all]));
+  const stockBy = new Map(levels.map((c: any) => [c.productId, c._sum.quantity ?? 0]));
+
+  const byEan = new Map<string, any[]>();
+  for (const p of products) {
+    if (!byEan.has(p.ean)) byEan.set(p.ean, []);
+    byEan.get(p.ean)!.push({
+      id: p.id,
+      model: p.model,
+      brand: p.brand,
+      transactions: txnBy.get(p.id) ?? 0,
+      units: unitBy.get(p.id) ?? 0,
+      stock: stockBy.get(p.id) ?? 0,
+    });
+  }
+
+  const items = [...byEan.entries()].map(([ean, rowsForEan]) => {
+    // Rows carrying nothing at all are safe to retire without thought.
+    const empty = rowsForEan.filter(r => r.transactions === 0 && r.units === 0 && r.stock === 0);
+    return {
+      ean,
+      copies: rowsForEan.length,
+      // Flagged when more than one row holds real data, since merging those
+      // combines figures and deserves a look first.
+      needsReview: rowsForEan.length - empty.length > 1,
+      emptyRows: empty.length,
+      rows: rowsForEan,
+    };
+  }).sort((a, b) => Number(b.needsReview) - Number(a.needsReview) || b.copies - a.copies);
+
+  ok(res, {
+    duplicateBarcodes: items.length,
+    needingReview: items.filter(i => i.needsReview).length,
+    trivial: items.filter(i => !i.needsReview).length,
+    safeToAddConstraint: false,
+    items,
+  });
+}));
+
 // Merge duplicate product rows that share a barcode.
 //
 // EAN is not unique on Product, so the same barcode can end up on several rows.
