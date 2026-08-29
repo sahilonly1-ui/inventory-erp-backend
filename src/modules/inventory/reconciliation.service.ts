@@ -31,7 +31,10 @@ export async function assertConsistentTx(
     where: { productId_warehouseId: { productId, warehouseId } },
   });
   const level = levelRow?.quantity ?? 0;
-  const imeiCount = imeiRequired ? await imeiRepository.countInStock(tx, productId, warehouseId) : null;
+  // Always count the units that are actually on record — the imeiRequired flag
+  // in Product Master is unreliable (phones often have it false), so gating
+  // the count on it produces null and a null-pointer crash when units exist.
+  const imeiCount = await imeiRepository.countInStock(tx, productId, warehouseId);
 
   // The ledger and the stock level must always agree exactly — a difference
   // there is a real accounting bug.
