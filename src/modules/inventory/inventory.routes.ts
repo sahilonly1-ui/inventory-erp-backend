@@ -335,6 +335,84 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 }));
 
+// Merge duplicate product rows that share a barcode.
+//
+// EAN is not unique on Product, so the same barcode can end up on several rows.
+// Stock, units and history then split across them: one screen reads one row and
+// another reads a different one, and the numbers disagree with no way to tell
+// which is right. This moves everything onto a single row and retires the rest.
+//
+// Dry run by default, and it reports exactly what would move.
+router.post('/merge-duplicate-products', authorize(PERMISSIONS.PRODUCTS_UPDATE), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const ean = String(req.body?.ean ?? '').trim();
+  const keepId = req.body?.keepId ? String(req.body.keepId) : null;
+  if (!ean) throw new BadRequestError('ean is required');
+
+  const products = await prisma.product.findMany({
+    where: { ean },
+    select: { id: true, model: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (products.length < 2) throw new BadRequestError('That barcode is not duplicated');
+
+  // Default to the row with the most history, since that is the one other
+  // records already point at.
+  let keep = keepId ? products.find(p => p.id === keepId) : undefined;
+  if (keepId && !keep) throw new BadRequestError('keepId is not one of the duplicates');
+  if (!keep) {
+    const counts = await Promise.all(products.map(async p => ({
+      p,
+      n: await prisma.inventoryTransaction.count({ where: { productId: p.id } }),
+    })));
+    counts.sort((a, b) => b.n - a.n);
+    keep = counts[0].p;
+  }
+  const drop = products.filter(p => p.id !== keep!.id);
+  const dropIds = drop.map(p => p.id);
+
+  const [txns, units, levels] = await Promise.all([
+    prisma.inventoryTransaction.count({ where: { productId: { in: dropIds } } }),
+    prisma.imeiInventory.count({ where: { productId: { in: dropIds } } }),
+    prisma.stockLevel.findMany({ where: { productId: { in: dropIds } }, select: { id: true, warehouseId: true, quantity: true } }),
+  ]);
+
+  if (!dryRun) {
+    await prisma.$transaction(async tx => {
+      await tx.inventoryTransaction.updateMany({ where: { productId: { in: dropIds } }, data: { productId: keep!.id } });
+      await tx.imeiInventory.updateMany({ where: { productId: { in: dropIds } }, data: { productId: keep!.id } });
+
+      // Stock levels are per warehouse, so fold each one into the kept row's
+      // level for that warehouse rather than moving the row and creating a
+      // second level for the same place.
+      for (const l of levels) {
+        const target = await tx.stockLevel.findFirst({ where: { productId: keep!.id, warehouseId: l.warehouseId } });
+        if (target) {
+          await tx.stockLevel.update({ where: { id: target.id }, data: { quantity: target.quantity + l.quantity } });
+          await tx.stockLevel.delete({ where: { id: l.id } });
+        } else {
+          await tx.stockLevel.update({ where: { id: l.id }, data: { productId: keep!.id } });
+        }
+      }
+
+      // Retire rather than delete: the row may still be referenced elsewhere,
+      // and its history is now attached to the kept row anyway.
+      await tx.product.updateMany({
+        where: { id: { in: dropIds } },
+        data: { isDeleted: true, status: 'DISCONTINUED', updatedBy: req.user!.id },
+      });
+    });
+  }
+
+  ok(res, {
+    dryRun,
+    ean,
+    keeping: { id: keep.id, model: keep.model },
+    retiring: drop.map(d => ({ id: d.id, model: d.model })),
+    moves: { transactions: txns, units, stockLevels: levels.length, stockAdded: levels.reduce((n, l) => n + l.quantity, 0) },
+  });
+}));
+
 // Full movement history for one product.
 //
 // The IMEI Tracker only answers "where is this unit", and only for units that
