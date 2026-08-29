@@ -503,9 +503,14 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
   // covers every row carrying it.
   const products = await prisma.product.findMany({
     where: productId ? { id: productId } : { ean },
-    select: { id: true, ean: true, model: true, brand: true, imeiRequired: true },
+    select: { id: true, ean: true, model: true, brand: true, imeiRequired: true, isDeleted: true },
   });
   if (!products.length) throw new NotFoundError('Product not found');
+
+  // Retired rows still hold history worth reading, so they stay in the totals —
+  // but they are not a duplicate anyone needs to act on, and reporting them as
+  // one sent the operator looking for a second product that no longer exists.
+  const liveProducts = products.filter(p => !p.isDeleted);
 
   const product = products[0];
   const productIds = products.map(p => p.id);
@@ -606,8 +611,8 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
     product,
     // Surfaced deliberately: duplicate rows for one barcode split a product's
     // stock and history, and the operator needs to know they exist.
-    duplicateProducts: products.length > 1
-      ? products.map(p => ({ id: p.id, model: p.model }))
+    duplicateProducts: liveProducts.length > 1
+      ? liveProducts.map(p => ({ id: p.id, model: p.model }))
       : null,
     currentStock: levels.reduce((n, l) => n + l.quantity, 0),
     byWarehouse: levels.map(l => ({ warehouse: l.warehouse?.name ?? '', quantity: l.quantity })),
