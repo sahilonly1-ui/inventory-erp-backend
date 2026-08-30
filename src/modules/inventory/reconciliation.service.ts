@@ -60,22 +60,33 @@ export async function assertConsistentTx(
     const detail = { productId, warehouseId, ledger, level, imeiCount };
     if (opts.strict && blocking) throw new ReconciliationError(detail);
 
-    await writeAudit(tx, {
-      action: 'UPDATE',
-      entityName: 'reconciliation',
-      entityId: `${productId}:${warehouseId}`,
-      newValue: { ...detail, status: imeiUnderCount && ledgerOk ? 'PARTIALLY_TRACKED' : 'MISMATCH' },
-    });
-    await tx.notification.create({
-      data: {
-        type: 'SYSTEM',
-        title: imeiUnderCount && ledgerOk ? 'Stock partially tracked' : 'Stock reconciliation mismatch',
-        message: imeiUnderCount && ledgerOk
-          ? `Product ${productId} @ ${warehouseId}: ${imeiCount} of ${level} units have an IMEI or serial recorded.`
-          : `Product ${productId} @ ${warehouseId}: ledger=${ledger}, level=${level}, imei=${imeiCount}`,
-        meta: detail,
-      },
-    });
+    // Logging must never abort a valid movement. Wrap both writes so that a
+    // schema mismatch, missing userId, or any other failure in the audit/
+    // notification path does not roll back the stock transaction itself.
+    try {
+      await writeAudit(tx, {
+        action: 'UPDATE',
+        entityName: 'reconciliation',
+        entityId: `${productId}:${warehouseId}`,
+        newValue: { ...detail, status: imeiUnderCount && ledgerOk ? 'PARTIALLY_TRACKED' : 'MISMATCH' },
+      });
+    } catch (auditErr) {
+      console.error('[reconciliation] audit write failed (movement still applied):', auditErr);
+    }
+    try {
+      await tx.notification.create({
+        data: {
+          type: 'SYSTEM',
+          title: imeiUnderCount && ledgerOk ? 'Stock partially tracked' : 'Stock reconciliation mismatch',
+          message: imeiUnderCount && ledgerOk
+            ? `Product ${productId} @ ${warehouseId}: ${imeiCount} of ${level} units have an IMEI or serial recorded.`
+            : `Product ${productId} @ ${warehouseId}: ledger=${ledger}, level=${level}, imei=${imeiCount}`,
+          meta: detail,
+        },
+      });
+    } catch (notifErr) {
+      console.error('[reconciliation] notification write failed (movement still applied):', notifErr);
+    }
   }
 
   return { productId, warehouseId, ledger, level, imeiCount, consistent };
