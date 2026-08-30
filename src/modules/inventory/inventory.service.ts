@@ -699,7 +699,7 @@ Object.assign(inventoryService, {
           await tx.stockLevel.update({
             where: { id: sl.id },
             data: { quantity: Math.max(0, sl.quantity - qty) },
-          });
+          }, { timeout: 120_000, maxWait: 20_000 });
         }
       }
 

@@ -86,6 +86,12 @@ export const imeiService = {
       // strict: same-tx writes must reconcile, or we roll back.
       await assertConsistentTx(tx, input.productId, input.warehouseId, true, { strict: true });
       return move;
+    }, {
+      // Large entries do several round trips per product group. The default 5s
+      // interactive-transaction limit aborts them mid-way, which surfaced as an
+      // unexplained internal error on big dispatches.
+      timeout: 120_000,
+      maxWait: 20_000,
     });
 
     emitStockChanged({ productId: input.productId, warehouseId: input.warehouseId, quantity: result.newQuantity, type: 'STOCK_IN' });
@@ -153,6 +159,12 @@ export const imeiService = {
         out.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });
       }
       return out;
+    }, {
+      // Large entries do several round trips per product group. The default 5s
+      // interactive-transaction limit aborts them mid-way, which surfaced as an
+      // unexplained internal error on big dispatches.
+      timeout: 120_000,
+      maxWait: 20_000,
     });
 
     for (const g of groups) {
@@ -198,6 +210,12 @@ export const imeiService = {
       });
       await assertConsistentTx(tx, row.productId, row.warehouseId, true, { strict: true });
       return { imei, from: row.status, to: target, stockDelta: delta, productId: row.productId, warehouseId: row.warehouseId, newQuantity };
+    }, {
+      // Large entries do several round trips per product group. The default 5s
+      // interactive-transaction limit aborts them mid-way, which surfaced as an
+      // unexplained internal error on big dispatches.
+      timeout: 120_000,
+      maxWait: 20_000,
     });
 
     if (result.stockDelta !== 0 && result.newQuantity !== null) {
