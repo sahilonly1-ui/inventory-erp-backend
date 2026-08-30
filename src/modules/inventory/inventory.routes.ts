@@ -43,8 +43,37 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   else if (categoryIds.length > 1) productWhere.categoryId = { in: categoryIds };
   if (brands.length === 1)  productWhere.brand = brands[0];
   else if (brands.length > 1) productWhere.brand = { in: brands };
+  // An "as of" date rebuilds the position at the end of that day from the
+  // movement history, rather than reading today's stock levels. Stock levels
+  // only ever hold the current figure, so a past date cannot be read from them.
+  const asOfRaw = req.query.date ? String(req.query.date).trim() : '';
+  const asOf = /^\d{4}-\d{2}-\d{2}$/.test(asOfRaw) ? asOfRaw : null;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const isHistorical = !!asOf && asOf < todayStr;
+
+  let historicalQty: Map<string, number> | null = null;
+  if (isHistorical) {
+    const cutoff = new Date(`${asOf}T23:59:59.999Z`);
+    // Sum every movement up to the end of that day. The result is the balance
+    // the product actually held then.
+    const sums = await prisma.inventoryTransaction.groupBy({
+      by: ['productId'],
+      where: { createdAt: { lte: cutoff } },
+      _sum: { quantity: true },
+    });
+    historicalQty = new Map(
+      sums
+        .map(r => [r.productId, r._sum.quantity ?? 0] as [string, number])
+        .filter(([, q]) => q > 0),
+    );
+  }
+
   const products = await prisma.product.findMany({
-    where: { ...productWhere, stockLevels: { some: { quantity: { gt: 0 } } } },
+    where: isHistorical
+      // A product with no stock today may well have had some on the chosen day,
+      // so the live-stock filter has to be dropped for a historical view.
+      ? { ...productWhere, id: { in: [...historicalQty!.keys()] } }
+      : { ...productWhere, stockLevels: { some: { quantity: { gt: 0 } } } },
     include: {
       stockLevels: { select: { quantity: true } },
       category:    { select: { id: true, name: true } },
@@ -66,6 +95,11 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
       AND status = 'IN_STOCK'
     GROUP BY "productId"
   `;
+  // A historical view cannot use today's unit statuses: a unit sold since then
+  // is IN_STOCK no longer, but was on the chosen day. Fall back to the balance
+  // from the ledger, which is the figure that is actually knowable for a past
+  // date.
+  if (isHistorical) imeiRaw.length = 0;
   const imeiMap = new Map<string, { total: number; activated: number }>();
   for (const row of imeiRaw) {
     imeiMap.set(row.productId, {
@@ -74,7 +108,9 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     });
   }
   const rows = products.map(p => {
-    const totalStock = p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
+    const totalStock = isHistorical
+      ? (historicalQty!.get(p.id) ?? 0)
+      : p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
     if (totalStock <= 0) return null;
     let totalQty = totalStock, activated = 0, retail = totalStock;
     // Use IMEI counts if records exist for this product
@@ -97,7 +133,12 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
     where: { isDeleted: false, stockLevels: { some: { quantity: { gt: 0 } } } },
     orderBy: { brand: 'asc' },
   });
-  ok(res, { rows, categories, brands: brandsRaw.map(b => b.brand).filter(Boolean) });
+  ok(res, {
+    rows, categories,
+    brands: brandsRaw.map(b => b.brand).filter(Boolean),
+    // Echoed so the page can label the report and show it is not live stock.
+    asOf: isHistorical ? asOf : null,
+  });
 }));
 
 export default router;
