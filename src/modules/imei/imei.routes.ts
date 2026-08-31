@@ -393,6 +393,69 @@ router.post('/remove-units', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(as
   });
 }));
 
+// Find a serial or IMEI wherever it exists, including places a normal lookup
+// does not reach.
+//
+// A plain lookup returns 404 for anything not a live unit, which cannot
+// distinguish "never entered" from "entered and later deleted" or "recorded
+// only as text in an entry's notes". Those need different fixes, so the
+// difference matters.
+router.post('/trace', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (req: Request, res: Response) => {
+  const codes: string[] = Array.isArray(req.body?.imeis) ? req.body.imeis.filter(Boolean) : [];
+  if (!codes.length) throw new BadRequestError('imeis is required');
+
+  const results = [];
+  for (const raw of codes) {
+    const code = String(raw).trim();
+
+    // Case-insensitive: serials get written down in a different case than scanned.
+    const units = await prisma.imeiInventory.findMany({
+      where: { imei1: { equals: code, mode: 'insensitive' } },
+      select: {
+        id: true, imei1: true, status: true, isDeleted: true, deletedAt: true,
+        createdAt: true, stockInTxnId: true, stockOutTxnId: true,
+        product: { select: { ean: true, model: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Serials that older code wrote into the entry notes instead of storing as
+    // units — the record exists, just not where anything can use it.
+    const inRemarks = await prisma.inventoryTransaction.findMany({
+      where: { remarks: { contains: code, mode: 'insensitive' } },
+      select: { id: true, quantity: true, createdAt: true, remarks: true, product: { select: { ean: true, model: true } } },
+      take: 5,
+    });
+
+    let verdict: string;
+    if (units.some(u => !u.isDeleted)) verdict = 'in tracker';
+    else if (units.length) verdict = 'deleted from tracker';
+    else if (inRemarks.length) verdict = 'only in entry notes — never stored as a unit';
+    else verdict = 'not found anywhere';
+
+    results.push({
+      code,
+      verdict,
+      units: units.map(u => ({
+        product: u.product?.model, ean: u.product?.ean,
+        status: u.status, isDeleted: u.isDeleted,
+        stockInDate: u.createdAt.toISOString().slice(0, 10),
+        deletedAt: u.deletedAt ? u.deletedAt.toISOString().slice(0, 10) : null,
+        hasStockInLink: !!u.stockInTxnId,
+        hasDispatchLink: !!u.stockOutTxnId,
+      })),
+      foundInEntries: inRemarks.map(t => ({
+        txnId: t.id,
+        direction: t.quantity > 0 ? 'received' : 'dispatched',
+        date: t.createdAt.toISOString().slice(0, 10),
+        product: t.product?.model,
+      })),
+    });
+  }
+
+  ok(res, { checked: codes.length, results });
+}));
+
 // Review the units brought back by a restore run.
 //
 // A restore returns every soft-deleted unit it can find. That is right for
