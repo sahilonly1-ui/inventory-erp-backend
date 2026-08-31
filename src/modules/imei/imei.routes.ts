@@ -393,6 +393,76 @@ router.post('/remove-units', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(as
   });
 }));
 
+// Restore specific units by name.
+//
+// The blanket restore deliberately skips units whose Stock In entry is gone,
+// because it cannot tell a unit lost to a bug from one deleted on purpose.
+// Naming a unit explicitly supplies exactly that judgement, so this restores
+// what it is told to and nothing else.
+//
+// Each unit returns to the status it held when deleted — a unit that was SOLD
+// comes back SOLD, not as stock. Forcing everything to IN_STOCK is what put
+// phantom stock on the books last time.
+router.post('/restore-units', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const codes: string[] = Array.isArray(req.body?.imeis) ? req.body.imeis.filter(Boolean) : [];
+  if (!codes.length) throw new BadRequestError('imeis is required');
+
+  const deleted = await prisma.imeiInventory.findMany({
+    where: { isDeleted: true, OR: codes.map(c => ({ imei1: { equals: String(c).trim(), mode: 'insensitive' as const } })) },
+    select: {
+      id: true, imei1: true, status: true, productId: true, warehouseId: true,
+      product: { select: { model: true } },
+    },
+    orderBy: { deletedAt: 'desc' },
+  });
+
+  // Never create a second live row for the same serial.
+  const live = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false, OR: deleted.map(d => ({ imei1: { equals: d.imei1, mode: 'insensitive' as const } })) },
+    select: { imei1: true },
+  });
+  const taken = new Set(live.map(l => l.imei1.toLowerCase()));
+
+  const seen = new Set<string>();
+  const plan = deleted.filter(d => {
+    const k = d.imei1.toLowerCase();
+    if (taken.has(k) || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  const notFound = codes.filter(c => !plan.some(p => p.imei1.toLowerCase() === String(c).trim().toLowerCase()));
+
+  if (!dryRun && plan.length) {
+    await prisma.$transaction(async tx => {
+      await tx.imeiInventory.updateMany({
+        where: { id: { in: plan.map(p => p.id) } },
+        data: { isDeleted: false, deletedAt: null, deletedBy: null, updatedBy: req.user!.id },
+      });
+
+      // Recompute each affected level from the units, so restoring cannot leave
+      // the count and the units disagreeing.
+      const keys = [...new Set(plan.map(p => `${p.productId}::${p.warehouseId}`))];
+      for (const key of keys) {
+        const [productId, warehouseId] = key.split('::');
+        const n = await tx.imeiInventory.count({
+          where: { productId, warehouseId, isDeleted: false, status: 'IN_STOCK' },
+        });
+        const level = await tx.stockLevel.findFirst({ where: { productId, warehouseId } });
+        if (level) await tx.stockLevel.update({ where: { id: level.id }, data: { quantity: n } });
+      }
+    });
+  }
+
+  ok(res, {
+    dryRun,
+    restored: dryRun ? 0 : plan.length,
+    willRestore: plan.map(p => ({ imei: p.imei1, product: p.product?.model, returningAs: p.status })),
+    notFound,
+  });
+}));
+
 // Find a serial or IMEI wherever it exists, including places a normal lookup
 // does not reach.
 //
