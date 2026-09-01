@@ -620,6 +620,27 @@ Object.assign(inventoryService, {
             orderBy: { createdAt: 'asc' },
             take: txn.quantity,
           });
+          // Refuse rather than guess. If the window does not hold exactly the
+          // number of units this entry brought in, the ones here may belong to
+          // a different entry — and removing those is precisely the failure
+          // this guard exists to prevent. Stopping is recoverable; deleting
+          // someone else's stock is not.
+          if (legacy.length !== txn.quantity) {
+            throw new BadRequestError(
+              `Cannot safely delete this entry: it received ${txn.quantity} unit(s), but ${legacy.length} ` +
+              `matching unit(s) were found around its date. Its units are not linked to it, so removing them ` +
+              `could take stock belonging to another entry. Run the unit-link backfill first, or remove the ` +
+              `units individually from the IMEI Tracker.`,
+            );
+          }
+          if (legacy.length !== qty) {
+            throw new BadRequestError(
+              `Cannot safely delete this entry: it received ${qty} unit(s), but ${legacy.length} matching ` +
+              `unit(s) were found around its date. Its units are not linked to it, so removing them could ` +
+              `take stock belonging to another entry. Run the unit-link backfill first, or remove the units ` +
+              `individually from the IMEI Tracker.`,
+            );
+          }
           if (legacy.length) {
             await tx.imeiInventory.updateMany({
               where: { id: { in: legacy.map(l => l.id) } },

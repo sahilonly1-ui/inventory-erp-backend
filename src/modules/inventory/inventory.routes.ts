@@ -376,6 +376,93 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 }));
 
+// Link units to the receipt they came from.
+//
+// Units created before per-unit linking carry no stockInTxnId, which forces
+// deletion to guess which units belong to an entry — and guessing is what let
+// one entry's deletion remove another entry's stock. Every link established
+// here is one less guess the system ever has to make.
+//
+// A unit is linked only when exactly one receipt can account for it: same
+// product and warehouse, within twelve hours, and with room left under that
+// receipt's quantity. Anything ambiguous is left alone and reported.
+router.post('/backfill-unit-links', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+
+  const orphans = await prisma.imeiInventory.findMany({
+    where: { isDeleted: false, stockInTxnId: null },
+    select: { id: true, imei1: true, productId: true, warehouseId: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+    take: 5000,
+  });
+  if (!orphans.length) { ok(res, { dryRun, orphans: 0, linked: 0, ambiguous: [], unmatched: [] }); return; }
+
+  const productIds = [...new Set(orphans.map(o => o.productId))];
+  const receipts = await prisma.inventoryTransaction.findMany({
+    where: { productId: { in: productIds }, quantity: { gt: 0 } },
+    select: { id: true, productId: true, warehouseId: true, quantity: true, createdAt: true },
+  });
+
+  // How much room each receipt still has for units.
+  const used = new Map<string, number>();
+  const existing = await prisma.imeiInventory.groupBy({
+    by: ['stockInTxnId'],
+    where: { stockInTxnId: { in: receipts.map(r => r.id) }, isDeleted: false },
+    _count: { _all: true },
+  });
+  for (const e of existing) if (e.stockInTxnId) used.set(e.stockInTxnId, e._count._all);
+
+  const plan: { unitId: string; imei: string; txnId: string }[] = [];
+  const ambiguous: any[] = [];
+  const unmatched: any[] = [];
+
+  for (const u of orphans) {
+    const candidates = receipts.filter(r =>
+      r.productId === u.productId &&
+      r.warehouseId === u.warehouseId &&
+      Math.abs(r.createdAt.getTime() - u.createdAt.getTime()) <= 12 * 60 * 60 * 1000 &&
+      (used.get(r.id) ?? 0) < r.quantity,
+    );
+
+    if (candidates.length === 0) { unmatched.push({ imei: u.imei1, at: u.createdAt.toISOString().slice(0, 10) }); continue; }
+    if (candidates.length > 1) {
+      // Two receipts could equally account for it; picking one would be a guess
+      // of exactly the kind this is meant to eliminate.
+      ambiguous.push({ imei: u.imei1, at: u.createdAt.toISOString().slice(0, 10), receipts: candidates.length });
+      continue;
+    }
+
+    const r = candidates[0];
+    used.set(r.id, (used.get(r.id) ?? 0) + 1);
+    plan.push({ unitId: u.id, imei: u.imei1, txnId: r.id });
+  }
+
+  if (!dryRun && plan.length) {
+    // Grouped by receipt so this is a handful of statements, not one per unit.
+    const byTxn = new Map<string, string[]>();
+    for (const p of plan) {
+      if (!byTxn.has(p.txnId)) byTxn.set(p.txnId, []);
+      byTxn.get(p.txnId)!.push(p.unitId);
+    }
+    await prisma.$transaction(async tx => {
+      for (const [txnId, unitIds] of byTxn) {
+        await tx.imeiInventory.updateMany({ where: { id: { in: unitIds } }, data: { stockInTxnId: txnId } });
+      }
+    }, { timeout: 120_000, maxWait: 20_000 });
+  }
+
+  ok(res, {
+    dryRun,
+    orphans: orphans.length,
+    linked: dryRun ? 0 : plan.length,
+    willLink: plan.length,
+    ambiguous: ambiguous.slice(0, 50),
+    ambiguousTotal: ambiguous.length,
+    unmatched: unmatched.slice(0, 50),
+    unmatchedTotal: unmatched.length,
+  });
+}));
+
 // Rebuild the entry behind units that survived a deletion.
 //
 // Restoring units brings back the goods but not the entry that recorded them,
