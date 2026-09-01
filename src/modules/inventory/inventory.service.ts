@@ -602,12 +602,19 @@ Object.assign(inventoryService, {
         // transaction's own quantity, oldest first, so only the units this
         // entry actually brought in are removed.
         if (byTxnId.count === 0) {
+          // Restricted to units created around the same time as this entry.
+          // Without that, the fallback takes any unlinked unit of the product —
+          // including ones from a completely different entry days later, which
+          // is how deleting one entry silently removed another's stock.
+          const from = new Date(txn.createdAt.getTime() - 12 * 60 * 60 * 1000);
+          const to   = new Date(txn.createdAt.getTime() + 12 * 60 * 60 * 1000);
           const legacy = await tx.imeiInventory.findMany({
             where: {
               productId: txn.productId,
               warehouseId: txn.warehouseId,
               isDeleted: false,
               stockInTxnId: null,
+              createdAt: { gte: from, lte: to },
             },
             select: { id: true },
             orderBy: { createdAt: 'asc' },
@@ -757,10 +764,18 @@ Object.assign(inventoryService, {
       //    the quantity actually being removed — an unscoped delete here used
       //    to take every unit of the product with it.
       if (inboundTxnIds.length && byTxnId.count === 0) {
+        // Same restriction as the single-delete path: only units created around
+        // the time of the entries being removed are candidates.
+        const stamps = txns.filter(t => t.quantity > 0).map(t => t.createdAt.getTime());
+        const from = new Date(Math.min(...stamps) - 12 * 60 * 60 * 1000);
+        const to   = new Date(Math.max(...stamps) + 12 * 60 * 60 * 1000);
         for (const { productId, warehouseId, qty } of deltaByKey.values()) {
           if (qty <= 0) continue;
           const legacy = await tx.imeiInventory.findMany({
-            where: { productId, warehouseId, isDeleted: false, stockInTxnId: null },
+            where: {
+              productId, warehouseId, isDeleted: false, stockInTxnId: null,
+              createdAt: { gte: from, lte: to },
+            },
             select: { id: true },
             orderBy: { createdAt: 'desc' },
             take: qty,
