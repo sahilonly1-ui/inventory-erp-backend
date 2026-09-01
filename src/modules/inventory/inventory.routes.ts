@@ -376,6 +376,112 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 }));
 
+// Rebuild the entry behind units that survived a deletion.
+//
+// Restoring units brings back the goods but not the entry that recorded them,
+// so the Dashboard shows nothing for that day and the ledger no longer adds up
+// to the stock level. This recreates the missing receipt and links the units to
+// it.
+//
+// The stock level is deliberately left alone: the units are already counted in
+// it, and the missing piece is the movement that explains them.
+router.post('/rebuild-entry', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyncHandler(async (req: Request, res: Response) => {
+  const dryRun = req.body?.dryRun !== false;
+  const codes: string[] = Array.isArray(req.body?.imeis) ? req.body.imeis.filter(Boolean) : [];
+  const supplierName = req.body?.supplier ? String(req.body.supplier).trim() : '';
+  const dateRaw = req.body?.date ? String(req.body.date).trim() : '';
+  const invoiceNo = req.body?.invoiceNo ? String(req.body.invoiceNo).trim() : '';
+  if (!codes.length) throw new BadRequestError('imeis is required');
+
+  const units = await prisma.imeiInventory.findMany({
+    where: {
+      isDeleted: false,
+      OR: codes.map(c => ({ imei1: { equals: String(c).trim(), mode: 'insensitive' as const } })),
+    },
+    select: {
+      id: true, imei1: true, productId: true, warehouseId: true, createdAt: true,
+      stockInTxnId: true, supplierId: true,
+      product: { select: { model: true, ean: true } },
+    },
+  });
+
+  const notFound = codes.filter(c => !units.some(u => u.imei1.toLowerCase() === String(c).trim().toLowerCase()));
+  const alreadyLinked = units.filter(u => u.stockInTxnId);
+  const orphans = units.filter(u => !u.stockInTxnId);
+  if (!orphans.length) {
+    ok(res, { dryRun, created: 0, notFound, alreadyLinked: alreadyLinked.map(u => u.imei1), groups: [] });
+    return;
+  }
+
+  // Resolve the supplier by name if one was given; otherwise reuse whatever the
+  // units already carry.
+  let vendorId: string | null = null;
+  if (supplierName) {
+    const v = await prisma.vendor.findFirst({
+      where: { name: { equals: supplierName, mode: 'insensitive' }, isDeleted: false },
+      select: { id: true },
+    });
+    if (!v) throw new BadRequestError(`No supplier named "${supplierName}". Create it in Supplier Master first.`);
+    vendorId = v.id;
+  }
+
+  // One receipt per product and warehouse, matching how entries are recorded.
+  const byKey = new Map<string, typeof orphans>();
+  for (const u of orphans) {
+    const k = `${u.productId}::${u.warehouseId}`;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k)!.push(u);
+  }
+
+  const groups = [...byKey.entries()].map(([k, list]) => ({
+    key: k,
+    product: list[0].product?.model,
+    ean: list[0].product?.ean,
+    quantity: list.length,
+    // Dated to when the units were created unless told otherwise, so the entry
+    // lands on the day the goods actually arrived.
+    date: (dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw))
+      ? `${dateRaw}T12:00:00.000Z`
+      : list[0].createdAt.toISOString(),
+    imeis: list.map(u => u.imei1),
+  }));
+
+  if (!dryRun) {
+    await prisma.$transaction(async tx => {
+      for (const g of groups) {
+        const [productId, warehouseId] = g.key.split('::');
+        const list = byKey.get(g.key)!;
+        const created = await tx.inventoryTransaction.create({
+          data: {
+            productId, warehouseId,
+            type: 'STOCK_IN',
+            quantity: g.quantity,
+            vendorId: vendorId ?? list[0].supplierId ?? null,
+            referenceType: invoiceNo ? 'INVOICE' : null,
+            referenceId: invoiceNo || null,
+            remarks: 'Entry rebuilt for units left without a receipt',
+            createdAt: new Date(g.date),
+            createdBy: req.user!.id,
+          },
+          select: { id: true },
+        });
+        await tx.imeiInventory.updateMany({
+          where: { id: { in: list.map(u => u.id) } },
+          data: { stockInTxnId: created.id, ...(vendorId ? { supplierId: vendorId } : {}) },
+        });
+      }
+    }, { timeout: 120_000, maxWait: 20_000 });
+  }
+
+  ok(res, {
+    dryRun,
+    created: dryRun ? 0 : groups.length,
+    groups,
+    alreadyLinked: alreadyLinked.map(u => u.imei1),
+    notFound,
+  });
+}));
+
 // Find every barcode that exists on more than one product row.
 //
 // Read-only survey before any merging: a unique constraint cannot be added to
