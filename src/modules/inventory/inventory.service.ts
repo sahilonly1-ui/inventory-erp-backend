@@ -590,6 +590,23 @@ Object.assign(inventoryService, {
       // Do NOT gate on product.imeiRequired — it may be false even for phones
       // (data issue in Product Master). Always attempt deletion; no-op if none exist.
       if (txn.quantity > 0) {
+        // Refuse up front if any of this receipt's units have already been
+        // dispatched. Reversing would remove them while their sale still
+        // stands, so the books could never be made to balance — and the
+        // failure used to surface only after the transaction was already gone.
+        const soldAlready = await tx.imeiInventory.findMany({
+          where: { stockInTxnId: txnId, isDeleted: false, status: 'SOLD' },
+          select: { imei1: true },
+          take: 10,
+        });
+        if (soldAlready.length) {
+          throw new BadRequestError(
+            `This entry cannot be deleted: ${soldAlready.length} of its unit(s) have already been ` +
+            `dispatched (${soldAlready.map(u => u.imei1).join(', ')}). Reverse the Stock Out for those ` +
+            `units first, then delete this entry.`,
+          );
+        }
+
         // PRIMARY: exact match via stockInTxnId (set since the fix was deployed)
         const byTxnId = await tx.imeiInventory.updateMany({
           where: { stockInTxnId: txnId, isDeleted: false },
@@ -631,14 +648,6 @@ Object.assign(inventoryService, {
               `matching unit(s) were found around its date. Its units are not linked to it, so removing them ` +
               `could take stock belonging to another entry. Run the unit-link backfill first, or remove the ` +
               `units individually from the IMEI Tracker.`,
-            );
-          }
-          if (legacy.length !== qty) {
-            throw new BadRequestError(
-              `Cannot safely delete this entry: it received ${qty} unit(s), but ${legacy.length} matching ` +
-              `unit(s) were found around its date. Its units are not linked to it, so removing them could ` +
-              `take stock belonging to another entry. Run the unit-link backfill first, or remove the units ` +
-              `individually from the IMEI Tracker.`,
             );
           }
           if (legacy.length) {
@@ -739,6 +748,26 @@ Object.assign(inventoryService, {
       // the same way was erasing serials from the tracker whenever a Stock Out
       // entry was deleted, even though the stock itself came back.
       const inboundTxnIds = txns.filter(t => t.quantity > 0).map(t => t.id);
+
+      // Refuse to reverse a receipt whose units have since been sold.
+      //
+      // Reversing removes the units, but the dispatch that sold one of them
+      // still exists, so the books can no longer be made to balance and the
+      // replacement is rejected — after the original has already gone. Better
+      // to stop before anything is touched and say which unit is the problem.
+      if (inboundTxnIds.length) {
+        const sold = await tx.imeiInventory.findMany({
+          where: { stockInTxnId: { in: inboundTxnIds }, isDeleted: false, status: 'SOLD' },
+          select: { imei1: true },
+          take: 10,
+        });
+        if (sold.length) {
+          throw new BadRequestError(
+            `This entry cannot be changed: ${sold.length} of its unit(s) have already been dispatched ` +
+            `(${sold.map(u => u.imei1).join(', ')}). Reverse the Stock Out for those units first, then edit this entry.`,
+          );
+        }
+      }
       const outboundTxns = txns.filter(t => t.quantity < 0);
 
       let byTxnId = { count: 0 };
