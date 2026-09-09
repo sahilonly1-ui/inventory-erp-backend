@@ -83,12 +83,17 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   // Query ALL products — don't filter by imeiRequired (may be false for phones)
   const imeiProductIds = products.map(p => p.id);
   // Use raw SQL — bypasses Prisma client cache, always reflects actual DB schema
-  type ImeiCount = { productId: string; total: bigint; activated: bigint };
+  // Demo, Open Box and Second-IMEI units are not sellable retail stock, so
+  // they must never be counted as Retail — that's what let demo units chosen
+  // in an entry show up in the ordinary stock figures. NIL is the sellable
+  // (regular) type; anything else is tallied separately.
+  type ImeiCount = { productId: string; total: bigint; activated: bigint; demo: bigint };
   const imeiRaw = await prisma.$queryRaw<ImeiCount[]>`
     SELECT
       "productId",
-      COUNT(*) AS total,
-      COUNT(*) FILTER (WHERE activated = true) AS activated
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL') AS total,
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND activated = true) AS activated,
+      COUNT(*) FILTER (WHERE "imeiType" != 'NIL') AS demo
     FROM imei_inventory
     WHERE "productId" = ANY(${imeiProductIds}::text[])
       AND "isDeleted" = false
@@ -100,11 +105,12 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   // from the ledger, which is the figure that is actually knowable for a past
   // date.
   if (isHistorical) imeiRaw.length = 0;
-  const imeiMap = new Map<string, { total: number; activated: number }>();
+  const imeiMap = new Map<string, { total: number; activated: number; demo: number }>();
   for (const row of imeiRaw) {
     imeiMap.set(row.productId, {
       total:     Number(row.total),
       activated: Number(row.activated),
+      demo:      Number(row.demo),
     });
   }
   const rows = products.map(p => {
@@ -112,18 +118,19 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
       ? (historicalQty!.get(p.id) ?? 0)
       : p.stockLevels.reduce((s, sl) => s + sl.quantity, 0);
     if (totalStock <= 0) return null;
-    let totalQty = totalStock, activated = 0, retail = totalStock;
+    let totalQty = totalStock, activated = 0, retail = totalStock, demo = 0;
     // Use IMEI counts if records exist for this product
     // (don't rely on imeiRequired flag — may be false even for phones due to data issue)
     const imei = imeiMap.get(p.id);
-    if (imei && imei.total > 0) {
-      totalQty  = imei.total;
+    if (imei && (imei.total > 0 || imei.demo > 0)) {
+      totalQty  = imei.total;               // sellable (NIL) units only
       activated = imei.activated;
       retail    = imei.total - imei.activated;
+      demo      = imei.demo;
     }
     return { productId: p.id, ean: p.ean, model: p.model, brand: p.brand,
       category: (p as any).category?.name ?? '', categoryId: p.categoryId ?? '',
-      imeiRequired: p.imeiRequired, totalQty, retail, activated };
+      imeiRequired: p.imeiRequired, totalQty, retail, activated, demo };
   }).filter(Boolean);
   const categories = await prisma.productCategory.findMany({
     where: { isDeleted: false }, select: { id: true, name: true }, orderBy: { name: 'asc' },
