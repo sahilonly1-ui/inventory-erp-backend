@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS "replacedByHash" TEXT;
+
+
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   "userId" TEXT NOT NULL REFERENCES users(id),

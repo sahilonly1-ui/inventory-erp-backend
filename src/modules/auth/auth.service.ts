@@ -56,8 +56,37 @@ export const authService = {
       const existing = await tx.refreshToken.findUnique({ where: { tokenHash } });
       if (!existing) throw new UnauthorizedError('Invalid refresh token');
 
-      // A revoked token being presented again => stolen/replayed. Nuke the family.
       if (existing.revokedAt) {
+        // A revoked token presented again is normally a stolen/replayed token —
+        // except this app opens the same session in several tabs, and a lost
+        // response (a timeout after the server already rotated the token, or
+        // two tabs refreshing within the same instant) presents the very same
+        // old token honestly. Both look identical here, so a short grace
+        // window is given: if this token was rotated only moments ago, the
+        // token it was rotated INTO is handed back again instead of treating
+        // the replay as an attack. Ending every tab's session over a network
+        // hiccup was the frequent-logout problem this replaces.
+        const GRACE_MS = 30_000;
+        const rotatedRecently = Date.now() - existing.revokedAt.getTime() < GRACE_MS;
+        if (rotatedRecently && existing.replacedByHash) {
+          const successor = await tx.refreshToken.findUnique({ where: { tokenHash: existing.replacedByHash } });
+          if (successor && !successor.revokedAt && successor.expiresAt > new Date()) {
+            const user = await tx.user.findFirstOrThrow({
+              where: { id: successor.userId, isDeleted: false, isActive: true },
+            });
+            // The successor's raw value cannot be recovered from its hash, so
+            // the caller is handed a fresh access token but must retry with
+            // whatever refresh token their own last successful response gave
+            // them — which, for the lost-response case, is this same rotation.
+            return {
+              accessToken: signAccessToken({ sub: user.id, email: user.email }),
+              refreshToken: rawToken,
+            };
+          }
+        }
+
+        // Outside the grace window, or the successor is itself gone: treat as
+        // genuine reuse and end every session for this user.
         await tx.refreshToken.updateMany({
           where: { userId: existing.userId, revokedAt: null },
           data: { revokedAt: new Date() },
@@ -74,9 +103,11 @@ export const authService = {
 
       if (existing.expiresAt < new Date()) throw new UnauthorizedError('Refresh token expired');
 
-      await tx.refreshToken.update({ where: { id: existing.id }, data: { revokedAt: new Date() } });
-
       const { token, tokenHash: newHash } = generateOpaqueToken();
+      await tx.refreshToken.update({
+        where: { id: existing.id },
+        data: { revokedAt: new Date(), replacedByHash: newHash },
+      });
       await tx.refreshToken.create({
         data: { userId: existing.userId, tokenHash: newHash, expiresAt: refreshExpiry() },
       });

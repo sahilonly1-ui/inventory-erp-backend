@@ -150,6 +150,10 @@ model RefreshToken {
   tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
+  // Hash of the token this one was rotated into. Lets a lost-response replay
+  // of this exact token, within a short grace window, be answered with the
+  // same new pair instead of being treated as theft.
+  replacedByHash String?
   createdAt DateTime  @default(now())
 
   @@index([userId])
