@@ -528,6 +528,11 @@ const inventoryServiceExtensions = {
         // Only an invoice belongs on screen; the same column also stores
         // transfer and session ids, which would be meaningless to an operator.
         referenceId: t.referenceType === 'INVOICE' ? t.referenceId : null,
+        // Carries the SIN-/SOUT- document number embedded in remarks, so the
+        // Dashboard can group transactions by the entry they were actually
+        // committed as, rather than by vendor alone — two separate shipments
+        // from the same supplier on the same day must stay two entries.
+        remarks: t.remarks ?? null,
       })),
     };
   },
@@ -586,7 +591,41 @@ Object.assign(inventoryService, {
         });
       }
 
-      // 2. Soft-delete ALL IMEI records linked to this transaction.
+      // 2a. Reverse a dispatch: the sold units must return to IN_STOCK, or
+      // deleting a Stock Out silently leaves its units marked SOLD forever
+      // while the stock level says they are back — the two disagreeing is
+      // exactly the reconciliation failure this whole area exists to prevent.
+      // (bulkReverseTransactions already did this; the single-transaction path
+      // — used whenever an entry has only one transaction — did not.)
+      if (txn.quantity < 0) {
+        let sold = await tx.imeiInventory.findMany({
+          where: { stockOutTxnId: txnId, isDeleted: false },
+          select: { id: true },
+        });
+        if (sold.length === 0) {
+          // LEGACY FALLBACK for dispatches made before stockOutTxnId existed.
+          sold = await tx.imeiInventory.findMany({
+            where: {
+              productId: txn.productId,
+              warehouseId: txn.warehouseId,
+              isDeleted: false,
+              status: 'SOLD',
+              stockOutTxnId: null,
+            },
+            select: { id: true },
+            orderBy: { updatedAt: 'desc' },
+            take: Math.abs(txn.quantity),
+          });
+        }
+        if (sold.length) {
+          await tx.imeiInventory.updateMany({
+            where: { id: { in: sold.map(r => r.id) } },
+            data: { status: 'IN_STOCK', updatedBy: actor.id, stockOutTxnId: null },
+          });
+        }
+      }
+
+      // 2b. Soft-delete ALL IMEI records linked to this transaction.
       // Do NOT gate on product.imeiRequired — it may be false even for phones
       // (data issue in Product Master). Always attempt deletion; no-op if none exist.
       if (txn.quantity > 0) {
