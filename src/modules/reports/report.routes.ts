@@ -14,33 +14,48 @@ router.use(authenticate);
 // Custom IMEI type report (Open Box, Demo, Second IMEI, Swiped/Unswiped)
 router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandler(async (req, res) => {
   const { imeiType, swiped, activated, status, search, brand } = req.body;
-  // Build dynamic IMEI export
-  const where: any = { isDeleted: false };
-  if (imeiType && imeiType !== 'ALL') where.imeiType = imeiType;
-  if (status) where.status = status;
-  if (swiped === 'true') where.swiped = true;
-  if (swiped === 'false') where.swiped = false;
-  if (activated === 'true') where.activated = true;
-  if (activated === 'false') where.activated = false;
-  if (brand) where.product = { brand: { equals: brand, mode: 'insensitive' } };
-  if (search) {
-    const words = search.trim().split(/\s+/).filter(Boolean);
-    if (words.length > 1) {
-      where.AND = words.map((w: string) => ({ OR: [
-        { imei1: { contains: w } },
-        { product: { ean: { contains: w } } },
-        { product: { model: { contains: w, mode: 'insensitive' } } },
-        { product: { brand: { contains: w, mode: 'insensitive' } } },
-      ]}));
+  // Built as a list of AND-ed conditions rather than assigning where.OR/where.AND
+  // directly in several places — this endpoint can receive imeiType, status and
+  // search together (the IMEI Tracker's own Download XLSX sends all three at
+  // once), and each used to write straight onto the same where.OR/where.AND key,
+  // so whichever ran last silently discarded whatever an earlier one had set.
+  const isDeleted = false;
+  const conditions: any[] = [];
+
+  if (imeiType && imeiType !== 'ALL') {
+    // "OPEN_BOX" exists as a value in two unrelated fields: imeiType (set at
+    // scan time — the unit was received as open-box stock) and status (set
+    // later via Change Status — the unit was reclassified, e.g. after a
+    // return). A unit can carry the label either way, and a report titled
+    // "Open Box IMEIs" means "any unit that is open box" to the person
+    // downloading it — not "only the ones recorded one particular way". Only
+    // OPEN_BOX needs this: it is the one value that exists in both fields;
+    // DEMO and SECOND_IMEI have no status-side equivalent to miss.
+    if (imeiType === 'OPEN_BOX') {
+      conditions.push({ OR: [{ imeiType: 'OPEN_BOX' }, { status: 'OPEN_BOX' }] });
     } else {
-      where.OR = [
-        { imei1: { contains: search } },
-        { product: { ean: { contains: search } } },
-        { product: { model: { contains: search, mode: 'insensitive' } } },
-        { product: { brand: { contains: search, mode: 'insensitive' } } },
-      ];
+      conditions.push({ imeiType });
     }
   }
+  if (status) conditions.push({ status });
+  if (swiped === 'true') conditions.push({ swiped: true });
+  if (swiped === 'false') conditions.push({ swiped: false });
+  if (activated === 'true') conditions.push({ activated: true });
+  if (activated === 'false') conditions.push({ activated: false });
+  if (brand) conditions.push({ product: { brand: { equals: brand, mode: 'insensitive' } } });
+  if (search) {
+    const words = search.trim().split(/\s+/).filter(Boolean);
+    const wordCondition = (w: string) => ({ OR: [
+      { imei1: { contains: w } },
+      { product: { ean: { contains: w } } },
+      { product: { model: { contains: w, mode: 'insensitive' } } },
+      { product: { brand: { contains: w, mode: 'insensitive' } } },
+    ]});
+    if (words.length > 1) conditions.push(...words.map(wordCondition));
+    else conditions.push(wordCondition(words[0]));
+  }
+
+  const where: any = { isDeleted, ...(conditions.length ? { AND: conditions } : {}) };
   const { prisma } = await import('../../config/prisma');
   const rows = await prisma.imeiInventory.findMany({
     where,
