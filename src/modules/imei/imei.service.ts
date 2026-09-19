@@ -180,6 +180,17 @@ export const imeiService = {
       if (!row) throw new NotFoundError(`IMEI ${imei} not found`);
       if (row.status === target) return { imei, from: row.status, to: target, stockDelta: 0, productId: row.productId, warehouseId: row.warehouseId, newQuantity: null as number | null };
 
+      // A unit already sold to a customer is locked here. This endpoint moves
+      // the ledger directly (a RETURN or ADJUSTMENT entry with no paperwork
+      // behind it) — reversing an actual sale belongs to a proper return
+      // process, not a status dropdown. Enforced here too, not just hidden in
+      // the UI, so the rule holds regardless of how the request was made.
+      if (row.status === ('SOLD' as ImeiStatus)) {
+        throw new BadRequestError(
+          'This unit has been sold and its status is locked. Reverse the Stock Out entry it was dispatched on instead of changing status directly.',
+        );
+      }
+
       const delta = statusStockDelta(row.status, target);
       await imeiRepository.setStatus(tx, [row.id], target, actor.id);
       // Update swiped flag if provided; record timestamp when swiping on
