@@ -232,15 +232,16 @@ export const imeiService = {
 
   async list(input: {
     status?: ImeiStatus; productId?: string; warehouseId?: string; search?: string;
-    brand?: string; page: number; limit: number;
+    brand?: string; categoryId?: string; page: number; limit: number;
   }) {
     const [items, total] = await imeiRepository.list({
       status: input.status, productId: input.productId, warehouseId: input.warehouseId,
       search: input.search,
-      brand:     input.brand     || undefined,
-      imeiType:  input.imeiType  || undefined,
-      swiped:    input.swiped    === 'true' ? true : input.swiped    === 'false' ? false : undefined,
-      activated: input.activated === 'true' ? true : input.activated === 'false' ? false : undefined,
+      brand:      input.brand      || undefined,
+      categoryId: input.categoryId || undefined,
+      imeiType:  (input as any).imeiType  || undefined,
+      swiped:    (input as any).swiped    === 'true' ? true : (input as any).swiped    === 'false' ? false : undefined,
+      activated: (input as any).activated === 'true' ? true : (input as any).activated === 'false' ? false : undefined,
       skip: (input.page - 1) * input.limit, take: input.limit,
     });
     return { items, page: input.page, limit: input.limit, total, totalPages: Math.ceil(total / input.limit) };

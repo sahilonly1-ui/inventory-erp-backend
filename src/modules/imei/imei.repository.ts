@@ -97,8 +97,18 @@ export const imeiRepository = {
   list(params: {
     status?: ImeiStatus; productId?: string; warehouseId?: string; search?: string;
     swiped?: boolean; activated?: boolean; imeiType?: string; brand?: string;
+    categoryId?: string;
     skip: number; take: number;
   }) {
+    // brand and categoryId both filter through the related product, so they
+    // must build ONE combined `product` clause — two separate `product: {...}`
+    // entries in the same object would silently overwrite each other and only
+    // the last-applied filter would actually take effect.
+    const productFilter: Prisma.ProductWhereInput = {
+      ...(params.brand ? { brand: { equals: params.brand, mode: 'insensitive' } } : {}),
+      ...(params.categoryId ? { categoryId: params.categoryId } : {}),
+    };
+
     const where: Prisma.ImeiInventoryWhereInput = {
       isDeleted: false,
       ...(params.status    ? { status:    params.status    } : {}),
@@ -107,7 +117,7 @@ export const imeiRepository = {
       ...(params.activated !== undefined ? { activated: params.activated } : {}),
       ...(params.productId ? { productId: params.productId } : {}),
       ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
-      ...(params.brand ? { product: { brand: { equals: params.brand, mode: 'insensitive' } } } : {}),
+      ...(Object.keys(productFilter).length ? { product: productFilter } : {}),
       ...(params.search ? (() => {
         const words = params.search.trim().split(/\s+/).filter(Boolean);
         if (words.length <= 1) {
@@ -127,8 +137,6 @@ export const imeiRepository = {
           { product: { brand: { contains: w, mode: 'insensitive' } } },
         ]}))};
       })() : {}),
-      ...(params.imeiType ? { imeiType: params.imeiType } : {}),
-      ...(params.swiped !== undefined ? { swiped: params.swiped === 'true' } : {}),
     };
     return prisma.$transaction([
       prisma.imeiInventory.findMany({
