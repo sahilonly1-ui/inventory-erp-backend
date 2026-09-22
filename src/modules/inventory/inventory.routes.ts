@@ -88,18 +88,27 @@ router.get('/stock-report', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
   // "demo" in the report. NIL is the sellable (regular) type and is the only
   // one counted as Retail; Open Box is excluded from stock figures entirely,
   // per business rule, and reported only in its own separate report.
+  // The base filter used to require status = 'IN_STOCK' unconditionally, which
+  // hid a unit ENTIRELY from every count here — including the demo/openBox
+  // tallies — the moment its status was set to DEMO or OPEN_BOX (their own
+  // marking makes status no longer IN_STOCK). That defeated the very purpose
+  // of tracking them: a unit becomes untraceable in this report at exactly the
+  // moment it is flagged. Retail/Activated still require status='IN_STOCK'
+  // (only unsold, available units are sellable stock); Demo/Open Box are
+  // matched by EITHER field and only excluded once actually SOLD, since a
+  // demo or open-box unit that has left the business should stop being
+  // counted as stock at all, sold status aside.
   type ImeiCount = { productId: string; total: bigint; activated: bigint; demo: bigint; openBox: bigint };
   const imeiRaw = await prisma.$queryRaw<ImeiCount[]>`
     SELECT
       "productId",
-      COUNT(*) FILTER (WHERE "imeiType" = 'NIL') AS total,
-      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND activated = true) AS activated,
-      COUNT(*) FILTER (WHERE "imeiType" = 'DEMO') AS demo,
-      COUNT(*) FILTER (WHERE "imeiType" = 'OPEN_BOX') AS "openBox"
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND status = 'IN_STOCK') AS total,
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND status = 'IN_STOCK' AND activated = true) AS activated,
+      COUNT(*) FILTER (WHERE ("imeiType" = 'DEMO' OR status = 'DEMO') AND status != 'SOLD') AS demo,
+      COUNT(*) FILTER (WHERE ("imeiType" = 'OPEN_BOX' OR status = 'OPEN_BOX') AND status != 'SOLD') AS "openBox"
     FROM imei_inventory
     WHERE "productId" = ANY(${imeiProductIds}::text[])
       AND "isDeleted" = false
-      AND status = 'IN_STOCK'
     GROUP BY "productId"
   `;
   // A historical view cannot use today's unit statuses: a unit sold since then

@@ -4,6 +4,15 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ENUMS (simple IF NOT EXISTS via cast trick)
 CREATE TYPE "TransactionType" AS ENUM ('OPENING','STOCK_IN','STOCK_OUT','MARKETPLACE_DISPATCH','RETURN','CANCELLATION','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT');
 CREATE TYPE "ImeiStatus" AS ENUM ('IN_STOCK','SOLD','RETURNED','OPEN_BOX','DAMAGED','CANCELLED','BLOCKED');
+
+-- DEMO, SERVICE and LOST were offered as options in the Change Status dropdown
+-- but were never added to this enum, so selecting either of them failed
+-- outright. Added individually — Postgres requires one ALTER TYPE ADD VALUE
+-- statement per new value, and each is IF NOT EXISTS so this file stays safe
+-- to re-run.
+ALTER TYPE "ImeiStatus" ADD VALUE IF NOT EXISTS 'DEMO';
+ALTER TYPE "ImeiStatus" ADD VALUE IF NOT EXISTS 'SERVICE';
+ALTER TYPE "ImeiStatus" ADD VALUE IF NOT EXISTS 'LOST';
 CREATE TYPE "Marketplace" AS ENUM ('AMAZON','FLIPKART','JIOMART','PRIME','OTHER');
 CREATE TYPE "MarketplaceOrderStatus" AS ENUM ('PENDING','CONFIRMED','DISPATCHED','DELIVERED','CANCELLED','RETURNED');
 CREATE TYPE "OpenBoxGrade" AS ENUM ('A','B','C','D');

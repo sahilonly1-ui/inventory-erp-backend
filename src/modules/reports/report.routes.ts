@@ -31,8 +31,14 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
     // downloading it — not "only the ones recorded one particular way". Only
     // OPEN_BOX needs this: it is the one value that exists in both fields;
     // DEMO and SECOND_IMEI have no status-side equivalent to miss.
-    if (imeiType === 'OPEN_BOX') {
-      conditions.push({ OR: [{ imeiType: 'OPEN_BOX' }, { status: 'OPEN_BOX' }] });
+    // Both OPEN_BOX and DEMO exist as values in two unrelated fields — imeiType
+    // (set at scan time) and status (set later via Change Status). A unit can
+    // carry either label either way, and a report titled "Demo Units" or
+    // "Open Box IMEIs" means "any unit marked that way", not "only the ones
+    // recorded one particular way". SECOND_IMEI has no status-side equivalent
+    // and needs no such handling.
+    if (imeiType === 'OPEN_BOX' || imeiType === 'DEMO') {
+      conditions.push({ OR: [{ imeiType }, { status: imeiType }] });
     } else {
       conditions.push({ imeiType });
     }

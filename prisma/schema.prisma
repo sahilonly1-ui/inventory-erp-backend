@@ -33,7 +33,10 @@ enum ImeiStatus {
   SOLD
   RETURNED
   OPEN_BOX
+  DEMO
+  SERVICE
   DAMAGED
+  LOST
   CANCELLED
   BLOCKED
 }
