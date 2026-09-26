@@ -1,0 +1,37 @@
+name: Render Status (read-only)
+
+# Manual, read-only look at the backend on Render: whether the service is
+# suspended, how the latest deploys ended, and recent events. Results appear as
+# notices on the run page. Changes nothing.
+on:
+  workflow_dispatch:
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          H="Authorization: Bearer $RENDER_API_KEY"
+          SVC=$(curl -s -H "$H" "https://api.render.com/v1/services?limit=20" | python3 -c "
+          import sys,json
+          for i in json.load(sys.stdin):
+            s=i.get('service',{})
+            if s.get('name')=='inventory-erp-backend': print(s['id']); break")
+          curl -s -H "$H" "https://api.render.com/v1/services/$SVC" | python3 -c "
+          import sys,json; s=json.load(sys.stdin)
+          print('::notice title=Service::id=%s suspended=%s suspenders=%s plan=%s updated=%s' % (s.get('id'),s.get('suspended'),s.get('suspenders'),(s.get('serviceDetails') or {}).get('plan'),s.get('updatedAt')))"
+          curl -s -H "$H" "https://api.render.com/v1/services/$SVC/deploys?limit=4" | python3 -c "
+          import sys,json
+          for i in json.load(sys.stdin):
+            d=i.get('deploy',i)
+            print('::notice title=Deploy::%s status=%s created=%s finished=%s commit=%s' % (d.get('id'),d.get('status'),d.get('createdAt'),d.get('finishedAt'),((d.get('commit') or {}).get('message') or '')[:70].replace(chr(10),' ')))"
+          curl -s -H "$H" "https://api.render.com/v1/services/$SVC/events?limit=8" | python3 -c "
+          import sys,json
+          try:
+            for i in json.load(sys.stdin):
+              e=i.get('event',i)
+              print('::notice title=Event::%s %s %s' % (e.get('timestamp'),e.get('type'),json.dumps(e.get('details',{}))[:180]))
+          except Exception as ex: print('::notice title=Event::unavailable', ex)"
