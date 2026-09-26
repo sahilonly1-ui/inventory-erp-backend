@@ -12,11 +12,14 @@ jobs:
     steps:
       - name: Ping backend health endpoint
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 30 \
-            "https://inventory-erp-backend-iplr.onrender.com/api/v1/health" \
-            || echo "000")
+          START=$(date +%s)
+          BODY=$(curl -s -w "\nHTTP:%{http_code}" --max-time 60 \
+            "https://inventory-erp-backend-iplr.onrender.com/api/v1/health" || echo "HTTP:000")
+          STATUS=$(echo "$BODY" | sed -n 's/^HTTP://p')
+          SECS=$(( $(date +%s) - START ))
           echo "Backend ping status: $STATUS"
+          # Visible in the run summary without opening logs.
+          echo "::notice title=Backend health::HTTP $STATUS in ${SECS}s — $(echo "$BODY" | head -1 | cut -c1-160)"
           if [ "$STATUS" = "000" ]; then
             echo "Backend may be waking up — this is normal on first ping"
           elif [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 500 ]; then
