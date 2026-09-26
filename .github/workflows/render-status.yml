@@ -41,15 +41,15 @@ jobs:
           import urllib.parse
           svc = [i['service'] for i in get('/services?limit=20') if i.get('service',{}).get('name')=='inventoryhss'][0]
           q = urllib.parse.urlencode({'ownerId': svc['ownerId'], 'resource': svc['id'], 'startTime': os.environ.get('LOG_FROM','2026-09-26T00:00:00Z'),
-                                      'endTime': os.environ.get('LOG_TO','2026-09-26T06:02:00Z'), 'limit': 100, 'direction': 'backward'})
+                                      'endTime': os.environ.get('LOG_TO','2026-09-26T05:59:00Z'), 'limit': 100, 'direction': 'backward'})
           logs = get('/logs?' + q)
           rows = logs.get('logs', []) if isinstance(logs, dict) else []
           print('::notice title=Logs::%d lines %s' % (len(rows), logs.get('error','') if isinstance(logs, dict) else ''))
           seen = 0
           for r in rows:
               m = (r.get('message') or '').replace('\n', ' ')
-              if any(k in m.lower() for k in ('error','timeout','prisma','p10','p20','econn','killed','memory','exit','restart','listening','fatal','pool')):
+              if True:
                   print('::notice title=Log %s::%s' % (r.get('timestamp','')[:19], m[:230]))
                   seen += 1
-                  if seen >= 25: break
+                  if seen >= 40: break
           PY
