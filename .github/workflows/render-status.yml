@@ -14,8 +14,11 @@ jobs:
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
+          set +e
           H="Authorization: Bearer $RENDER_API_KEY"
-          SVC=$(curl -s -H "$H" "https://api.render.com/v1/services?limit=20" | python3 -c "
+          RAW=$(curl -s -w "\nHTTP:%{http_code}" -H "$H" "https://api.render.com/v1/services?limit=20")
+          echo "::notice title=Services raw::$(echo "$RAW" | tail -1) $(echo "$RAW" | head -c 600 | tr '\n' ' ')"
+          SVC=$(echo "$RAW" | sed '$d' | python3 -c "
           import sys,json
           for i in json.load(sys.stdin):
             s=i.get('service',{})
