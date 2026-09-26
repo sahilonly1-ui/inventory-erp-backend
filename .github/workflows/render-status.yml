@@ -1,8 +1,8 @@
 name: Render Status (read-only)
 
-# Manual, read-only look at the backend on Render: whether the service is
-# suspended, how the latest deploys ended, and recent events. Results appear as
-# notices on the run page. Changes nothing.
+# Manual, read-only look at the backend services on Render: suspension state,
+# URL, and how the latest deploys ended. Results appear as notices on the run
+# page. Changes nothing.
 on:
   workflow_dispatch:
 
@@ -14,27 +14,27 @@ jobs:
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
-          set +e
-          H="Authorization: Bearer $RENDER_API_KEY"
-          RAW=$(curl -s -w "\nHTTP:%{http_code}" -H "$H" "https://api.render.com/v1/services?limit=20")
-          echo "::notice title=Services raw::$(echo "$RAW" | tail -1) $(echo "$RAW" | head -c 600 | tr '\n' ' ')"
-          SVC=$(echo "$RAW" | sed '$d' | python3 -c "
-          import sys,json
-          for i in json.load(sys.stdin):
-            s=i.get('service',{})
-            if s.get('name')=='inventory-erp-backend': print(s['id']); break")
-          curl -s -H "$H" "https://api.render.com/v1/services/$SVC" | python3 -c "
-          import sys,json; s=json.load(sys.stdin)
-          print('::notice title=Service::id=%s suspended=%s suspenders=%s plan=%s updated=%s' % (s.get('id'),s.get('suspended'),s.get('suspenders'),(s.get('serviceDetails') or {}).get('plan'),s.get('updatedAt')))"
-          curl -s -H "$H" "https://api.render.com/v1/services/$SVC/deploys?limit=4" | python3 -c "
-          import sys,json
-          for i in json.load(sys.stdin):
-            d=i.get('deploy',i)
-            print('::notice title=Deploy::%s status=%s created=%s finished=%s commit=%s' % (d.get('id'),d.get('status'),d.get('createdAt'),d.get('finishedAt'),((d.get('commit') or {}).get('message') or '')[:70].replace(chr(10),' ')))"
-          curl -s -H "$H" "https://api.render.com/v1/services/$SVC/events?limit=8" | python3 -c "
-          import sys,json
-          try:
-            for i in json.load(sys.stdin):
-              e=i.get('event',i)
-              print('::notice title=Event::%s %s %s' % (e.get('timestamp'),e.get('type'),json.dumps(e.get('details',{}))[:180]))
-          except Exception as ex: print('::notice title=Event::unavailable', ex)"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          H = {'Authorization': 'Bearer ' + os.environ['RENDER_API_KEY'], 'Accept': 'application/json'}
+          def get(path):
+              try:
+                  with urllib.request.urlopen(urllib.request.Request('https://api.render.com/v1' + path, headers=H), timeout=30) as r:
+                      return json.loads(r.read())
+              except Exception as e:
+                  return {'error': str(e)}
+          for item in get('/services?limit=20'):
+              s = item.get('service', {})
+              d = s.get('serviceDetails') or {}
+              print('::notice title=Service %s::id=%s url=%s suspended=%s suspenders=%s plan=%s type=%s' % (
+                  s.get('name'), s.get('id'), d.get('url'), s.get('suspended'), s.get('suspenders'), d.get('plan'), s.get('type')))
+              deps = get('/services/%s/deploys?limit=3' % s.get('id'))
+              if isinstance(deps, list):
+                  for x in deps:
+                      dp = x.get('deploy', x)
+                      print('::notice title=Deploy %s::status=%s created=%s finished=%s commit=%s' % (
+                          s.get('name'), dp.get('status'), dp.get('createdAt'), dp.get('finishedAt'),
+                          ((dp.get('commit') or {}).get('message') or '')[:60].replace('\n', ' ')))
+              else:
+                  print('::notice title=Deploy %s::%s' % (s.get('name'), deps))
+          PY
