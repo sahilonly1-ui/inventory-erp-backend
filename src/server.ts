@@ -44,7 +44,7 @@ export async function ensureSchema() {
 
   let client: InstanceType<typeof Client> | null = null;
   for (const cfg of configs) {
-    const c = new Client(cfg);
+    const c = new Client({ ...cfg, connectionTimeoutMillis: 10_000, statement_timeout: 30_000, query_timeout: 35_000 });
     try { await c.connect(); client = c; logger.info(`Schema migration: connected via ${cfg.host}:${cfg.port}`); break; }
     catch (e) { try { await c.end(); } catch {} }
   }
@@ -92,7 +92,14 @@ export async function ensureSchema() {
 
 async function bootstrap() {
   // Run schema migrations before starting the server
-  await ensureSchema();
+  // The replay is idempotent maintenance; the schema is already in place. If
+  // the database is slow to answer, start serving anyway rather than leave
+  // every request hanging — on 26 Sep a stalled connection here kept the API
+  // unreachable for over five hours.
+  await Promise.race([
+    ensureSchema().catch(e => logger.warn({ msg: e?.message }, 'Schema migration failed — continuing')),
+    new Promise(r => setTimeout(() => { logger.warn('Schema migration still running after 60s — starting server anyway'); r(null); }, 60_000)),
+  ]);
 
   const app = createApp();
   const server = http.createServer(app);

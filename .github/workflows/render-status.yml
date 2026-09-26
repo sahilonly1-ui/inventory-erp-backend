@@ -37,18 +37,21 @@ jobs:
                           ((dp.get('commit') or {}).get('message') or '')[:60].replace('\n', ' ')))
               else:
                   print('::notice title=Deploy %s::%s' % (s.get('name'), deps))
-          # Server log lines around a window (UTC), newest first, errors only.
-          import urllib.parse
+          # Last 6 hours of notable server log lines, newest first.
+          import urllib.parse, datetime
+          now = datetime.datetime.utcnow()
+          frm = (now - datetime.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ')
+          to = now.strftime('%Y-%m-%dT%H:%M:%SZ')
           svc = [i['service'] for i in get('/services?limit=20') if i.get('service',{}).get('name')=='inventoryhss'][0]
-          q = urllib.parse.urlencode({'ownerId': svc['ownerId'], 'resource': svc['id'], 'startTime': os.environ.get('LOG_FROM','2026-09-26T00:00:00Z'),
-                                      'endTime': os.environ.get('LOG_TO','2026-09-26T05:59:00Z'), 'limit': 100, 'direction': 'backward'})
+          q = urllib.parse.urlencode({'ownerId': svc['ownerId'], 'resource': svc['id'], 'startTime': frm,
+                                      'endTime': to, 'limit': 100, 'direction': 'backward'})
           logs = get('/logs?' + q)
           rows = logs.get('logs', []) if isinstance(logs, dict) else []
           print('::notice title=Logs::%d lines %s' % (len(rows), logs.get('error','') if isinstance(logs, dict) else ''))
           seen = 0
           for r in rows:
               m = (r.get('message') or '').replace('\n', ' ')
-              if True:
+              if any(k in m.lower() for k in ('error','fatal','timeout','warn','failed','running','listening','exit')):
                   print('::notice title=Log %s::%s' % (r.get('timestamp','')[:19], m[:230]))
                   seen += 1
                   if seen >= 40: break

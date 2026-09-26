@@ -63,7 +63,7 @@ async function main() {
 
   let client = null;
   for (const { label, ...cfg } of CONNECTIONS) {
-    const c = new Client(cfg);
+    const c = new Client({ ...cfg, connectionTimeoutMillis: 10_000, statement_timeout: 30_000, query_timeout: 35_000 });
     try {
       await c.connect();
       console.log(`Connected via ${label}!`);

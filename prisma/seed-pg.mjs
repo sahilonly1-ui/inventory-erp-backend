@@ -15,7 +15,7 @@ const CONNECTIONS = [
 
 async function connect() {
   for (const { label, ...cfg } of CONNECTIONS) {
-    const c = new Client(cfg);
+    const c = new Client({ ...cfg, connectionTimeoutMillis: 10_000, statement_timeout: 30_000, query_timeout: 35_000 });
     try { await c.connect(); console.log(`[seed] Connected via ${label}`); return c; }
     catch (e) { console.log(`[seed] ${label} failed: ${e.message?.slice(0,80)}`); try{await c.end();}catch{} }
   }
