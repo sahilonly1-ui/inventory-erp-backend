@@ -4,6 +4,7 @@ import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
 import { inventoryService } from './inventory.service';
+import { eventsForTxns } from '../imei/imei.events';
 import { inventoryController } from './inventory.controller';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
@@ -802,6 +803,19 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
     if (u.stockOutTxnId) { if (!outByTxn.has(u.stockOutTxnId)) outByTxn.set(u.stockOutTxnId, []); outByTxn.get(u.stockOutTxnId)!.push(u.imei1); }
   }
 
+  // Sale/return history: a returned unit's current record no longer points at
+  // the sale it came back from, so those units are read from the event log.
+  // This is what lets one unit read "sold on 3 Oct, returned on 9 Oct".
+  const historyEvents = await eventsForTxns(prisma, txns.map(t => t.id));
+  const evByTxn = new Map<string, string[]>();
+  const returnTxnSet = new Set<string>();
+  for (const ev of historyEvents) {
+    const k = ev.txnId as string;
+    if (!evByTxn.has(k)) evByTxn.set(k, []);
+    evByTxn.get(k)!.push(ev.imei1);
+    if (ev.eventType === 'RETURNED') returnTxnSet.add(k);
+  }
+
   // Units that were never linked to a transaction — receipts made before the
   // link existed. They are matched by time instead, which is imprecise but far
   // better than reporting "no unit codes" for an entry that plainly had some.
@@ -822,6 +836,8 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
     balance += t.quantity;
 
     let codes = t.quantity > 0 ? (inByTxn.get(t.id) ?? []) : (outByTxn.get(t.id) ?? []);
+    const fromHistory = evByTxn.get(t.id);
+    if (fromHistory?.length) codes = [...new Set([...codes, ...fromHistory])];
     let codeSource: 'linked' | 'matched' | 'remarks' | 'none' = codes.length ? 'linked' : 'none';
 
     if (!codes.length && t.quantity > 0) {
@@ -839,6 +855,7 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
     }
 
     return {
+      isReturn: returnTxnSet.has(t.id),
       codeSource,
       id: t.id,
       date: t.createdAt,
@@ -894,10 +911,27 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
     orderBy: { createdAt: 'asc' },
   });
 
+  // A return entry has no units linked as its receipt — it put previously
+  // sold units back — so they are found through the return history instead.
+  const returnEvents = await eventsForTxns(prisma, txns.map(t => t.id), 'RETURNED');
+  const returnedUnitIds = new Map<string, string[]>();
+  for (const ev of returnEvents) {
+    const k = ev.txnId as string;
+    if (!returnedUnitIds.has(k)) returnedUnitIds.set(k, []);
+    returnedUnitIds.get(k)!.push(ev.imeiId);
+  }
+
   // For each transaction, fetch IMEIs — no imeiRequired gate (may be false in DB).
   const enriched = await Promise.all(txns.map(async (t) => {
     let imeis: { id: string; imei1: string; imeiType: string; status: string }[] = [];
-    if (t.quantity > 0) {
+    const returnedIds = returnedUnitIds.get(t.id);
+    if (returnedIds?.length) {
+      imeis = await prisma.imeiInventory.findMany({
+        where: { id: { in: returnedIds }, isDeleted: false },
+        select: { id: true, imei1: true, imeiType: true, status: true },
+        orderBy: { imei1: 'asc' },
+      });
+    } else if (t.quantity > 0) {
       // Stock In — PRIMARY: exact link set at scan time
       imeis = await prisma.imeiInventory.findMany({
         where: { stockInTxnId: t.id, isDeleted: false },
@@ -981,7 +1015,8 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
       warehouseId: t.warehouseId,
       warehouseName: t.warehouse.name,
       createdAt: t.createdAt,
-      imeis,
+      isReturn: !!returnedIds?.length,
+      imeis: imeis.map(i => ({ ...i, isReturn: !!returnedIds?.length })),
     };
   }));
 

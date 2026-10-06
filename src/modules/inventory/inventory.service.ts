@@ -5,6 +5,7 @@ import { writeAudit } from '../../common/audit.service';
 import { emitStockChanged } from '../../common/events';
 import { inventoryRepository as repo } from './inventory.repository';
 import { imeiRepository } from '../imei/imei.repository';
+import { eventsForTxns, unitsWithReturnHistory, deleteImeiEvents, latestSaleEvent, ImeiEventRow } from '../imei/imei.events';
 import { Actor, LedgerMovementParams, MovementResult, EanLookupResult } from './inventory.dto';
 
 /**
@@ -87,6 +88,42 @@ async function ensureNonImeiProduct(productId: string) {
     throw new BadRequestError('This product is IMEI-tracked; use the /imei endpoints');
   }
   return product;
+}
+
+/**
+ * Undo customer returns: each returned unit goes back to SOLD, re-attached to
+ * the sale it had been returned from, and the history entries for that return
+ * (and the sale event written with it) are removed so the unit's story reads
+ * as though the return never happened.
+ *
+ * Refuses when a unit has moved on since the return — if it has already been
+ * sold again, or otherwise left stock, undoing the return would contradict
+ * what happened afterwards, so that later step has to be reversed first.
+ */
+async function undoReturns(
+  tx: Prisma.TransactionClient,
+  events: ImeiEventRow[],
+  actor: { id: string },
+) {
+  for (const ev of events) {
+    const unit = await tx.imeiInventory.findUnique({
+      where: { id: ev.imeiId },
+      select: { id: true, imei1: true, status: true, isDeleted: true },
+    });
+    if (!unit || unit.isDeleted) continue;
+    if (unit.status !== 'IN_STOCK') {
+      throw new BadRequestError(
+        `Cannot undo this return: ${unit.imei1} is no longer in stock (${String(unit.status).replace(/_/g, ' ')}). ` +
+        `Reverse whatever happened to it after the return first.`,
+      );
+    }
+    const sale = await latestSaleEvent(tx, unit.id);
+    await tx.imeiInventory.update({
+      where: { id: unit.id },
+      data: { status: 'SOLD', stockOutTxnId: sale?.txnId ?? null, updatedBy: actor.id },
+    });
+    await deleteImeiEvents(tx, [ev.id, ...(sale ? [sale.id] : [])]);
+  }
 }
 
 export const inventoryService = {
@@ -598,6 +635,17 @@ Object.assign(inventoryService, {
       // (bulkReverseTransactions already did this; the single-transaction path
       // — used whenever an entry has only one transaction — did not.)
       if (txn.quantity < 0) {
+        // A sale whose units were later returned cannot simply be deleted: its
+        // units are back in stock already, so reversing it too would put the
+        // same units into the count twice.
+        const laterReturned = await eventsForTxns(tx, [txnId], 'SOLD');
+        if (laterReturned.length) {
+          throw new BadRequestError(
+            `This Stock Out cannot be deleted: ${laterReturned.length} of its unit(s) ` +
+            `(${laterReturned.slice(0, 5).map(e => e.imei1).join(', ')}) were later returned to stock. ` +
+            `Delete the return entry first.`,
+          );
+        }
         let sold = await tx.imeiInventory.findMany({
           where: { stockOutTxnId: txnId, isDeleted: false },
           select: { id: true },
@@ -628,7 +676,22 @@ Object.assign(inventoryService, {
       // 2b. Soft-delete ALL IMEI records linked to this transaction.
       // Do NOT gate on product.imeiRequired — it may be false even for phones
       // (data issue in Product Master). Always attempt deletion; no-op if none exist.
-      if (txn.quantity > 0) {
+      // A return entry has no units of its own — it put existing sold units
+      // back into stock — so reversing it means un-returning those units, not
+      // deleting them.
+      const returnEvents = txn.quantity > 0 ? await eventsForTxns(tx, [txnId], 'RETURNED') : [];
+      if (returnEvents.length) await undoReturns(tx, returnEvents, actor);
+
+      if (txn.quantity > 0 && !returnEvents.length) {
+        // A receipt whose units were later sold and returned has history that
+        // would be orphaned by removing it.
+        const withHistory = await unitsWithReturnHistory(tx, [txnId]);
+        if (withHistory.length) {
+          throw new BadRequestError(
+            `This entry cannot be deleted: ${withHistory.length} of its unit(s) ` +
+            `(${withHistory.slice(0, 5).join(', ')}) were sold and then returned. Delete those entries first.`,
+          );
+        }
         // Refuse up front if any of this receipt's units have already been
         // dispatched. Reversing would remove them while their sale still
         // stands, so the books could never be made to balance — and the
@@ -775,7 +838,7 @@ Object.assign(inventoryService, {
           await tx.stockLevel.update({
             where: { id: sl.id },
             data: { quantity: Math.max(0, sl.quantity - qty) },
-          }, { timeout: 120_000, maxWait: 20_000 });
+          });
         }
       }
 
@@ -786,7 +849,23 @@ Object.assign(inventoryService, {
       // the showroom again, and their history has to survive. Treating both
       // the same way was erasing serials from the tracker whenever a Stock Out
       // entry was deleted, even though the stock itself came back.
-      const inboundTxnIds = txns.filter(t => t.quantity > 0).map(t => t.id);
+      const allInboundIds = txns.filter(t => t.quantity > 0).map(t => t.id);
+
+      // Return entries put existing sold units back into stock; reversing one
+      // means un-returning those units rather than deleting them, and it must
+      // not be treated as a receipt below.
+      const returnEvents = await eventsForTxns(tx, allInboundIds, 'RETURNED');
+      const returnTxnIds = new Set(returnEvents.map(e => e.txnId as string));
+      if (returnEvents.length) await undoReturns(tx, returnEvents, actor);
+      const inboundTxnIds = allInboundIds.filter(id => !returnTxnIds.has(id));
+
+      const withHistory = await unitsWithReturnHistory(tx, inboundTxnIds);
+      if (withHistory.length) {
+        throw new BadRequestError(
+          `This entry cannot be changed: ${withHistory.length} of its unit(s) ` +
+          `(${withHistory.slice(0, 5).join(', ')}) were sold and then returned. Delete those entries first.`,
+        );
+      }
 
       // Refuse to reverse a receipt whose units have since been sold.
       //
@@ -808,6 +887,15 @@ Object.assign(inventoryService, {
         }
       }
       const outboundTxns = txns.filter(t => t.quantity < 0);
+
+      // A sale whose units were later returned cannot be deleted by itself.
+      const laterReturned = await eventsForTxns(tx, outboundTxns.map(t => t.id), 'SOLD');
+      if (laterReturned.length) {
+        throw new BadRequestError(
+          `A Stock Out in this entry cannot be deleted: ${laterReturned.length} of its unit(s) ` +
+          `(${laterReturned.slice(0, 5).map(e => e.imei1).join(', ')}) were later returned to stock. Delete the return entry first.`,
+        );
+      }
 
       let byTxnId = { count: 0 };
       if (inboundTxnIds.length) {
@@ -855,10 +943,20 @@ Object.assign(inventoryService, {
       if (inboundTxnIds.length && byTxnId.count === 0) {
         // Same restriction as the single-delete path: only units created around
         // the time of the entries being removed are candidates.
-        const stamps = txns.filter(t => t.quantity > 0).map(t => t.createdAt.getTime());
+        const receipts = txns.filter(t => t.quantity > 0 && !returnTxnIds.has(t.id));
+        const stamps = receipts.map(t => t.createdAt.getTime());
         const from = new Date(Math.min(...stamps) - 12 * 60 * 60 * 1000);
         const to   = new Date(Math.max(...stamps) + 12 * 60 * 60 * 1000);
-        for (const { productId, warehouseId, qty } of deltaByKey.values()) {
+        // Only real receipts size this search. deltaByKey also folds in return
+        // entries (they do change stock) and would make it take extra units.
+        const receiptQty = new Map<string, { productId: string; warehouseId: string; qty: number }>();
+        for (const t of receipts) {
+          const key = `${t.productId}::${t.warehouseId}`;
+          const cur = receiptQty.get(key) ?? { productId: t.productId, warehouseId: t.warehouseId, qty: 0 };
+          cur.qty += t.quantity;
+          receiptQty.set(key, cur);
+        }
+        for (const { productId, warehouseId, qty } of receiptQty.values()) {
           if (qty <= 0) continue;
           const legacy = await tx.imeiInventory.findMany({
             where: {
@@ -903,7 +1001,7 @@ Object.assign(inventoryService, {
         newValue: { fullyDeleted: true, txnCount: txnIds.length, reason: `Bulk deleted — ${vendorName} entry` },
         ipAddress: actor.ip,
       });
-    }, { timeout: 30000, maxWait: 10000 }); // generous timeout as a safety net for large batches
+    }, { timeout: 120_000, maxWait: 20_000 }); // large batches do many round trips
 
     return { deleted: txnIds.length, vendor: vendorName, totalQty };
   },

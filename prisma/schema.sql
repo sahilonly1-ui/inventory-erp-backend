@@ -89,6 +89,25 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS "replacedByHash" TEXT;
 
+-- Per-unit sale/return history. A unit's stockOutTxnId only remembers its
+-- CURRENT sale, so once it is returned and sold again the earlier sale would
+-- vanish from Product History. Each return records the sale it undoes (SOLD)
+-- and the return itself (RETURNED), keyed by the transaction involved, so
+-- every movement can still show which units it covered.
+CREATE TABLE IF NOT EXISTS imei_events (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "imeiId" TEXT NOT NULL,
+  imei1 TEXT NOT NULL,
+  "productId" TEXT NOT NULL,
+  "eventType" TEXT NOT NULL,
+  "txnId" TEXT,
+  "createdBy" TEXT,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_imei_events_txn ON imei_events("txnId");
+CREATE INDEX IF NOT EXISTS idx_imei_events_imei ON imei_events("imeiId");
+
+
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

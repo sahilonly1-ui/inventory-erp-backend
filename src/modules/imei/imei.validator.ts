@@ -77,3 +77,11 @@ export const imeiQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(500).default(50),
 });
+
+export const returnImeiSchema = z.object({
+  imeis: z.array(z.string().min(3).max(60)).min(1).max(2000),
+  vendorId: z.string().uuid().optional(),
+  txnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  invoiceNo: z.string().max(120).optional(),
+  remarks: z.string().max(500).optional(),
+});

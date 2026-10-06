@@ -9,6 +9,7 @@ import { inventoryRepository } from '../inventory/inventory.repository';
 import { imeiRepository, LockedImei } from './imei.repository';
 import { Actor } from '../inventory/inventory.dto';
 import { ReceiveImeiInput, DispatchImeiInput } from './imei.dto';
+import { recordImeiEvent } from './imei.events';
 
 // Availability is defined as IMEI status === IN_STOCK. A status change shifts
 // StockLevel by the change in IN_STOCK membership, keeping all three counts equal.
@@ -238,7 +239,116 @@ export const imeiService = {
   async lookup(imei: string) {
     const row = await imeiRepository.findByImei1(imei);
     if (!row) throw new NotFoundError(`IMEI ${imei} not found`);
-    return row;
+
+    // Who supplied it, and — for a sold unit — when and to whom it went. The
+    // Stock In screen uses this to tell a genuine duplicate scan from a
+    // customer return, and says which it is instead of a bare "duplicate".
+    const full = await prisma.imeiInventory.findUnique({
+      where: { id: row.id },
+      select: { stockOutTxnId: true, supplier: { select: { name: true } } },
+    });
+    let sale: { date: string; customer: string | null } | null = null;
+    if (row.status === ImeiStatus.SOLD && full?.stockOutTxnId) {
+      const t = await prisma.inventoryTransaction.findUnique({
+        where: { id: full.stockOutTxnId },
+        select: { createdAt: true, vendor: { select: { name: true } } },
+      });
+      if (t) sale = { date: t.createdAt.toISOString(), customer: t.vendor?.name ?? null };
+    }
+    return { ...row, supplier: full?.supplier ?? null, sale };
+  },
+
+  // Take sold units back into stock as a customer return.
+  //
+  // A sold unit still exists in the tracker with status SOLD, so receiving it
+  // again is rejected as a duplicate — which is correct for a genuine double
+  // scan but made returns impossible to record. A return is its own movement:
+  // the unit flips back to IN_STOCK, one RETURN is written to the ledger, and
+  // the sale it undoes is remembered so Product History can show the whole
+  // story (sold, then returned) instead of losing the first half.
+  async returnUnits(
+    input: { imeis: string[]; vendorId?: string; txnDate?: string; invoiceNo?: string; remarks?: string },
+    actor: Actor,
+  ) {
+    const codes = [...new Set(input.imeis.map(i => i.trim()).filter(Boolean))];
+    if (!codes.length) throw new BadRequestError('No units to return');
+
+    const results: { productId: string; warehouseId: string; count: number; newQuantity: number }[] = [];
+
+    await prisma.$transaction(async (tx) => {
+      const locked = await imeiRepository.lockByImei1(tx, codes);
+      const found = new Set(locked.map(r => r.imei1));
+      const missing = codes.filter(c => !found.has(c));
+      if (missing.length) {
+        throw new BadRequestError(
+          `Not in the tracker: ${missing.join(', ')}. A return can only be recorded for a unit that was sold from here — ` +
+          `use a normal Stock In for new stock.`,
+        );
+      }
+      const notSold = locked.filter(r => r.status !== ImeiStatus.SOLD);
+      if (notSold.length) {
+        throw new BadRequestError(
+          `Cannot record a return — not currently sold: ${notSold.map(r => `${r.imei1} (${r.status.replace(/_/g, ' ')})`).join(', ')}.`,
+        );
+      }
+
+      // The sale each unit is currently attached to, so it can be remembered.
+      const links = await tx.imeiInventory.findMany({
+        where: { id: { in: locked.map(r => r.id) } },
+        select: { id: true, stockOutTxnId: true },
+      });
+      const saleTxnOf = new Map(links.map(l => [l.id, l.stockOutTxnId]));
+
+      const groups = new Map<string, typeof locked>();
+      for (const r of locked) {
+        const k = `${r.productId}::${r.warehouseId}`;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k)!.push(r);
+      }
+
+      for (const [k, rows] of groups) {
+        const [productId, warehouseId] = k.split('::');
+        const move = await applyLedgerMovementTx(tx, {
+          productId, warehouseId,
+          type: TransactionType.RETURN,
+          signedQty: rows.length,
+          vendorId: input.vendorId ?? null,
+          referenceType: input.invoiceNo ? 'INVOICE' : 'IMEI_RETURN',
+          referenceId: input.invoiceNo ?? null,
+          remarks: input.remarks ?? 'Customer return',
+          occurredAt: parseDispatchDate(input.txnDate),
+        }, actor);
+
+        for (const r of rows) {
+          const saleTxn = saleTxnOf.get(r.id) ?? null;
+          if (saleTxn) {
+            await recordImeiEvent(tx, { imeiId: r.id, imei1: r.imei1, productId, eventType: 'SOLD', txnId: saleTxn, actorId: actor.id });
+          }
+          await recordImeiEvent(tx, { imeiId: r.id, imei1: r.imei1, productId, eventType: 'RETURNED', txnId: move.transactionId, actorId: actor.id });
+        }
+
+        await tx.imeiInventory.updateMany({
+          where: { id: { in: rows.map(r => r.id) } },
+          data: { status: ImeiStatus.IN_STOCK, stockOutTxnId: null, updatedBy: actor.id },
+        });
+
+        await writeAudit(tx, {
+          userId: actor.id, action: 'UPDATE', entityName: 'imei_inventory', entityId: rows[0].id,
+          oldValue: { status: 'SOLD', imeis: rows.map(r => r.imei1) },
+          newValue: { status: 'IN_STOCK', event: 'CUSTOMER_RETURN', transactionId: move.transactionId },
+          ipAddress: actor.ip,
+        });
+
+        // Units and level must still agree after the return.
+        await assertConsistentTx(tx, productId, warehouseId, true, { strict: true });
+        results.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });
+      }
+    }, { timeout: 120_000, maxWait: 20_000 });
+
+    for (const r of results) {
+      emitStockChanged({ productId: r.productId, warehouseId: r.warehouseId, quantity: r.newQuantity, type: 'STOCK_IN' });
+    }
+    return { returned: codes.length, groups: results };
   },
 
   async list(input: {

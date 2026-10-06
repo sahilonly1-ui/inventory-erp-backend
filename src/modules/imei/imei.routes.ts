@@ -9,7 +9,7 @@ import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { PERMISSIONS } from '../../constants/permissions';
 import {
-  receiveImeiSchema, dispatchImeiSchema, changeStatusSchema, imeiParamSchema, imeiQuerySchema,
+  receiveImeiSchema, dispatchImeiSchema, returnImeiSchema, changeStatusSchema, imeiParamSchema, imeiQuerySchema,
 } from './imei.validator';
 
 const router = Router();
@@ -17,6 +17,7 @@ router.use(authenticate);
 
 router.post('/receive', authorize(PERMISSIONS.INVENTORY_STOCK_IN), validate(receiveImeiSchema), imeiController.receive);
 router.post('/dispatch', authorize(PERMISSIONS.INVENTORY_STOCK_OUT), validate(dispatchImeiSchema), imeiController.dispatch);
+router.post('/return', authorize(PERMISSIONS.INVENTORY_STOCK_IN), validate(returnImeiSchema), imeiController.returnUnits);
 router.patch('/:imei/status', authorize(PERMISSIONS.IMEI_MANAGE), validate(imeiParamSchema, 'params'), validate(changeStatusSchema), imeiController.changeStatus);
 
 // ── Bulk swipe + activate via uploaded Excel list ───────────────────────────
