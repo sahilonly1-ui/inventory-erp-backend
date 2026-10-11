@@ -2,6 +2,7 @@ import express, { Application } from 'express';
 import helmet from 'helmet';
 import pinoHttp from 'pino-http';
 import cors from 'cors';
+import compression from 'compression';
 import crypto from 'crypto';
 import { env } from './config/env';
 import { globalLimiter } from './middlewares/rateLimiter';
@@ -24,6 +25,14 @@ export function createApp(): Application {
       credentials: true,
     }),
   );
+  // Gzip every response. Product, IMEI and report lists are large JSON, and
+  // on a phone's mobile data uncompressed responses were a big part of the
+  // slow first load. JSON shrinks ~80-90%. Socket.IO runs on its own path and
+  // is unaffected; anything streamed as an event-stream is left alone.
+  app.use(compression({
+    threshold: 1024,
+    filter: (req, res) => (String(res.getHeader('Content-Type') || '').includes('text/event-stream') ? false : compression.filter(req, res)),
+  }));
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
   app.use(globalLimiter);
