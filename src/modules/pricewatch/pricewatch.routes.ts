@@ -38,8 +38,13 @@ router.get('/settings', asyncHandler(async (_req, res) => ok(res, await svc.getS
 router.put('/settings', asyncHandler(async (req, res) => ok(res, await svc.saveSettings(req.body ?? {}))));
 
 // Browser-agent endpoints (used by the /market-prices/agent page).
+router.post('/agent/request', asyncHandler(async (req, res) => ok(res, await svc.requestMany(req.body?.ids, req.body?.replace !== false))));
 router.get('/agent/jobs', asyncHandler(async (req, res) =>
-  ok(res, await svc.agentJobs({ itemId: req.query.item ? String(req.query.item) : undefined, limit: req.query.limit ? Number(req.query.limit) : undefined }))));
+  ok(res, await svc.agentJobs({
+    itemId: req.query.item ? String(req.query.item) : undefined,
+    limit: req.query.limit ? Number(req.query.limit) : undefined,
+    requestedOnly: req.query.queued === '1',
+  }))));
 router.post('/agent/results/:itemId', asyncHandler(async (req, res) =>
   ok(res, await svc.agentSubmit(req.params.itemId, req.body?.results))));
 

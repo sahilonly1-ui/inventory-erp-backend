@@ -204,13 +204,32 @@ export async function requestRefresh(id: string, rediscover = false) {
   await x(`UPDATE price_watch_items SET requested=true WHERE id=$1`, id);
 }
 
+/**
+ * Queue exactly these products for the agent (the ones the admin has filtered
+ * on screen). replace=true first clears any older queue, so the run checks
+ * this set and nothing else.
+ */
+export async function requestMany(ids: string[], replace = true) {
+  const clean = [...new Set((ids ?? []).filter(i => typeof i === 'string'))].slice(0, 1000);
+  if (!clean.length) throw new BadRequestError('No products selected');
+  if (replace) await x(`UPDATE price_watch_items SET requested=false WHERE requested=true`);
+  const n = await x(
+    `UPDATE price_watch_items SET requested=true WHERE id = ANY($1::text[]) AND active=true AND dismissed=false`, clean);
+  return { queued: Number(n) };
+}
+
 /** The next batch for the agent: requested first, then starred/stalest due items. */
-export async function agentJobs(opts: { itemId?: string; limit?: number } = {}) {
+export async function agentJobs(opts: { itemId?: string; limit?: number; requestedOnly?: boolean } = {}) {
   const s = await getSettings();
   await maybeSync();
   const limit = Math.min(25, Math.max(1, opts.limit ?? s.batchSize));
   const items = opts.itemId
     ? await q(`SELECT i.*, p.ean FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId" WHERE i.id=$1`, opts.itemId)
+    : opts.requestedOnly
+    ? await q(
+      `SELECT i.*, p.ean FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId"
+       WHERE i.requested AND i.active AND NOT i.dismissed
+       ORDER BY i.priority DESC, i.name LIMIT $1::int`, limit)
     : await q(
       `SELECT i.*, p.ean FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId"
        WHERE i.active=true AND i.dismissed=false AND (
