@@ -533,9 +533,7 @@ ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activated"   BOOLEAN NOT NU
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activatedAt" TIMESTAMPTZ;
 
 -- ── Market Price Watch (admin-only) ─────────────────────────────────────────
--- Items to track. productId links to the Product Master; null = a product we
--- don't stock but still want to watch. source 'auto' rows come from the
--- in-stock sync; dismissed stops the sync from re-adding one the admin removed.
+
 CREATE TABLE IF NOT EXISTS price_watch_items (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   "productId" TEXT REFERENCES products(id) ON DELETE SET NULL,
