@@ -1,0 +1,59 @@
+name: Keep Awake Setup + Speed Check
+
+# GitHub runs scheduled workflows late — the 14-minute keep-alive has been
+# firing every 4-5 hours, so Render's free server was asleep almost every time
+# the app opened (30-90s cold start). This moves the ping into Supabase itself:
+# pg_cron calls the health endpoint every 10 minutes via pg_net, on time,
+# without depending on GitHub. Safe to re-run: the job is upserted by name.
+# Also times the main API calls so speed can be checked any time.
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Schedule the ping inside Supabase
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm i pg@8 --silent --no-save >/dev/null 2>&1
+          node - <<'JS'
+          const { Client } = require('pg');
+          const url = process.env.DATABASE_URL.replace(':6543/', ':5432/');
+          const c = new Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15000, statement_timeout: 30000 });
+          const note = (t, m) => console.log(`::notice title=${t}::${String(m).replace(/\n/g, ' ').slice(0, 300)}`);
+          (async () => {
+            await c.connect();
+            for (const sql of [
+              'create extension if not exists pg_net with schema extensions',
+              'create extension if not exists pg_cron',
+            ]) { try { await c.query(sql); note('Extension', sql + ' — ok'); } catch (e) { note('Extension', sql + ' — ' + e.message); } }
+            try {
+              await c.query(`select cron.schedule('render-keep-awake', '*/10 * * * *',
+                $$select net.http_get(url := 'https://inventory-erp-backend-iplr.onrender.com/api/v1/health', timeout_milliseconds := 60000)$$)`);
+              const j = await c.query(`select jobid, schedule, active from cron.job where jobname = 'render-keep-awake'`);
+              note('Cron job', JSON.stringify(j.rows));
+              const r = await c.query(`select status, return_message, start_time from cron.job_run_details d join cron.job j using (jobid) where j.jobname='render-keep-awake' order by start_time desc limit 3`);
+              note('Recent runs', JSON.stringify(r.rows));
+              const h = await c.query(`select status_code, timed_out, created from net._http_response order by created desc limit 3`).catch(e => ({ rows: [e.message] }));
+              note('Recent pings', JSON.stringify(h.rows));
+            } catch (e) { note('Cron job', 'failed — ' + e.message); }
+            await c.end();
+          })().catch(e => { note('Setup', 'failed — ' + e.message); process.exit(1); });
+          JS
+
+      - name: Time the main API calls
+        env:
+          EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+          PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          B=https://inventory-erp-backend-iplr.onrender.com/api/v1
+          curl -s -o /dev/null --max-time 90 "$B/health"
+          T=$(curl -s --max-time 60 -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "$B/auth/login" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('accessToken',''))" 2>/dev/null)
+          [ -n "$T" ] || { echo "::notice title=Speed::login failed — skipped timings"; exit 0; }
+          for P in "/auth/me" "/inventory/dashboard-stats" "/inventory/daily-summary" "/products?page=1&limit=50" "/imei?page=1&limit=50" "/products/stats"; do
+            R=$(curl -s -o /dev/null --max-time 60 -H "Authorization: Bearer $T" -H 'Accept-Encoding: gzip' -w "%{http_code} %{time_total}s %{size_download}B" "$B$P")
+            echo "::notice title=Speed $P::$R"
+          done
