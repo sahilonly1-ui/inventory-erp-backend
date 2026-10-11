@@ -531,3 +531,65 @@ UPDATE brands SET "imeiRequired"=true, "srnoRequired"=true WHERE name='Xiaomi';
 -- imei_inventory: activated + activatedAt (unit demo'd/activated by customer)
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activated"   BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "activatedAt" TIMESTAMPTZ;
+
+-- ── Market Price Watch (admin-only) ─────────────────────────────────────────
+-- Items to track. productId links to the Product Master; null = a product we
+-- don't stock but still want to watch. source 'auto' rows come from the
+-- in-stock sync; dismissed stops the sync from re-adding one the admin removed.
+CREATE TABLE IF NOT EXISTS price_watch_items (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "productId" TEXT REFERENCES products(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  brand TEXT,
+  variant TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  active BOOLEAN NOT NULL DEFAULT true,
+  dismissed BOOLEAN NOT NULL DEFAULT false,
+  priority BOOLEAN NOT NULL DEFAULT false,
+  requested BOOLEAN NOT NULL DEFAULT false,
+  "lastRefreshedAt" TIMESTAMPTZ,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS price_watch_items_product_uq ON price_watch_items("productId") WHERE "productId" IS NOT NULL;
+
+-- One product-page URL per item per store. lockedByUser = the admin pasted or
+-- confirmed it, so automatic discovery never replaces it.
+CREATE TABLE IF NOT EXISTS price_watch_links (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "itemId" TEXT NOT NULL REFERENCES price_watch_items(id) ON DELETE CASCADE,
+  store TEXT NOT NULL,
+  url TEXT,
+  "lockedByUser" BOOLEAN NOT NULL DEFAULT false,
+  "notListed" BOOLEAN NOT NULL DEFAULT false,
+  "discoveredAt" TIMESTAMPTZ,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE("itemId", store)
+);
+
+-- Every fetch result is kept (90 days) so price movement can be charted.
+CREATE TABLE IF NOT EXISTS price_snapshots (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "itemId" TEXT NOT NULL REFERENCES price_watch_items(id) ON DELETE CASCADE,
+  store TEXT NOT NULL,
+  url TEXT,
+  status TEXT NOT NULL,
+  price NUMERIC(12,2),
+  mrp NUMERIC(12,2),
+  "inStock" BOOLEAN,
+  title TEXT,
+  offers JSONB NOT NULL DEFAULT '[]'::jsonb,
+  "effectivePrice" NUMERIC(12,2),
+  "bestOffer" TEXT,
+  "priceText" TEXT,
+  notes TEXT,
+  method TEXT,
+  "fetchedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS price_snapshots_item_store_time ON price_snapshots("itemId", store, "fetchedAt" DESC);
+
+CREATE TABLE IF NOT EXISTS price_watch_settings (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);

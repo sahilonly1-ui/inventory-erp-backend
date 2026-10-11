@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { logger } from './config/logger';
 import { sendDailyStockInBackup } from './modules/reports/dailyBackup.service';
+import { tick as priceWatchTick } from './modules/pricewatch/pricewatch.service';
 
 // Day-end in the showroom's timezone, not the server's — Render runs UTC, so
 // without this the "daily" mail would fire mid-afternoon local time and miss
@@ -14,6 +15,7 @@ function todayInTz(tz: string): string {
 }
 
 export function startScheduler(): void {
+  startPriceWatch();
   if (process.env.BACKUP_ENABLED === 'false') {
     logger.info('Daily backup scheduler disabled via BACKUP_ENABLED=false');
     return;
@@ -35,4 +37,14 @@ export function startScheduler(): void {
   }, { timezone: TZ });
 
   logger.info({ schedule: SCHEDULE, timezone: TZ }, 'Daily stock-in backup scheduled');
+}
+
+// Market Price Watch: keep the watch list in step with stock and prune old
+// snapshots. Prices themselves are collected by Claude in Chrome.
+function startPriceWatch(): void {
+  if (process.env.PRICE_WATCH_ENABLED === 'false') return;
+  cron.schedule('*/30 * * * *', async () => {
+    try { await priceWatchTick(); }
+    catch (err) { logger.error({ err }, 'Price watch tick threw'); }
+  }, { timezone: TZ });
 }

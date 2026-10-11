@@ -12,6 +12,7 @@ import imeiRoutes from '../modules/imei/imei.routes';
 import marketplaceRoutes from '../modules/marketplace/marketplace.routes';
 import reportRoutes from '../modules/reports/report.routes';
 import importRoutes from '../modules/imports/import.routes';
+import priceWatchRoutes from '../modules/pricewatch/pricewatch.routes';
 
 const router = Router();
 
@@ -36,5 +37,6 @@ router.use('/imei', imeiRoutes);
 router.use('/marketplace', marketplaceRoutes);
 router.use('/reports', reportRoutes);
 router.use('/imports', importRoutes);
+router.use('/price-watch', priceWatchRoutes); // admin-only market price tracker
 
 export default router;
