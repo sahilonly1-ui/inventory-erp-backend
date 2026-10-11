@@ -20,7 +20,9 @@ jobs:
           npm i pg@8 --silent --no-save >/dev/null 2>&1
           node - <<'JS'
           const { Client } = require('pg');
-          const url = process.env.DATABASE_URL.replace(':6543/', ':5432/');
+          // sslmode in the URL would override the ssl option below (Supabase's pooler
+          // presents a chain Node does not trust by default).
+          const url = process.env.DATABASE_URL.replace(':6543/', ':5432/').replace(/[?&]sslmode=[^&]*/, '');
           const c = new Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15000, statement_timeout: 30000 });
           const note = (t, m) => console.log(`::notice title=${t}::${String(m).replace(/\n/g, ' ').slice(0, 300)}`);
           (async () => {
