@@ -42,3 +42,15 @@ console.log(searchQueries('JBL Party Box 110 Portable Party Speaker (Black) 160W
 console.log(searchQueries('Boombox 3 Wifi Portable Bluetooth Speaker', 'JBL', 'Black'));
 assert.equal(storeSearchUrl('official', 'JBL PartyBox 120', 'in.jbl.com'), 'https://in.jbl.com/search?q=JBL%20PartyBox%20120');
 assert.equal(storeSearchUrl('official', 'x', null), null);
+import { unwrapSearchLink, engineUrls } from './lib.mjs';
+const target = 'https://www.amazon.in/JBL-PartyBox/dp/B0ABCDEFGH';
+const wrapped = 'https://www.bing.com/ck/a?!&&p=x&u=a1' + Buffer.from(target).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') + '&ntb=1';
+assert.equal(unwrapSearchLink(wrapped), target);
+assert.equal(unwrapSearchLink('//duckduckgo.com/l/?uddg=' + encodeURIComponent(target) + '&rut=x'), target);
+assert.ok(engineUrls('amazon.in', 'JBL PartyBox 130')[0].includes('site%3Aamazon.in'));
+console.log('engine helpers ok');
+assert.ok(titleScore('Amazon Fire TV Stick HD', 'Amazon', 'Amazon Fire TV Stick HD with Alexa Voice Remote') >= 0.5);
+assert.equal(titleScore('Amazon Fire TV Stick HD', 'Amazon', 'PVTAR Remote for Amazon Fire TV Stick HD'), 0);
+assert.equal(titleScore('JBL Flip 6', 'JBL', 'Hard Carry Case for JBL Flip 6'), 0);
+assert.equal(titleScore('Samsung Galaxy S25', 'Samsung', 'Tempered Glass Samsung Galaxy S25'), 0);
+console.log('accessory rules ok');

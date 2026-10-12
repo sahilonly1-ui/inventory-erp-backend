@@ -12,14 +12,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
-const LIMIT = Number(process.env.LIMIT || 100);
+const LIMIT = Number(process.env.LIMIT || 300);
 const ONLY = (process.env.STORES || '').split(',').map(s => s.trim()).filter(Boolean);
 const DEBUG = process.env.DEBUG_DIR || path.resolve('debug');
-const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 4);
+const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 6);
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 if (!KEY && !process.env.SCRAPER_TEST) { console.error('AGENT_KEY is not set'); process.exit(1); }
@@ -70,8 +70,9 @@ async function launch() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
 
-async function open(page, url) {
+async function open(page, url, { waitPrice = true } = {}) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  if (!waitPrice) { await sleep(400); return; }
   await page.keyboard.press('Escape').catch(() => {}); // Flipkart's login popup
   // Wait for a rupee amount to render (Croma / Reliance draw prices with JS).
   await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 10_000 }).catch(() => {});
@@ -82,6 +83,9 @@ async function isBlocked(page) {
   const t = (await page.title().catch(() => '')).toLowerCase();
   const body = (await page.evaluate(() => document.body?.innerText?.slice(0, 3000) || '').catch(() => '')).toLowerCase();
   if (t.includes('robot check') || body.includes('enter the characters you see below')) return 'captcha';
+  // Amazon's soft blocks for cloud servers: a fake 404 or a "rush hour" 503.
+  if (t.includes('page not found') && body.includes('not a functioning page')) return 'soft block (404)';
+  if (t.includes('503') || body.includes("it's rush hour")) return 'soft block (503)';
   if (body.includes('access denied') || t.includes('access denied') || body.includes('are you a human')) return 'access denied';
   if (body.length < 200) return 'empty page';
   return null;
@@ -117,6 +121,52 @@ async function pageSnippet(page) {
 // What happened on each store, written to the GitHub run page (public) so
 // failures can be diagnosed without logs.
 const diag = [];
+
+// ── Politeness: at most N pages open per store at once ────────────────────
+// Bursts of parallel requests are what get a server blocked. Amazon is the
+// strictest, so it gets one page at a time with a short gap.
+const STORE_SLOTS = { amazon: 1, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2 };
+const GAP_MS = { amazon: 1200, engine: 800 };
+const slots = {};
+async function withSlot(key, fn) {
+  const s = (slots[key] ||= { busy: 0, waiters: [] });
+  if (s.busy >= (STORE_SLOTS[key] ?? 3)) await new Promise(r => s.waiters.push(r));
+  s.busy++;
+  try { return await fn(); }
+  finally {
+    if (GAP_MS[key]) await sleep(GAP_MS[key] + Math.random() * 600);
+    s.busy--; s.waiters.shift()?.();
+  }
+}
+
+// ── Finding the product through Bing / DuckDuckGo ─────────────────────────
+// "site:amazon.in JBL PartyBox 130" finds the product page without touching the
+// store's own search, which is what stores block first.
+async function findViaEngine(page, store, job, domain) {
+  const queries = searchQueries(job.name, job.brand, job.variant);
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  let why = '';
+  for (const url of engineUrls(domain, queries[queries.length - 1])) {
+    try {
+      await withSlot('engine', () => open(page, url, { waitPrice: false }));
+      const links = await page.evaluate(() => [...document.querySelectorAll('a[href]')].map(a => ({ href: a.href, text: (a.innerText || a.title || '').trim().slice(0, 300) })));
+      const byKey = new Map();
+      for (const l of links) {
+        const href = unwrapSearchLink(l.href);
+        if (!isProductUrl(store, href)) continue;
+        try { const h = new URL(href).hostname.replace(/^www\./, ''); if (!(h === domain || h.endsWith('.' + domain))) continue; } catch { continue; }
+        const k = urlKey(store, href);
+        const text = l.text.replace(/\s*[-|:]\s*(amazon\.in|flipkart|croma|reliance digital)[\s\S]*$/i, '');
+        const prev = byKey.get(k);
+        if (!prev || text.length > prev.text.length) byKey.set(k, { href, text });
+      }
+      const hit = pickBest(name, job.brand, [...byKey.values()]);
+      if (hit) return { hit };
+      why += `${new URL(url).hostname}: ${byKey.size} links; `;
+    } catch (e) { why += `${url.slice(8, 30)}: ${e.message.slice(0, 60)}; `; }
+  }
+  return { hit: null, why };
+}
 
 // ── Finding the product on a search page ───────────────────────────────────
 async function findOnSearch(page, store, job, officialSite) {
@@ -246,32 +296,55 @@ async function scrapeStore(context, job, s) {
   try {
     let url = s.url;
     if (!url) {
-      if (s.store === 'official' && !s.officialSite) return { store: s.store, status: 'not_found', note: 'No brand site known — paste the product URL in Market Prices' };
+      if (s.store === 'official' && (!s.officialSite || MARKETPLACES.includes(s.officialSite))) {
+        return s.officialSite ? { store: s.store, status: 'not_listed' }
+          : { store: s.store, status: 'not_found', note: 'No brand site known — paste the product URL in Market Prices' };
+      }
+      const domain = s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store];
       let why = '';
-      for (const q of searchQueries(job.name, job.brand, job.variant)) {
-        const su = storeSearchUrl(s.store, q, s.officialSite);
-        if (!su) break;
-        await open(page, su);
-        if (s.store === 'amazon') await passInterstitial(page, su);
-        const blocked = await isBlocked(page);
-        if (blocked) {
-          await debugDump(page, tag + '-search');
-          diag.push({ store: s.store, product: job.name, what: `search blocked (${blocked})`, detail: await pageSnippet(page) });
-          return { store: s.store, status: 'blocked', note: `Search page: ${blocked}` };
+      // Amazon blocks its own search for cloud servers, so go through Bing first.
+      if (s.store === 'amazon') {
+        const e = await findViaEngine(page, s.store, job, domain);
+        if (e.hit) url = e.hit.href; else why += 'engines: ' + e.why;
+      }
+      if (!url) {
+        for (const q of searchQueries(job.name, job.brand, job.variant)) {
+          const su = storeSearchUrl(s.store, q, s.officialSite);
+          if (!su) break;
+          const blocked = await withSlot(s.store, async () => {
+            await open(page, su);
+            if (s.store === 'amazon') await passInterstitial(page, su);
+            // Croma / Reliance render results with JS after the page shell.
+            if (s.store === 'croma' || s.store === 'reliance') {
+              await page.waitForSelector('a[href*="/p/"], a[href*="/product/"]', { timeout: 12_000 }).catch(() => {});
+            }
+            return isBlocked(page);
+          });
+          if (blocked) { why += ` store search blocked (${blocked});`; break; }
+          const f = await findOnSearch(page, s.store, job, s.officialSite);
+          if (f.hit) { url = f.hit.href; break; }
+          why += ` query "${q}": ${f.count} links` + (f.top ? `, best "${f.top.text.slice(0, 50)}" (${f.top.score.toFixed(2)})` : '') + ';';
         }
-        const f = await findOnSearch(page, s.store, job, s.officialSite);
-        if (f.hit) { url = f.hit.href; break; }
-        why = `query "${q}": ${f.count} product links` + (f.top ? `, best "${f.top.text.slice(0, 60)}" (${f.top.score.toFixed(2)})` : '');
+      }
+      // Store search found nothing (or was blocked) — try the search engines.
+      if (!url && s.store !== 'amazon') {
+        const e = await findViaEngine(page, s.store, job, domain);
+        if (e.hit) url = e.hit.href; else why += ' engines: ' + e.why;
       }
       if (!url) {
         await debugDump(page, tag + '-search');
-        diag.push({ store: s.store, product: job.name, what: 'not found in search', detail: `${why} · ${await pageSnippet(page)}` });
-        return { store: s.store, status: 'not_listed' };
+        const blockedAll = /blocked/.test(why) && !/links/.test(why);
+        diag.push({ store: s.store, product: job.name, what: blockedAll ? 'search blocked' : 'not found in search', detail: `${why} · ${await pageSnippet(page)}` });
+        return blockedAll ? { store: s.store, status: 'blocked', note: why.trim().slice(0, 200) } : { store: s.store, status: 'not_listed' };
       }
     }
-    await open(page, url);
-    if (s.store === 'amazon') await passInterstitial(page, url);
-    const blocked = await isBlocked(page);
+    const load = () => withSlot(s.store, async () => {
+      await open(page, url);
+      if (s.store === 'amazon') await passInterstitial(page, url);
+      return isBlocked(page);
+    });
+    let blocked = await load();
+    if (blocked) { await sleep(4000 + Math.random() * 3000); blocked = await load(); } // one polite retry
     if (blocked) {
       await debugDump(page, tag);
       diag.push({ store: s.store, product: job.name, what: `product page blocked (${blocked})`, detail: await pageSnippet(page) });

@@ -27,7 +27,11 @@ export function urlKey(store, href) {
 const STOP = new Set(['with', 'and', 'the', 'for', 'of', 'in', 'by', 'new', 'latest', 'edition', 'version', 'speaker', 'speakers',
   'portable', 'bluetooth', 'wireless', 'wifi', 'wi', 'fi', 'smartphone', 'mobile', 'phone', 'android', 'india', 'black', 'white',
   'blue', 'grey', 'gray', 'red', 'green', 'silver', 'gold', 'party', 'box']);
-const ACCESSORY = /\b(case|cover|pouch|strap|band|skin|tempered|glass|screen guard|protector|charger|adapter|cable|bag|sleeve|stand|mount|holder|remote|refill|replacement|spare|sticker|decal)\b/i;
+// Always an accessory listing:
+const ACCESSORY_STRONG = /\b(tempered|screen guard|protector|replacement|sticker|decal|skin|compatible with|compatible for)\b/i;
+// Accessory words that also appear in real product titles ("…with Alexa Voice
+// Remote", "…with charger") — only an accessory when it is "X for <product>".
+const ACCESSORY = /\b(case|cover|pouch|strap|band|charger|adapter|adaptor|cable|bag|sleeve|stand|mount|holder|remote|refill|spare|carry)\b[^,]{0,40}\bfor\b/i;
 const NOT_NEW = /\b(renewed|refurbished|pre-?owned|used|open box)\b/i;
 
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -42,7 +46,8 @@ export function titleScore(name, brand, candidate) {
   const cand = norm(candidate);
   if (!cand) return 0;
   const squashed = cand.replace(/ /g, '');
-  if (ACCESSORY.test(cand) && !ACCESSORY.test(norm(name))) return 0;
+  const nameN = norm(name);
+  if ((ACCESSORY_STRONG.test(cand) && !ACCESSORY_STRONG.test(nameN)) || (ACCESSORY.test(cand) && !ACCESSORY.test(nameN))) return 0;
   if (NOT_NEW.test(cand)) return 0;
   if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) return 0;
 
@@ -209,4 +214,26 @@ export function storeSearchUrl(store, query, officialSite) {
     }
   }
   return null;
+}
+
+// ── Web search engines as a fallback way to find product pages ─────────────
+export const STORE_DOMAIN = { amazon: 'amazon.in', flipkart: 'flipkart.com', croma: 'croma.com', reliance: 'reliancedigital.in' };
+/** Marketplaces are never a brand's "official site" (Amazon devices → amazon.in). */
+export const MARKETPLACES = ['amazon.in', 'amazon.com', 'flipkart.com', 'croma.com', 'reliancedigital.in'];
+
+/** Bing / DuckDuckGo wrap result links; return the real target URL. */
+export function unwrapSearchLink(href) {
+  try {
+    const u = new URL(href, 'https://www.bing.com');
+    if (/bing\.com$/.test(u.hostname) && u.pathname.startsWith('/ck/a')) {
+      const v = u.searchParams.get('u');
+      if (v && v.startsWith('a1')) return Buffer.from(v.slice(2).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    }
+    if (/duckduckgo\.com$/.test(u.hostname) && u.searchParams.get('uddg')) return decodeURIComponent(u.searchParams.get('uddg'));
+    return u.toString();
+  } catch { return href; }
+}
+export function engineUrls(domain, query) {
+  const q = encodeURIComponent(`site:${domain} ${query}`);
+  return [`https://www.bing.com/search?q=${q}&setlang=en-IN&cc=IN`, `https://html.duckduckgo.com/html/?q=${q}&kl=in-en`];
 }
