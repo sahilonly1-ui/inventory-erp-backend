@@ -11,14 +11,22 @@ const x = (sql: string, ...p: unknown[]) => prisma.$executeRawUnsafe(sql, ...p);
 export interface Settings {
   autoSyncInStock: boolean;      // watch every product that has stock
   autoSyncCategories: string[];  // limit the sync to these categories (empty = all)
+  autoSyncBrands: string[];      // …and to these brands (empty = all)
+  includeOutOfStock: boolean;    // also watch products of those brands/categories with no stock
   defaultIntervalMins: number;   // an item is due for the agent after this
   priorityIntervalMins: number;  // …and starred items after this
   stores: StoreKey[];
   batchSize: number;             // products handed to the browser agent per run
 }
+// The brands and categories iTechArena tracks by default (editable in Settings).
+export const DEFAULT_BRANDS = ['Amazon', 'Apple', 'Boat', 'Carvaan', 'Google', 'JBL', 'Marshall', 'Motorola', 'Noise', 'Nothing', 'OnePlus', 'OPPO', 'Samsung'];
+export const DEFAULT_CATEGORIES = ['Amazon & TV Stick', 'EarBuds', 'Headphones', 'LED TV', 'Party Speaker', 'Smartphone', 'SmartWatch', 'Soundbars', 'Speaker', 'Tabs'];
+
 const DEFAULTS: Settings = {
   autoSyncInStock: true,
-  autoSyncCategories: [],
+  autoSyncCategories: DEFAULT_CATEGORIES,
+  autoSyncBrands: DEFAULT_BRANDS,
+  includeOutOfStock: false,
   defaultIntervalMins: 360,
   priorityIntervalMins: 60,
   stores: [...STORE_KEYS],
@@ -27,12 +35,26 @@ const DEFAULTS: Settings = {
 
 export async function getSettings(): Promise<Settings> {
   const rows = await q<{ value: any }>(`SELECT value FROM price_watch_settings WHERE key='main'`);
-  return { ...DEFAULTS, ...(rows[0]?.value ?? {}) };
+  const saved = { ...(rows[0]?.value ?? {}) };
+  // Settings saved before brand filtering existed: start from the default lists.
+  if (saved.autoSyncBrands === undefined) { delete saved.autoSyncCategories; }
+  return { ...DEFAULTS, ...saved };
 }
+/** Every brand and category in the Product Master, for the Settings pickers. */
+export async function settingsOptions() {
+  const [brands, cats] = await Promise.all([
+    q<{ b: string }>(`SELECT DISTINCT ON (lower(brand)) brand AS b FROM products WHERE "isDeleted"=false AND brand IS NOT NULL AND brand<>'' ORDER BY lower(brand), brand`),
+    q<{ c: string }>(`SELECT name AS c FROM product_categories ORDER BY 1`),
+  ]);
+  return { brands: brands.map(r => r.b), categories: cats.map(r => r.c) };
+}
+
 export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
   const cur = await getSettings();
   const next: Settings = { ...cur, ...patch };
   next.stores = (next.stores ?? []).filter(s => STORE_KEYS.includes(s));
+  next.autoSyncBrands = [...new Set((next.autoSyncBrands ?? []).map(String).map(x => x.trim()).filter(Boolean))];
+  next.autoSyncCategories = [...new Set((next.autoSyncCategories ?? []).map(String).map(x => x.trim()).filter(Boolean))];
   next.defaultIntervalMins = Math.max(30, Math.round(next.defaultIntervalMins));
   next.priorityIntervalMins = Math.max(15, Math.round(next.priorityIntervalMins));
   next.batchSize = Math.min(25, Math.max(1, Math.round(next.batchSize)));
@@ -56,27 +78,35 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
            FROM products p WHERE p.id=i."productId" AND (i.name<>p.model OR i.brand IS DISTINCT FROM p.brand)`);
   if (!s.autoSyncInStock) return { added: 0, paused: 0, resumed: 0 };
 
-  const catFilter = s.autoSyncCategories.length ? `AND c.name = ANY($1::text[])` : '';
-  const params = s.autoSyncCategories.length ? [s.autoSyncCategories] : [];
-  const stockSub = `(SELECT "productId", SUM(quantity)::int AS q FROM stock_levels GROUP BY "productId")`;
+  // A product is "in scope" when its brand and category are on the lists
+  // (case-insensitive; an empty list means any) and, unless out-of-stock
+  // products are included, it has stock.
+  const stockOf = `COALESCE((SELECT SUM(quantity) FROM stock_levels sl WHERE sl."productId"=p.id),0)`;
+  const scope = `p."isDeleted"=false
+      AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
+      AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))
+      AND ($3::boolean OR ${stockOf} > 0)`;
+  const params = [s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()), s.includeOutOfStock];
 
   const added = await x(
     `INSERT INTO price_watch_items("productId", name, brand, source)
-     SELECT p.id, p.model, p.brand, 'auto'
-     FROM products p
-     JOIN ${stockSub} st ON st."productId"=p.id
+     SELECT p.id, p.model, p.brand, 'auto' FROM products p
      LEFT JOIN product_categories c ON c.id=p."categoryId"
-     WHERE p."isDeleted"=false AND st.q>0 ${catFilter}
+     WHERE ${scope}
      ON CONFLICT ("productId") WHERE "productId" IS NOT NULL DO NOTHING`, ...params);
 
+  // Auto items move in and out of scope as stock, brand lists or categories change.
+  // Starred items and items the admin added by hand are left alone.
   const paused = await x(
-    `UPDATE price_watch_items i SET active=false, "updatedAt"=now()
-     WHERE i.source='auto' AND i.active=true AND i.priority=false
-       AND COALESCE((SELECT SUM(quantity) FROM stock_levels sl WHERE sl."productId"=i."productId"),0) <= 0`);
+    `UPDATE price_watch_items i SET active=false, requested=false, "updatedAt"=now()
+     WHERE i.source='auto' AND i.active=true AND i.priority=false AND NOT EXISTS (
+       SELECT 1 FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
+       WHERE p.id=i."productId" AND ${scope})`, ...params);
   const resumed = await x(
     `UPDATE price_watch_items i SET active=true, "updatedAt"=now()
-     WHERE i.source='auto' AND i.active=false AND i.dismissed=false
-       AND COALESCE((SELECT SUM(quantity) FROM stock_levels sl WHERE sl."productId"=i."productId"),0) > 0`);
+     WHERE i.source='auto' AND i.active=false AND i.dismissed=false AND EXISTS (
+       SELECT 1 FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
+       WHERE p.id=i."productId" AND ${scope})`, ...params);
   return { added: Number(added), paused: Number(paused), resumed: Number(resumed) };
 }
 
@@ -219,6 +249,30 @@ export async function requestMany(ids: string[], replace = true) {
   return { queued: Number(n), dispatched };
 }
 
+let runCache: { at: number; data: any } | null = null;
+/** Latest scraper run on GitHub (status, start time, link), cached for 15 s. */
+export async function runStatus() {
+  const token = process.env.GITHUB_DISPATCH_TOKEN;
+  if (!token) return { configured: false };
+  if (runCache && Date.now() - runCache.at < 15_000) return runCache.data;
+  const repo = process.env.GITHUB_SCRAPER_REPO || 'sahilonly1-ui/inventory-erp-backend';
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/price-scraper.yml/runs?per_page=1`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'itecharena-erp' },
+    });
+    const j: any = await r.json();
+    const run = j?.workflow_runs?.[0];
+    const data = {
+      configured: r.ok, error: r.ok ? undefined : (j?.message || `GitHub ${r.status}`),
+      run: run ? { number: run.run_number, status: run.status, conclusion: run.conclusion, startedAt: run.run_started_at || run.created_at, updatedAt: run.updated_at, url: run.html_url } : null,
+    };
+    runCache = { at: Date.now(), data };
+    return data;
+  } catch (e: any) {
+    return { configured: true, error: e?.message || 'GitHub unreachable' };
+  }
+}
+
 /**
  * Starts the GitHub Actions scraper right away (instead of waiting for its
  * schedule). Optional: needs GITHUB_DISPATCH_TOKEN on Render — a fine-grained
@@ -235,6 +289,7 @@ export async function dispatchScraper(queuedOnly: boolean): Promise<boolean> {
       body: JSON.stringify({ ref: 'main', inputs: { queued_only: queuedOnly ? '1' : '0' } }),
     });
     if (!r.ok) logger.warn({ status: r.status, body: (await r.text()).slice(0, 200) }, 'price-watch: scraper dispatch failed');
+    runCache = null;
     return r.ok;
   } catch (e: any) {
     logger.warn({ err: e?.message }, 'price-watch: scraper dispatch failed');

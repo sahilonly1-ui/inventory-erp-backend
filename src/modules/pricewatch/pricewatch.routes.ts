@@ -51,8 +51,14 @@ router.put('/items/:id/links/:store', asyncHandler(async (req, res) => {
   ok(res, { ok: true });
 }));
 router.post('/sync', asyncHandler(async (_req, res) => ok(res, await svc.syncFromInventory())));
-router.get('/settings', asyncHandler(async (_req, res) => ok(res, await svc.getSettings())));
-router.put('/settings', asyncHandler(async (req, res) => ok(res, await svc.saveSettings(req.body ?? {}))));
+router.get('/settings', asyncHandler(async (_req, res) => ok(res, { ...(await svc.getSettings()), options: await svc.settingsOptions() })));
+router.get('/run-status', asyncHandler(async (_req, res) => ok(res, await svc.runStatus())));
+router.put('/settings', asyncHandler(async (req, res) => {
+  const { options, ...body } = req.body ?? {};
+  const saved = await svc.saveSettings(body);
+  await svc.syncFromInventory();
+  ok(res, saved);
+}));
 
 // Browser-agent endpoints (used by the /market-prices/agent page).
 router.post('/agent/request', asyncHandler(async (req, res) => ok(res, await svc.requestMany(req.body?.ids, req.body?.replace !== false))));
