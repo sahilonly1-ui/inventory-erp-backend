@@ -1,0 +1,14 @@
+{
+  "name": "itecharena-price-scraper",
+  "private": true,
+  "type": "module",
+  "description": "Reads live prices and bank offers from Amazon, Flipkart, Croma, Reliance Digital and brand sites for the ERP's Market Prices page.",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node lib.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  },
+  "engines": { "node": ">=20" }
+}
