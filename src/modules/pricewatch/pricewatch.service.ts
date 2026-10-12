@@ -374,7 +374,7 @@ function offerValue(o: AgentOffer, price: number): number {
 }
 
 /** Checks one store result. Exported for tests. */
-export function verify(r: AgentResult, expected: number | null, brand: string | null) {
+export function verify(r: AgentResult, expected: number | null, brand: string | null, erpMrp: number | null = null) {
   const store = r.store as StoreKey;
   const notes: string[] = [];
   const url = r.url ? normaliseStoreUrl(store, r.url, brand) : null;
@@ -386,8 +386,12 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   if (!url) return { status: 'unverified', url: null, price, notes: [...notes, 'No valid product URL, so the price was not trusted'] };
 
   let status: 'ok' | 'suspect' = st === 'suspect' ? 'suspect' : 'ok';
-  if (expected && expected > 0 && (price < expected * 0.5 || price > expected * 1.8)) {
-    status = 'suspect'; notes.push(`Far from expected ~₹${Math.round(expected).toLocaleString('en-IN')}`);
+  // Plausibility: against the ERP's MRP when known (selling above MRP, or below
+  // 30% of it, is not a real listing); otherwise against the last good price.
+  if (erpMrp && erpMrp > 0) {
+    if (price > erpMrp * 1.15 || price < erpMrp * 0.3) { status = 'suspect'; notes.push(`Unusual vs MRP ₹${Math.round(erpMrp).toLocaleString('en-IN')}`); }
+  } else if (expected && expected > 0 && (price < expected * 0.5 || price > expected * 1.8)) {
+    status = 'suspect'; notes.push(`Far from last price ~₹${Math.round(expected).toLocaleString('en-IN')}`);
   }
   if (r.priceText && !String(r.priceText).replace(/[,\s]/g, '').includes(String(Math.round(price)))) {
     status = 'suspect'; notes.push(`Price text "${r.priceText}" doesn't match ₹${price}`);
@@ -434,8 +438,8 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
   for (const r of results) {
     if (!storeDef(r.store)) continue;
     const link = links.find(l => l.store === r.store);
-    const expected = prevGood.find(p => p.store === r.store)?.price ?? item.ourPrice ?? null;
-    const v: any = verify(r, expected, item.brand);
+    const expected = prevGood.find(p => p.store === r.store)?.price ?? null;
+    const v: any = verify(r, expected, item.brand, item.ourPrice ?? null);
 
     // Remember the page for next time — never over a URL the admin set.
     if (!link?.lockedByUser && (v.url || v.status === 'not_listed')) {
