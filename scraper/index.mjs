@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -336,6 +336,30 @@ async function expandOffers(page, store) {
   } catch { /* fine */ }
 }
 
+/** Amazon: open "See all offers & discounts" and read exact savings, both tabs. */
+async function amazonPanelOffers(page, price) {
+  try {
+    const link = page.getByText(/see all offers/i).first();
+    if (!(await link.count())) return [];
+    await link.click({ timeout: 4000 });
+    await page.waitForFunction(() => /PAYMENT OFFERS|Save ₹/i.test(document.body.innerText), null, { timeout: 6000 }).catch(() => {});
+    await sleep(800);
+    const text = () => page.evaluate(() => document.body.innerText);
+    const offers = parseAmazonPanel(await text(), 'Full swipe', price);
+    const emiTab = page.getByText(/^EMI plans$/i).first();
+    if (await emiTab.count()) {
+      await emiTab.click({ timeout: 3000 }).catch(() => {});
+      await sleep(900);
+      for (const o of parseAmazonPanel(await text(), 'EMI', price)) {
+        // Same card and amount on both tabs = one offer valid for both.
+        const same = offers.find(x => x.bank === o.bank && x.cardType === o.cardType && x.amount === o.amount && x.offerType === o.offerType);
+        if (same) same.mode = 'EMI & Full swipe'; else offers.push(o);
+      }
+    }
+    return offers;
+  } catch { return []; }
+}
+
 /** Runs inside the page: title, price, M.R.P., stock, structured data, offer text. */
 function readPage(store) {
   const txt = el => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -376,6 +400,12 @@ function readPage(store) {
       if (el.children.length > 2) continue;
       const t = txt(el);
       if (!/^(₹|rs\.?)\s?[\d,]+(\.\d{1,2})?$/i.test(t)) continue;
+      // "₹641/month", "EMI from ₹641" — an instalment, never the product price.
+      // Only the text right next to the amount — not the whole section.
+      const parentT = txt(el.parentElement);
+      const around = parentT.length <= 80 ? parentT
+        : [el.previousSibling?.textContent, el.nextSibling?.textContent].map(x => (x || '').trim().slice(0, 30)).join(' ');
+      if (/(\/\s?m(o|onth)?\b|per month|p\.m\.|\bemi\b|\bmonths?\b)/i.test(around)) continue;
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height) continue;
       const top = r.top + window.scrollY;
@@ -391,7 +421,9 @@ function readPage(store) {
       if (m) res.mrp = m.v;
     }
   }
-  if (!res.price && res.ldPrice) { res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice; }
+  if (res.ldPrice && (!res.price || (store !== 'amazon' && res.price < res.ldPrice * 0.5))) {
+    res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice;   // the store's own structured price
+  }
 
   if (!res.title) res.title = txt(document.querySelector('h1')) || document.title || null;
   const body = (document.body?.innerText || '');
@@ -489,9 +521,13 @@ async function scrapeStore(context, job, s) {
       diag.push({ store: s.store, product: job.name, what: 'no price on product page', detail: `${page.url()} · ${await pageSnippet(page)}` });
       return { store: s.store, url: page.url(), status: 'not_found', note: 'Price not found on page' };
     }
+    // Amazon: exact per-product savings from its Payment offers panel; the
+    // headline "Upto ₹X" cards are only used if the panel can't be read.
+    const panel = s.store === 'amazon' ? await amazonPanelOffers(page, r.price) : [];
+    const offers = panel.length ? panel : extractOffers(r.text);
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
-      title: r.title, priceText: r.priceText, offers: extractOffers(r.text),
+      title: r.title, priceText: r.priceText, offers,
       note: r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };
   } catch (e) {

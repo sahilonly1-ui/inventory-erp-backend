@@ -166,8 +166,11 @@ export function parseOffer(text) {
   let amount = null;
   const others = rupees.map(r => r.v).filter(v => v !== minTxn);
   if (percent === null) {
-    amount = others[0] ?? null;
-    if (maxDiscount && amount === maxDiscount) maxDiscount = null;  // "up to ₹1,500 off" is the flat amount
+    // "Upto ₹3,000 discount on SBI cards" is the offer's ceiling across all
+    // products, not what this product gets — keep it as a cap only, never as
+    // the saving. A flat "₹2,000 off" (no "upto") is a real amount.
+    if (maxDiscount) amount = null;
+    else amount = others[0] ?? null;
   } else if (!maxDiscount && others.length) maxDiscount = others[0];
 
   return {
@@ -182,7 +185,7 @@ export function extractOffers(text) {
   for (const b of offerBlocks(text)) {
     const o = parseOffer(b);
     if (!o.bank && !['cashback', 'no_cost_emi'].includes(o.offerType)) continue;
-    if (!o.amount && !o.percent && o.offerType !== 'no_cost_emi') continue;
+    if (!o.amount && !o.percent && !o.maxDiscount && o.offerType !== 'no_cost_emi') continue;
     const key = [o.bank, o.offerType, o.amount, o.percent, o.maxDiscount, o.cardType].join('|');
     if (seen.has(key)) continue;
     seen.add(key); out.push(o);
@@ -289,4 +292,41 @@ export function googleUrl(query) {
 /** Google's "unusual traffic" wall. */
 export function isGoogleBlock(url, text) {
   return /google\.[a-z.]+\/sorry\//i.test(url) || /unusual traffic from your computer|not a robot/i.test(text || '');
+}
+
+// ── Amazon "Payment offers" panel ─────────────────────────────────────────
+// Amazon works out the exact saving for this product ("Save ₹1,750 · SBI Credit
+// Card") in the panel behind "See all offers & discounts". Those numbers are
+// what a customer gets, unlike the "Upto ₹3,000" headline on the offer card.
+export function parseAmazonPanel(text, mode, price) {
+  const lines = String(text || '').split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^Save ₹\s?([\d,]+)(?:\.\d+)?( as cashback)?$/i);
+    if (!m) continue;
+    // The next line must name a payment method; tab headers ("EMI plans") and
+    // hints ("Select card at checkout…") are skipped.
+    const card = lines[i + 1];
+    if (!card || !/(card|upi|bank|wallet|net ?banking|pay later)/i.test(card) || /select card|checkout|emi plans|full payment/i.test(card)) continue;
+    const amount = Number(m[1].replace(/,/g, ''));
+    const bank = BANKS.find(([, re]) => re.test(card))?.[0] ?? (/upi/i.test(card) ? 'UPI' : card.slice(0, 40));
+    const low = card.toLowerCase();
+    const cardType = /credit/.test(low) && /debit/.test(low) ? 'Credit & Debit' : /credit/.test(low) ? 'Credit Card' : /debit/.test(low) ? 'Debit Card' : /upi/.test(low) ? 'UPI' : null;
+    out.push({ bank, cardType, offerType: m[2] ? 'cashback' : 'instant_discount', mode, amount, percent: null, maxDiscount: null, minTxn: null,
+      summary: `Save ₹${amount.toLocaleString('en-IN')}${m[2] ? ' as cashback' : ''} with ${card}${mode === 'EMI' ? ' on EMI' : ''}` });
+    // "Save ₹1,000 extra on orders above ₹39,990" under the same card
+    for (const l of lines.slice(i + 2, i + 7)) {
+      if (/^Save ₹\s?[\d,]+(?:\.\d+)?( as cashback)?$/i.test(l)) break;   // next card's block
+      const x = l.match(/^Save ₹\s?([\d,]+) extra on orders above ₹\s?([\d,]+)/i);
+      if (!x) continue;
+      const minTxn = Number(x[2].replace(/,/g, ''));
+      if (!price || price >= minTxn) {
+        out.push({ bank, cardType, offerType: 'instant_discount', mode, amount: Number(x[1].replace(/,/g, '')), percent: null, maxDiscount: null, minTxn,
+          summary: `Extra ₹${x[1]} with ${card} on orders above ₹${x[2]}` });
+      }
+      break;
+    }
+  }
+  const seen = new Set();
+  return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
 }
