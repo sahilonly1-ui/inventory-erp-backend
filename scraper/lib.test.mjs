@@ -78,3 +78,7 @@ assert.ok(googleUrl('6925281986451').includes('gl=in'));
 assert.ok(isGoogleBlock('https://www.google.com/sorry/index?continue=x', ''));
 assert.ok(isGoogleBlock('https://www.google.com/search?q=x', 'Our systems have detected unusual traffic from your computer network.'));
 console.log('google helpers ok');
+assert.ok(titleScore('JBL Clip 5 Portable Bluetooth Speaker (Squad) (JBLCLIP5SQUAD)', 'JBL', 'JBL Clip 5 Ultra-Portable Waterproof Speaker, Squad') >= 0.55);
+assert.ok(titleScore('JBL Clip4 Portable Bluetooth Speaker (Green) (JBLCLIP4ECOGRN)', 'JBL', 'JBL Clip 4 Eco Bluetooth Speaker, Forest Green') >= 0.55);
+assert.equal(titleScore('Samsung Galaxy S26 (8GB/256GB)', 'Samsung', 'Samsung Galaxy S26 5G (8GB, 512GB)'), 0);
+console.log('bracket rules ok');

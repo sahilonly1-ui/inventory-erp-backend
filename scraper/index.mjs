@@ -23,8 +23,9 @@ const KEY = process.env.AGENT_KEY;
 const LIMIT = Number(process.env.LIMIT || 300);
 const ONLY = (process.env.STORES || '').split(',').map(s => s.trim()).filter(Boolean);
 const DEBUG = process.env.DEBUG_DIR || path.resolve('debug');
-const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 6);
 const WATCH = process.env.WATCH === '1';
+// On the showroom PC keep it light: 2 products (≈10 tabs) at a time.
+const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || (WATCH ? 2 : 6));
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 if (!KEY && !process.env.SCRAPER_TEST) { console.error('AGENT_KEY is not set'); process.exit(1); }
@@ -80,7 +81,7 @@ async function open(page, url, { waitPrice = true } = {}) {
   if (!waitPrice) { await sleep(400); return; }
   await page.keyboard.press('Escape').catch(() => {}); // Flipkart's login popup
   // Wait for a rupee amount to render (Croma / Reliance draw prices with JS).
-  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 8_000 }).catch(() => {});
+  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 5_000 }).catch(() => {});
   await sleep(300);
 }
 
@@ -196,6 +197,7 @@ async function googleDiscover(context, job, stores) {
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   const queries = [...(job.ean && /^\d{8,14}$/.test(job.ean) ? [job.ean] : []), searchQueries(job.name, job.brand, job.variant)[0]];
   const found = {};
+  job._googleOk = false;
   const page = await context.newPage();
   try {
     for (const q of queries) {
@@ -211,6 +213,7 @@ async function googleDiscover(context, job, stores) {
       const links = await page.evaluate(() => [...document.querySelectorAll('a[href]')].map(a => ({
         href: a.href, text: (a.querySelector('h3')?.innerText || a.innerText || '').trim().slice(0, 300),
       })));
+      if (links.length > 15) job._googleOk = true;   // a real results page, not an error
       const isEanQuery = q === job.ean;
       for (const s of missing) {
         const domain = domainOf(s);
@@ -420,18 +423,22 @@ async function scrapeStore(context, job, s) {
       if (g[s.store]) url = g[s.store];
       else if (Date.now() < googleBlockedUntil) why += 'google: paused (captcha); ';
       else why += 'google: no match; ';
+      // When Google answered properly and still didn't show this store, the
+      // product is most likely not sold there: one quick store search, no more.
+      const quick = job._googleOk && !url;
       // 2. Brand sites: the sitemap — no search page, no bot checks.
       if (!url && s.store === 'official') {
         const m = await findViaSitemap(context, job, domain);
         if (m.hit) url = m.hit.href; else why += m.why;
       }
       // 3. Amazon blocks its own search for cloud servers, so the other engines next.
-      if (!url && s.store === 'amazon') {
+      if (!url && s.store === 'amazon' && !quick) {
         const e = await findViaEngine(page, s.store, job, domain);
         if (e.hit) url = e.hit.href; else why += 'engines: ' + e.why;
       }
-      if (!url) {
-        for (const q of searchQueries(job.name, job.brand, job.variant)) {
+      if (!url && !(quick && s.store === 'official')) {
+        const qs = searchQueries(job.name, job.brand, job.variant);
+        for (const q of quick ? qs.slice(-1) : qs) {
           const su = storeSearchUrl(s.store, q, s.officialSite);
           if (!su) break;
           let blocked;
@@ -440,7 +447,7 @@ async function scrapeStore(context, job, s) {
             if (s.store === 'amazon') await passInterstitial(page, su);
             // Croma / Reliance render results with JS after the page shell.
             if (s.store === 'croma' || s.store === 'reliance') {
-              await page.waitForSelector('a[href*="/p/"], a[href*="/product/"]', { timeout: 12_000 }).catch(() => {});
+              await page.waitForSelector('a[href*="/p/"], a[href*="/product/"]', { timeout: 6_000 }).catch(() => {});
             }
             return isBlocked(page);
           }); } catch (e) { blocked = `error: ${String(e.message).slice(0, 50)}`; }
@@ -452,7 +459,7 @@ async function scrapeStore(context, job, s) {
         }
       }
       // Store search found nothing (or was blocked) — try the search engines.
-      if (!url && s.store !== 'amazon') {
+      if (!url && s.store !== 'amazon' && !quick) {
         const e = await findViaEngine(page, s.store, job, domain);
         if (e.hit) url = e.hit.href; else why += ' engines: ' + e.why;
       }
@@ -496,6 +503,25 @@ async function scrapeStore(context, job, s) {
   }
 }
 
+// Compare a product's prices across stores: one far below the rest is almost
+// always an EMI amount or an accessory (Boombox 3 at ₹641 next to ₹34,999).
+function crossCheck(results) {
+  const ok = results.filter(r => r.status === 'ok' && r.price > 0);
+  if (ok.length < 3) return results;
+  const sorted = ok.map(r => r.price).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  for (const r of ok) {
+    const ratio = r.price / median;
+    if (ratio < 0.4) {
+      Object.assign(r, { status: 'not_found', note: `Ignored ₹${r.price} — other stores ~₹${median}, looks like EMI/accessory`, price: null, offers: [] });
+    } else if (ratio < 0.65 || ratio > 1.6) {
+      r.status = 'suspect';
+      r.note = [r.note, `Unusual vs other stores (~₹${median}) — check the listing`].filter(Boolean).join(' · ');
+    }
+  }
+  return results;
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 async function runJobs(context, jobs, mode) {
   const stats = { ok: 0, blocked: 0, not_listed: 0, not_found: 0, error: 0 };
@@ -506,13 +532,13 @@ async function runJobs(context, jobs, mode) {
       const job = jobs[next++];
       const t = Date.now();
       const stores = job.stores.filter(s => !ONLY.length || ONLY.includes(s.store));
-      const results = await Promise.all(stores.map(s => scrapeStore(context, job, s)));
+      const results = crossCheck(await Promise.all(stores.map(s => scrapeStore(context, job, s))));
       results.forEach(r => {
-        stats[r.status] = (stats[r.status] || 0) + 1;
+        stats[r.status] = (stats[r.status] || 0) + 1;  // 'suspect' counts separately
         const ps = (perStore[r.store] ||= {});
         ps[r.status] = (ps[r.status] || 0) + 1;
       });
-      const line = results.map(r => `${r.store}:${r.status === 'ok' ? '₹' + r.price + (r.offers?.length ? `+${r.offers.length}off` : '') : r.status}`).join('  ');
+      const line = results.map(r => `${r.store}:${r.status === 'ok' || r.status === 'suspect' ? (r.status === 'suspect' ? '⚠' : '') + '₹' + r.price + (r.offers?.length ? `+${r.offers.length}off` : '') : r.status}`).join('  ');
       console.log(`• ${job.name} (${Math.round((Date.now() - t) / 1000)}s)\n    ${line}`);
       try { await api(`/price-watch/bot/results/${job.itemId}?worker=${mode}`, { method: 'POST', body: JSON.stringify({ results }) }); }
       catch (e) { console.log(`    ! could not save: ${e.message}`); }
@@ -539,18 +565,36 @@ async function main() {
 // picked up within ~4 s; when idle it refreshes a few due products at a time.
 async function watch() {
   console.log('Price scraper running in watch mode — keep this window open. Ctrl+C to stop.');
+  // Only one copy may run (the PC may start it twice): hold a local port as a lock.
+  const net = await import('node:net');
+  const locked = await new Promise(res => {
+    const srv = net.createServer().once('error', () => res(false)).listen(47231, '127.0.0.1', () => res(true));
+    srv.unref();
+  });
+  if (!locked) { console.log('Another copy of the price scraper is already running — exiting.'); process.exit(0); }
+
   let b = null, lastDue = 0, idleSince = Date.now();
-  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN || 10) * 60_000;
+  // A browser hiccup (e.g. Playwright's "Unexpected end of JSON input") must not
+  // stop the scraper: drop that browser, start a fresh one, carry on with the queue.
+  const recover = e => {
+    console.log(`! browser problem: ${String(e?.message || e).split('\n')[0]} — restarting browser`);
+    const old = b; b = null; old?.browser.close().catch(() => {});
+  };
+  process.on('uncaughtException', recover);
+  process.on('unhandledRejection', recover);
+  // Scheduled full refreshes are GitHub's job; the PC only handles ERP refresh
+  // clicks unless DUE_EVERY_MIN is set.
+  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN || 0) * 60_000;
   for (;;) {
     try {
       let jobs = await api('/price-watch/bot/jobs?queued=1&limit=12&worker=local', {}, 2);
       let kind = 'requested';
-      if (!jobs.length && Date.now() - lastDue > DUE_EVERY) {
+      if (!jobs.length && DUE_EVERY > 0 && Date.now() - lastDue > DUE_EVERY) {
         jobs = await api('/price-watch/bot/jobs?limit=20&worker=local', {}, 2); kind = 'due'; lastDue = Date.now();
       }
       if (!jobs.length) {
-        // Close the browser after 10 idle minutes to free memory; reopen on demand.
-        if (b && Date.now() - idleSince > 10 * 60_000) { await b.browser.close().catch(() => {}); b = null; }
+        // Close Chrome 2 idle minutes after the last refresh — nothing runs in between.
+        if (b && Date.now() - idleSince > 2 * 60_000) { await b.browser.close().catch(() => {}); b = null; }
         await sleep(4000);
         continue;
       }
@@ -586,7 +630,7 @@ function report(perStore) {
   }
 }
 
-export { launch, scrapeStore, readPage, findViaSitemap };
+export { launch, scrapeStore, readPage, findViaSitemap, crossCheck };
 // Run when started directly (`node index.mjs`), not when imported by tests.
 // fileURLToPath handles Windows paths ("C:\\…") and spaces correctly.
 const isMain = (() => {

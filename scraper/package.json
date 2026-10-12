@@ -8,7 +8,7 @@
     "test": "node lib.test.mjs"
   },
   "dependencies": {
-    "playwright": "1.49.1"
+    "playwright": "1.63.0"
   },
   "engines": { "node": ">=20" }
 }

@@ -48,6 +48,10 @@ const tokens = s => norm(s).split(' ').filter(Boolean);
 const SPEC = /^\d+(w|watt|watts|mah|hz|mm|cm|inch|in|v|a|h|hr|hrs|hours|k)$/;
 
 export function titleScore(name, brand, candidate) {
+  // Bracketed extras in ERP names — SKU codes "(JBLCLIP5SQUAD)", colours
+  // "(Black)" — aren't in store titles, so they don't count. Storage/RAM in
+  // brackets "(8GB/256GB)" does.
+  name = String(name).replace(/\(([^)]*)\)/g, (m, inner) => (/\d+\s?(gb|tb)\b/i.test(inner) ? ` ${inner} ` : ' '));
   const cand = norm(candidate);
   if (!cand) return 0;
   const squashed = cand.replace(/ /g, '');
@@ -67,8 +71,12 @@ export function titleScore(name, brand, candidate) {
     const prev = all[i - 1];
     if (prev && !/\d/.test(prev) && !STOP.has(prev) && prev.length > 1 && !squashed.includes(prev)) return 0;
   }
+  // A model variant we didn't ask for ("S26 Ultra", "Clip 5 Pro") — but not when
+  // it is part of a hyphenated adjective ("Ultra-Portable", "Max-Bass").
+  const rawLow = String(candidate).toLowerCase();
   for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
-    if (tokens(candidate).includes(v) && !all.includes(v)) return 0;
+    if (all.includes(v)) continue;
+    if (new RegExp(`(^|[^a-z0-9-])${v}(?![a-z0-9-])`).test(rawLow)) return 0;
   }
   const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);
   const hit = words.length ? words.filter(w => squashed.includes(w)).length / words.length : 1;
