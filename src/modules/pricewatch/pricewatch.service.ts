@@ -290,7 +290,9 @@ export async function dispatchScraper(queuedOnly: boolean): Promise<boolean> {
     });
     if (!r.ok) logger.warn({ status: r.status, body: (await r.text()).slice(0, 200) }, 'price-watch: scraper dispatch failed');
     runCache = null;
-    return r.ok;
+    // GitHub sometimes answers 5xx although the run was created — treat as started
+    // (the run status line on the page shows whether it really is running).
+    return r.ok || r.status >= 500;
   } catch (e: any) {
     logger.warn({ err: e?.message }, 'price-watch: scraper dispatch failed');
     return false;
