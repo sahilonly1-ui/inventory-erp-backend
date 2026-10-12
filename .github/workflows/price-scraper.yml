@@ -1,21 +1,22 @@
 name: Price scraper
 
 # Reads live prices + bank offers and posts them to the ERP (Market Prices).
-# Runs 5 times a day (IST 9:30, 12:30, 15:30, 18:30, 21:30), when "Check prices"
-# is pressed in the ERP (if GITHUB_DISPATCH_TOKEN is set on Render), or by hand:
-# Actions tab → Price scraper → Run workflow.
+# Started from the ERP ("Refresh prices" / ⟳ per product), 5× a day on schedule
+# (IST 9:30, 12:30, 15:30, 18:30, 21:30), or by hand from the Actions tab.
 on:
   schedule:
     - cron: '0 4,7,10,13,16 * * *'
   workflow_dispatch:
     inputs:
       queued_only:
-        description: 'Only products queued with "Check prices" (1) or everything due (0)'
+        description: 'Only products queued from the ERP (1) or everything due (0)'
         default: '0'
       limit:
         description: 'Max products this run'
-        default: '100'
+        default: '150'
 
+# One run at a time; a run requested while one is going waits and then picks
+# up everything queued in the meantime.
 concurrency:
   group: price-scraper
   cancel-in-progress: false
@@ -24,23 +25,27 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Browsers come pre-installed in this image — saves ~1.5 min per run.
+    container:
+      image: mcr.microsoft.com/playwright:v1.49.1-noble
+      options: --ipc=host
     defaults:
       run:
         working-directory: scraper
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install --no-audit --no-fund
-      - run: npx playwright install --with-deps chromium
+          sparse-checkout: scraper
+      - run: npm install --no-audit --no-fund --prefer-offline
       - run: node lib.test.mjs
       - name: Scrape
         run: node index.mjs
         env:
+          HOME: /root
           AGENT_KEY: ${{ secrets.PRICE_AGENT_KEY }}
           QUEUED_ONLY: ${{ github.event.inputs.queued_only || '0' }}
-          LIMIT: ${{ github.event.inputs.limit || '100' }}
+          LIMIT: ${{ github.event.inputs.limit || '150' }}
+          CONCURRENCY: '4'
       - name: Keep screenshots of pages that failed
         if: always()
         uses: actions/upload-artifact@v4
