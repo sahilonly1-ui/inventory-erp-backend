@@ -21,10 +21,14 @@ const botAuth = (req: Request, _res: Response, next: NextFunction) => {
   if (got.length !== key.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(key))) return next(new UnauthorizedError('Bad agent key'));
   next();
 };
-router.get('/bot/jobs', botAuth, asyncHandler(async (req, res) =>
-  ok(res, await svc.agentJobs({ limit: Number(req.query.limit) || 100, maxLimit: 300, requestedOnly: req.query.queued === '1' }))));
-router.post('/bot/results/:itemId', botAuth, asyncHandler(async (req, res) =>
-  ok(res, await svc.agentSubmit(req.params.itemId, req.body?.results, 'scraper'))));
+router.get('/bot/jobs', botAuth, asyncHandler(async (req, res) => {
+  if (req.query.worker === 'local') svc.markLocalWorker();
+  ok(res, await svc.agentJobs({ limit: Number(req.query.limit) || 100, maxLimit: 300, requestedOnly: req.query.queued === '1' }));
+}));
+router.post('/bot/results/:itemId', botAuth, asyncHandler(async (req, res) => {
+  if (req.query.worker === 'local') svc.markLocalWorker();
+  ok(res, await svc.agentSubmit(req.params.itemId, req.body?.results, req.query.worker === 'local' ? 'showroom-pc' : 'scraper'));
+}));
 
 // Signed-in administrators only (the wildcard permission). Market pricing is
 // commercial information — staff roles never see it, whatever else they hold.

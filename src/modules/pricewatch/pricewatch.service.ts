@@ -245,9 +245,18 @@ export async function requestMany(ids: string[], replace = true) {
   if (replace) await x(`UPDATE price_watch_items SET requested=false WHERE requested=true`);
   const n = await x(
     `UPDATE price_watch_items SET requested=true WHERE id = ANY($1::text[]) AND active=true AND dismissed=false`, clean);
+  // The showroom PC scraper picks queued items up within seconds by itself;
+  // only start the (slower) GitHub run when it is offline.
+  if (localWorkerOnline()) return { queued: Number(n), dispatched: true, via: 'local' };
   const dispatched = await dispatchScraper(true);
-  return { queued: Number(n), dispatched };
+  return { queued: Number(n), dispatched, via: 'cloud' };
 }
+
+// ── Showroom PC scraper heartbeat ───────────────────────────────────────────
+// Every poll and every saved result from the always-on scraper marks it alive.
+let localSeen = 0;
+export function markLocalWorker() { localSeen = Date.now(); }
+export function localWorkerOnline() { return Date.now() - localSeen < 90_000; }
 
 let runCache: { at: number; data: any } | null = null;
 /** Latest scraper run on GitHub (status, start time, link), cached for 15 s. */
@@ -450,6 +459,8 @@ export async function status() {
   const [r] = await q(`SELECT
       (SELECT value->>'at' FROM price_watch_settings WHERE key='lastAgentRun') AS "lastAgentRun",
       ${process.env.GITHUB_DISPATCH_TOKEN ? 'true' : 'false'} AS "instantRun",
+      ${localWorkerOnline() ? 'true' : 'false'} AS "localOnline",
+      ${localSeen ? `'${new Date(localSeen).toISOString()}'` : 'NULL'} AS "localSeen",
       (SELECT COUNT(*)::int FROM price_watch_items WHERE requested AND active AND NOT dismissed) AS requested`);
   return r;
 }
