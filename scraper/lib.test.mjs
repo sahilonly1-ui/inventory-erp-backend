@@ -37,3 +37,8 @@ const offers = extractOffers(page);
 assert.ok(offers.find(x => x.bank === 'HDFC Bank' && x.amount === 1500), JSON.stringify(offers));
 assert.ok(offers.find(x => x.bank === 'Amazon Pay ICICI' && x.offerType === 'cashback'));
 console.log('lib tests passed', offers.length, 'offers');
+import { searchQueries, storeSearchUrl } from './lib.mjs';
+console.log(searchQueries('JBL Party Box 110 Portable Party Speaker (Black) 160W', 'JBL'));
+console.log(searchQueries('Boombox 3 Wifi Portable Bluetooth Speaker', 'JBL', 'Black'));
+assert.equal(storeSearchUrl('official', 'JBL PartyBox 120', 'in.jbl.com'), 'https://in.jbl.com/search?q=JBL%20PartyBox%20120');
+assert.equal(storeSearchUrl('official', 'x', null), null);

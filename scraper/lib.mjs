@@ -169,3 +169,44 @@ export function extractOffers(text) {
   }
   return out.slice(0, 20);
 }
+
+// ── Search queries & URLs ─────────────────────────────────────────────────
+const FLUFF = /\b(portable|bluetooth|wireless|wifi|wi-fi|speaker|speakers|party speaker|with|and|the|for|smartphone|mobile|phone|true|earbuds?)\b/gi;
+/** Two queries: a cleaned full name, then just brand + model up to the model number. */
+export function searchQueries(name, brand, variant) {
+  const base = String(name).replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const clean = base.replace(FLUFF, ' ').replace(/\s+/g, ' ').trim();
+  const words = base.split(' ');
+  const firstNum = words.findIndex(w => /\d/.test(w));
+  const short = firstNum >= 0 ? words.slice(0, firstNum + 1).join(' ') : clean;
+  const withBrand = q => (brand && !q.toLowerCase().includes(brand.toLowerCase()) ? `${brand} ${q}` : q);
+  const qs = [withBrand([clean, variant].filter(Boolean).join(' ')), withBrand(short)];
+  return [...new Set(qs.map(q => q.trim()).filter(Boolean))];
+}
+
+// Brand sites whose search isn't at /search?q=
+const BRAND_SEARCH = {
+  'samsung.com': q => `https://www.samsung.com/in/search/?searchvalue=${q}`,
+  'apple.com': q => `https://www.apple.com/in/search/${q}?src=globalnav`,
+  'oneplus.in': q => `https://www.oneplus.in/search?keyword=${q}`,
+  'mi.com': q => `https://www.mi.com/in/search/${q}`,
+  'boat-lifestyle.com': q => `https://www.boat-lifestyle.com/search?q=${q}`,
+  'sony.co.in': q => `https://www.sony.co.in/search?query=${q}`,
+  'shopatsc.com': q => `https://shopatsc.com/search?q=${q}`,
+};
+
+export function storeSearchUrl(store, query, officialSite) {
+  const q = encodeURIComponent(query);
+  switch (store) {
+    case 'amazon': return `https://www.amazon.in/s?k=${q}`;
+    case 'flipkart': return `https://www.flipkart.com/search?q=${q}`;
+    case 'croma': return `https://www.croma.com/searchB?q=${q}%3Arelevance&text=${q}`;
+    case 'reliance': return `https://www.reliancedigital.in/products?q=${q}`;
+    case 'official': {
+      if (!officialSite) return null;
+      const f = BRAND_SEARCH[officialSite];
+      return f ? f(q) : `https://${officialSite}/search?q=${q}`;
+    }
+  }
+  return null;
+}

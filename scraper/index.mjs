@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isProductUrl, urlKey, pickBest, toNumber, extractOffers } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -94,10 +94,41 @@ async function debugDump(page, name) {
   } catch { /* best effort */ }
 }
 
+// Amazon sometimes answers a new browser with a one-button "Continue shopping"
+// page before the real one. Pressing it sets a cookie and lets us through.
+async function passInterstitial(page, url) {
+  const body = await page.evaluate(() => (document.body?.innerText || '').slice(0, 2000)).catch(() => '');
+  if (!/continue shopping|click the button below to continue/i.test(body) || body.length > 1500) return false;
+  const btn = page.locator('button:has-text("Continue shopping"), a:has-text("Continue shopping"), input[type="submit"]').first();
+  if (await btn.count()) {
+    await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), btn.click({ timeout: 5000 }).catch(() => {})]);
+    await sleep(1500);
+  }
+  await open(page, url);
+  return true;
+}
+
+async function pageSnippet(page) {
+  const title = await page.title().catch(() => '');
+  const text = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)).catch(() => '');
+  return `title "${title.slice(0, 70)}" · text "${text}"`;
+}
+
+// What happened on each store, written to the GitHub run page (public) so
+// failures can be diagnosed without logs.
+const diag = [];
+
 // ── Finding the product on a search page ───────────────────────────────────
-async function findOnSearch(page, store, job) {
+async function findOnSearch(page, store, job, officialSite) {
   const links = await page.evaluate(() => {
     const out = [];
+    // Amazon result cards carry the product code directly — works whatever the link format.
+    for (const c of document.querySelectorAll('[data-asin]')) {
+      const asin = c.getAttribute('data-asin');
+      if (!/^[A-Z0-9]{10}$/.test(asin || '')) continue;
+      const t = c.querySelector('h2')?.closest('a')?.innerText || [...c.querySelectorAll('h2')].map(h => h.innerText).join(' ') || '';
+      out.push({ href: `https://www.amazon.in/dp/${asin}`, text: t.trim().slice(0, 300) });
+    }
     for (const a of document.querySelectorAll('a[href]')) {
       const card = a.closest('[data-component-type="s-search-result"], [data-id], li, article') || a.parentElement;
       const heading = card?.querySelector('h2, h3, [title]');
@@ -110,12 +141,18 @@ async function findOnSearch(page, store, job) {
   const byKey = new Map();
   for (const l of links) {
     if (!isProductUrl(store, l.href)) continue;
+    if (store === 'official') {
+      try { const h = new URL(l.href).hostname; if (!(h === officialSite || h.endsWith('.' + officialSite) || officialSite.endsWith(h.replace(/^www\./, '')))) continue; } catch { continue; }
+    }
     const k = urlKey(store, l.href);
     const prev = byKey.get(k);
     if (!prev || l.text.length > prev.text.length) byKey.set(k, l);
   }
   const name = [job.name, job.variant].filter(Boolean).join(' ');
-  return pickBest(name, job.brand, [...byKey.values()]);
+  const cands = [...byKey.values()];
+  const hit = pickBest(name, job.brand, cands);
+  const top = cands.map(c => ({ text: c.text, score: titleScore(name, job.brand, c.text) })).sort((a, b) => b.score - a.score)[0];
+  return { hit, count: cands.length, top };
 }
 
 // ── Reading a product page ─────────────────────────────────────────────────
@@ -209,20 +246,44 @@ async function scrapeStore(context, job, s) {
   try {
     let url = s.url;
     if (!url) {
-      if (!s.searchUrl || s.store === 'official') return { store: s.store, status: 'not_found', note: 'No product URL — paste one in Market Prices' };
-      await open(page, s.searchUrl);
-      const blocked = await isBlocked(page);
-      if (blocked) { await debugDump(page, tag + '-search'); return { store: s.store, status: 'blocked', note: `Search page: ${blocked}` }; }
-      const hit = await findOnSearch(page, s.store, job);
-      if (!hit) { await debugDump(page, tag + '-search'); return { store: s.store, status: 'not_listed' }; }
-      url = hit.href;
+      if (s.store === 'official' && !s.officialSite) return { store: s.store, status: 'not_found', note: 'No brand site known — paste the product URL in Market Prices' };
+      let why = '';
+      for (const q of searchQueries(job.name, job.brand, job.variant)) {
+        const su = storeSearchUrl(s.store, q, s.officialSite);
+        if (!su) break;
+        await open(page, su);
+        if (s.store === 'amazon') await passInterstitial(page, su);
+        const blocked = await isBlocked(page);
+        if (blocked) {
+          await debugDump(page, tag + '-search');
+          diag.push({ store: s.store, product: job.name, what: `search blocked (${blocked})`, detail: await pageSnippet(page) });
+          return { store: s.store, status: 'blocked', note: `Search page: ${blocked}` };
+        }
+        const f = await findOnSearch(page, s.store, job, s.officialSite);
+        if (f.hit) { url = f.hit.href; break; }
+        why = `query "${q}": ${f.count} product links` + (f.top ? `, best "${f.top.text.slice(0, 60)}" (${f.top.score.toFixed(2)})` : '');
+      }
+      if (!url) {
+        await debugDump(page, tag + '-search');
+        diag.push({ store: s.store, product: job.name, what: 'not found in search', detail: `${why} · ${await pageSnippet(page)}` });
+        return { store: s.store, status: 'not_listed' };
+      }
     }
     await open(page, url);
+    if (s.store === 'amazon') await passInterstitial(page, url);
     const blocked = await isBlocked(page);
-    if (blocked) { await debugDump(page, tag); return { store: s.store, url, status: 'blocked', note: blocked }; }
+    if (blocked) {
+      await debugDump(page, tag);
+      diag.push({ store: s.store, product: job.name, what: `product page blocked (${blocked})`, detail: await pageSnippet(page) });
+      return { store: s.store, url, status: 'blocked', note: blocked };
+    }
     await expandOffers(page, s.store);
     const r = await page.evaluate(readPage, s.store);
-    if (!r.price) { await debugDump(page, tag); return { store: s.store, url: page.url(), status: 'not_found', note: 'Price not found on page' }; }
+    if (!r.price) {
+      await debugDump(page, tag);
+      diag.push({ store: s.store, product: job.name, what: 'no price on product page', detail: `${page.url()} · ${await pageSnippet(page)}` });
+      return { store: s.store, url: page.url(), status: 'not_found', note: 'Price not found on page' };
+    }
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers: extractOffers(r.text),
@@ -230,6 +291,7 @@ async function scrapeStore(context, job, s) {
     };
   } catch (e) {
     await debugDump(page, tag + '-error');
+    diag.push({ store: s.store, product: job.name, what: 'error', detail: String(e.message || e).slice(0, 200) });
     return { store: s.store, url: s.url, status: 'error', note: String(e.message || e).slice(0, 200) };
   } finally {
     await page.close().catch(() => {});
@@ -246,13 +308,18 @@ async function main() {
 
   const { browser, context } = await launch();
   const stats = { ok: 0, blocked: 0, not_listed: 0, not_found: 0, error: 0 };
+  const perStore = {};
   let next = 0;
   const worker = async () => {
     while (next < jobs.length) {
       const job = jobs[next++];
       const stores = job.stores.filter(s => !ONLY.length || ONLY.includes(s.store));
       const results = await Promise.all(stores.map(s => scrapeStore(context, job, s)));
-      results.forEach(r => { stats[r.status] = (stats[r.status] || 0) + 1; });
+      results.forEach(r => {
+        stats[r.status] = (stats[r.status] || 0) + 1;
+        const ps = (perStore[r.store] ||= {});
+        ps[r.status] = (ps[r.status] || 0) + 1;
+      });
       const line = results.map(r => `${r.store}:${r.status === 'ok' ? '₹' + r.price + (r.offers?.length ? `+${r.offers.length}off` : '') : r.status}`).join('  ');
       console.log(`• ${job.name}\n    ${line}`);
       try { await api(`/price-watch/bot/results/${job.itemId}`, { method: 'POST', body: JSON.stringify({ results }) }); }
@@ -262,6 +329,23 @@ async function main() {
   await Promise.all(Array.from({ length: Math.min(ITEM_CONCURRENCY, jobs.length) }, worker));
   await browser.close();
   console.log(`\nDone in ${Math.round((Date.now() - t0) / 1000)}s —`, stats);
+  report(perStore);
+}
+
+/** Per-store results + example failures, as GitHub annotations and a job summary (both public). */
+function report(perStore) {
+  const esc = s => String(s).replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, ' ');
+  for (const [store, c] of Object.entries(perStore)) {
+    const counts = Object.entries(c).map(([k, v]) => `${k} ${v}`).join(', ');
+    const ex = diag.filter(d => d.store === store).slice(0, 2).map(d => `[${d.product}] ${d.what}: ${d.detail}`).join(' || ');
+    console.log(`::notice title=${store}::${esc(counts + (ex ? ' || ' + ex : '')).slice(0, 900)}`);
+  }
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const rows = Object.entries(perStore).map(([st, c]) => `| ${st} | ${Object.entries(c).map(([k, v]) => `${k}: ${v}`).join(', ')} |`).join('\n');
+    const fails = diag.slice(0, 40).map(d => `| ${d.store} | ${d.product} | ${d.what} | ${String(d.detail).replace(/\|/g, '/').slice(0, 300)} |`).join('\n');
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+      `## Price scraper\n\n| Store | Results |\n|---|---|\n${rows}\n\n### Failures\n\n| Store | Product | What | Detail |\n|---|---|---|---|\n${fails}\n`);
+  }
 }
 
 export { launch, scrapeStore, readPage };
