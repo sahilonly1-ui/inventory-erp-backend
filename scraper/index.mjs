@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
@@ -586,6 +587,12 @@ function report(perStore) {
 }
 
 export { launch, scrapeStore, readPage, findViaSitemap };
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+// Run when started directly (`node index.mjs`), not when imported by tests.
+// fileURLToPath handles Windows paths ("C:\\…") and spaces correctly.
+const isMain = (() => {
+  try { return !!process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === path.resolve(fileURLToPath(import.meta.url)).toLowerCase(); }
+  catch { return false; }
+})();
+if (isMain && !process.env.SCRAPER_TEST) {
   (WATCH ? watch() : main()).catch(e => { console.error('FAILED:', e.message); process.exit(1); });
 }
