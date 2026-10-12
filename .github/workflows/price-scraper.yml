@@ -13,7 +13,7 @@ on:
         default: '0'
       limit:
         description: 'Max products this run'
-        default: '150'
+        default: '300'
 
 # One run at a time; a run requested while one is going waits and then picks
 # up everything queued in the meantime.
@@ -24,7 +24,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     # Browsers come pre-installed in this image — saves ~1.5 min per run.
     container:
       image: mcr.microsoft.com/playwright:v1.49.1-noble
@@ -44,8 +44,8 @@ jobs:
           HOME: /root
           AGENT_KEY: ${{ secrets.PRICE_AGENT_KEY }}
           QUEUED_ONLY: ${{ github.event.inputs.queued_only || '0' }}
-          LIMIT: ${{ github.event.inputs.limit || '150' }}
-          CONCURRENCY: '4'
+          LIMIT: ${{ github.event.inputs.limit || '300' }}
+          CONCURRENCY: '6'
       - name: Keep screenshots of pages that failed
         if: always()
         uses: actions/upload-artifact@v4
