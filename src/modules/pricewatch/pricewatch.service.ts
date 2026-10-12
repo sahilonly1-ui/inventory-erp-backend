@@ -215,14 +215,38 @@ export async function requestMany(ids: string[], replace = true) {
   if (replace) await x(`UPDATE price_watch_items SET requested=false WHERE requested=true`);
   const n = await x(
     `UPDATE price_watch_items SET requested=true WHERE id = ANY($1::text[]) AND active=true AND dismissed=false`, clean);
-  return { queued: Number(n) };
+  const dispatched = await dispatchScraper(true);
+  return { queued: Number(n), dispatched };
+}
+
+/**
+ * Starts the GitHub Actions scraper right away (instead of waiting for its
+ * schedule). Optional: needs GITHUB_DISPATCH_TOKEN on Render — a fine-grained
+ * token with "Actions: read and write" on the backend repo. Never throws.
+ */
+export async function dispatchScraper(queuedOnly: boolean): Promise<boolean> {
+  const token = process.env.GITHUB_DISPATCH_TOKEN;
+  if (!token) return false;
+  const repo = process.env.GITHUB_SCRAPER_REPO || 'sahilonly1-ui/inventory-erp-backend';
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/price-scraper.yml/dispatches`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'itecharena-erp' },
+      body: JSON.stringify({ ref: 'main', inputs: { queued_only: queuedOnly ? '1' : '0' } }),
+    });
+    if (!r.ok) logger.warn({ status: r.status, body: (await r.text()).slice(0, 200) }, 'price-watch: scraper dispatch failed');
+    return r.ok;
+  } catch (e: any) {
+    logger.warn({ err: e?.message }, 'price-watch: scraper dispatch failed');
+    return false;
+  }
 }
 
 /** The next batch for the agent: requested first, then starred/stalest due items. */
-export async function agentJobs(opts: { itemId?: string; limit?: number; requestedOnly?: boolean } = {}) {
+export async function agentJobs(opts: { itemId?: string; limit?: number; requestedOnly?: boolean; maxLimit?: number } = {}) {
   const s = await getSettings();
   await maybeSync();
-  const limit = Math.min(25, Math.max(1, opts.limit ?? s.batchSize));
+  const limit = Math.min(opts.maxLimit ?? 25, Math.max(1, opts.limit ?? s.batchSize));
   const items = opts.itemId
     ? await q(`SELECT i.*, p.ean FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId" WHERE i.id=$1`, opts.itemId)
     : opts.requestedOnly
@@ -326,7 +350,7 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   };
 }
 
-export async function agentSubmit(itemId: string, results: AgentResult[]) {
+export async function agentSubmit(itemId: string, results: AgentResult[], method = 'chrome-agent') {
   const item = (await q(
     `SELECT i.*, p."sellingPrice"::float AS "ourPrice" FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId" WHERE i.id=$1`, itemId))[0];
   if (!item) throw new NotFoundError('Item not found');
@@ -353,9 +377,9 @@ export async function agentSubmit(itemId: string, results: AgentResult[]) {
     if (v.status !== 'not_listed') {
       await x(
         `INSERT INTO price_snapshots("itemId",store,url,status,price,mrp,"inStock",title,offers,"effectivePrice","bestOffer","priceText",notes,method)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,'chrome-agent')`,
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`,
         itemId, r.store, v.url ?? link?.url ?? null, v.status, v.price ?? null, v.mrp ?? null, v.inStock ?? null, v.title ?? null,
-        JSON.stringify(v.offers ?? []), v.effectivePrice ?? null, v.bestOffer ?? null, v.priceText ?? null, (v.notes ?? []).join(' · ') || null);
+        JSON.stringify(v.offers ?? []), v.effectivePrice ?? null, v.bestOffer ?? null, v.priceText ?? null, (v.notes ?? []).join(' · ') || null, method);
     }
     saved.push({ store: r.store, status: v.status, notes: v.notes });
   }
@@ -368,6 +392,7 @@ export async function agentSubmit(itemId: string, results: AgentResult[]) {
 export async function status() {
   const [r] = await q(`SELECT
       (SELECT value->>'at' FROM price_watch_settings WHERE key='lastAgentRun') AS "lastAgentRun",
+      ${process.env.GITHUB_DISPATCH_TOKEN ? 'true' : 'false'} AS "instantRun",
       (SELECT COUNT(*)::int FROM price_watch_items WHERE requested AND active AND NOT dismissed) AS requested`);
   return r;
 }

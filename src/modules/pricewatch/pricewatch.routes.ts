@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
 import { ForbiddenError, UnauthorizedError, BadRequestError } from '../../common/errors';
@@ -8,6 +9,22 @@ import { STORE_KEYS, StoreKey } from './stores';
 import * as svc from './pricewatch.service';
 
 const router = Router();
+
+// ── Scraper bot (GitHub Actions / showroom PC) ─────────────────────────────
+// Authenticated by a shared secret instead of a user login: the PRICE_AGENT_KEY
+// env var on Render, sent as the x-agent-key header. It can only read the job
+// list and post price results — nothing else in the ERP.
+const botAuth = (req: Request, _res: Response, next: NextFunction) => {
+  const key = process.env.PRICE_AGENT_KEY || '';
+  const got = String(req.headers['x-agent-key'] ?? '');
+  if (key.length < 20) return next(new ForbiddenError('Price bot not configured (PRICE_AGENT_KEY)'));
+  if (got.length !== key.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(key))) return next(new UnauthorizedError('Bad agent key'));
+  next();
+};
+router.get('/bot/jobs', botAuth, asyncHandler(async (req, res) =>
+  ok(res, await svc.agentJobs({ limit: Number(req.query.limit) || 100, maxLimit: 300, requestedOnly: req.query.queued === '1' }))));
+router.post('/bot/results/:itemId', botAuth, asyncHandler(async (req, res) =>
+  ok(res, await svc.agentSubmit(req.params.itemId, req.body?.results, 'scraper'))));
 
 // Signed-in administrators only (the wildcard permission). Market pricing is
 // commercial information — staff roles never see it, whatever else they hold.
