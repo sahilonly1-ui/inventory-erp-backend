@@ -1,8 +1,8 @@
 name: Price scraper
 
 # Reads live prices + bank offers and posts them to the ERP (Market Prices).
-# Started from the ERP ("Refresh prices" / ⟳ per product), 5× a day on schedule
-# (IST 9:30, 12:30, 15:30, 18:30, 21:30), or by hand from the Actions tab.
+# Backup for the showroom-PC scraper: started from the ERP when that PC is
+# offline, 5× a day on schedule (IST 9:30, 12:30, 15:30, 18:30, 21:30), or by hand.
 on:
   schedule:
     - cron: '0 4,7,10,13,16 * * *'
@@ -15,8 +15,6 @@ on:
         description: 'Max products this run'
         default: '300'
 
-# One run at a time; a run requested while one is going waits and then picks
-# up everything queued in the meantime.
 concurrency:
   group: price-scraper
   cancel-in-progress: false
@@ -25,10 +23,6 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Browsers come pre-installed in this image — saves ~1.5 min per run.
-    container:
-      image: mcr.microsoft.com/playwright:v1.49.1-noble
-      options: --ipc=host
     defaults:
       run:
         working-directory: scraper
@@ -36,13 +30,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: scraper
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: scraper/package.json
+      # No browser download: GitHub's runner already has Google Chrome installed.
       - run: npm install --no-audit --no-fund --prefer-offline
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
       - run: node lib.test.mjs
       - name: Scrape
         run: node index.mjs
         env:
-          HOME: /root
           AGENT_KEY: ${{ secrets.PRICE_AGENT_KEY }}
+          CHANNEL: chrome
           QUEUED_ONLY: ${{ github.event.inputs.queued_only || '0' }}
           LIMIT: ${{ github.event.inputs.limit || '300' }}
           CONCURRENCY: '6'
