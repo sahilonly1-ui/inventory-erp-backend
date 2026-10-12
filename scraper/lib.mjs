@@ -42,6 +42,11 @@ const tokens = s => norm(s).split(' ').filter(Boolean);
  * digit (model numbers: "120", "s26", "160w") must appear exactly, and the
  * brand must appear, otherwise 0: a PartyBox 110 is never a PartyBox 120.
  */
+// Spec tokens ("160w", "5000mah", "120hz") are often left out of listing titles,
+// so they don't decide a match. Model numbers ("120", "s26", "3rd") and storage
+// ("256gb") do.
+const SPEC = /^\d+(w|watt|watts|mah|hz|mm|cm|inch|in|v|a|h|hr|hrs|hours|k)$/;
+
 export function titleScore(name, brand, candidate) {
   const cand = norm(candidate);
   if (!cand) return 0;
@@ -52,27 +57,28 @@ export function titleScore(name, brand, candidate) {
   if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) return 0;
 
   const all = tokens(name);
-  const digitTokens = all.filter(t => /\d/.test(t));
-  for (const t of digitTokens) {
-    // "110" must not match inside "1100"; "s26" not inside "s26ultra" is fine only if the name says ultra too.
-    const re = new RegExp(`(^|[^0-9])${t}(?![0-9])`);
-    if (!re.test(cand) && !re.test(squashed)) return 0;
+  const has = t => new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(cand) || new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(squashed);
+  for (let i = 0; i < all.length; i++) {
+    const t = all[i];
+    if (!/\d/.test(t) || SPEC.test(t)) continue;
+    if (!has(t)) return 0;                       // model number must match exactly
+    // …and so must the word naming the line right before it: "Club 120" is not
+    // "PartyBox 120", "Encore 2" is not "Flip 2". Generic words are skipped.
+    const prev = all[i - 1];
+    if (prev && !/\d/.test(prev) && !STOP.has(prev) && prev.length > 1 && !squashed.includes(prev)) return 0;
   }
-  // A listing that names an extra model variant we didn't ask for ("Pro", "Ultra", "Max", "Plus", "Lite").
-  for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime']) {
+  for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
     if (tokens(candidate).includes(v) && !all.includes(v)) return 0;
   }
-  const words = all.filter(t => !/\d/.test(t) && !STOP.has(t) && t.length > 1);
-  if (!words.length) return digitTokens.length ? 1 : 0;
-  const hit = words.filter(w => squashed.includes(w)).length;
-  // Tie-break: a listing full of words our name doesn't have is less likely to be it.
-  const nameSquashed = norm(name).replace(/ /g, '');
+  const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);
+  const hit = words.length ? words.filter(w => squashed.includes(w)).length / words.length : 1;
+  // Tie-break only: a listing full of words our name doesn't have is less likely to be it.
   const candWords = tokens(candidate).filter(t => !/\d/.test(t) && !STOP.has(t) && t.length > 1);
-  const extra = candWords.length ? candWords.filter(w => !nameSquashed.includes(w)).length / candWords.length : 0;
-  return Math.max(0, hit / words.length - 0.3 * extra);
+  const extra = candWords.length ? candWords.filter(w => !nameN.replace(/ /g, '').includes(w)).length / candWords.length : 0;
+  return Math.max(0, 0.5 + 0.5 * hit - 0.15 * extra);
 }
 
-export function pickBest(name, brand, candidates, min = 0.5) {
+export function pickBest(name, brand, candidates, min = 0.55) {
   let best = null;
   for (const c of candidates) {
     const s = titleScore(name, brand, c.text);
@@ -102,7 +108,7 @@ const BANKS = [
   ['BHIM UPI', /\bbhim\b/i], ['Bajaj Finserv', /\bbajaj\b/i], ['Jio Finance', /\bjio ?finance\b/i],
 ];
 const OFFER_HINT = /(bank offer|cashback|instant discount|no cost emi|\bemi\b|credit card|debit card|\b(off|discount)\b.*(card|bank)|(card|bank).*\b(off|discount)\b)/i;
-const RUPEE = /(?:₹|rs\.?|inr)\s?([\d,]+(?:\.\d+)?)/gi;
+const RUPEE = /(?:₹|\brs\.?(?=\s?\d)|\binr(?=\s?\d))\s?([\d,]+(?:\.\d+)?)/gi;
 
 /** Picks out offer sentences from page text, joining a short line with its neighbours. */
 export function offerBlocks(text) {
@@ -140,12 +146,13 @@ export function parseOffer(text) {
   const nonEmi = /(non[- ]?emi|full swipe|one[- ]?time|without emi)/.test(lower);
   const mode = emi && nonEmi ? 'EMI & Full swipe' : nonEmi ? 'Full swipe' : emi ? (/(emi and non|emi & non|emi\/non)/.test(lower) ? 'EMI & Full swipe' : 'EMI') : null;
 
-  const pct = t.match(/(\d+(?:\.\d+)?)\s?%/);
-  const percent = pct ? Number(pct[1]) : null;
+  const pcts = [...t.matchAll(/(\d+(?:\.\d+)?)\s?%/g)].map(m => Number(m[1]));
+  // "5% back for Prime members, 3% for others": count what every customer gets.
+  const percent = !pcts.length ? null : (/prime/i.test(t) && pcts.length > 1 ? Math.min(...pcts) : pcts[0]);
   const rupees = [...t.matchAll(RUPEE)].map(m => ({ v: Number(m[1].replace(/,/g, '')), at: m.index }));
-  const minM = t.match(/(?:min(?:imum)?\.?(?:\s*(?:txn|transaction|purchase|order|cart))?(?:\s*(?:value|amount))?(?:\s*of)?|(?:orders?|purchases?|transactions?|txns?)\s*(?:value\s*)?(?:of|above|over|worth)|above)\s*:?\s*(?:₹|rs\.?|inr)?\s?([\d,]+)/i);
+  const minM = t.match(/(?:\bmin(?:imum)?\.?(?:\s*(?:txn|transaction|purchase|order|cart))?(?:\s*(?:value|amount))?(?:\s*of)?|(?:orders?|purchases?|transactions?|txns?)\s*(?:value\s*)?(?:of|above|over|worth)|above)\s*:?\s*(?:₹|rs\.?|inr)?\s?([\d,]+)/i);
   const minTxn = minM ? Number(minM[1].replace(/,/g, '')) : null;
-  const upTo = t.match(/(?:up\s?to|upto|max(?:imum)?(?: discount| cashback)?(?: of)?)\s*(?:₹|rs\.?|inr)\s?([\d,]+)/i);
+  const upTo = t.match(/(?:up\s?to|upto|\bmax(?:imum)?(?: discount| cashback)?(?: of)?)\s*(?:₹|\brs\.?|\binr)\s?([\d,]+)/i);
   let maxDiscount = upTo ? Number(upTo[1].replace(/,/g, '')) : null;
 
   let amount = null;
@@ -230,10 +237,48 @@ export function unwrapSearchLink(href) {
       if (v && v.startsWith('a1')) return Buffer.from(v.slice(2).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
     }
     if (/duckduckgo\.com$/.test(u.hostname) && u.searchParams.get('uddg')) return decodeURIComponent(u.searchParams.get('uddg'));
+    // Google: /url?q=<target>&… (older markup) — current markup links directly.
+    if (/(^|\.)google\.[a-z.]+$/.test(u.hostname) && u.pathname === '/url') return u.searchParams.get('q') || u.searchParams.get('url') || href;
+    // Yahoo: https://r.search.yahoo.com/_ylt=…/RU=<encoded url>/RK=2/RS=…
+    const ru = u.pathname.match(/\/RU=([^/]+)\/RK=/);
+    if (/yahoo\.com$/.test(u.hostname) && ru) return decodeURIComponent(ru[1]);
     return u.toString();
   } catch { return href; }
 }
 export function engineUrls(domain, query) {
   const q = encodeURIComponent(`site:${domain} ${query}`);
-  return [`https://www.bing.com/search?q=${q}&setlang=en-IN&cc=IN`, `https://html.duckduckgo.com/html/?q=${q}&kl=in-en`];
+  return [
+    `https://www.bing.com/search?q=${q}&setlang=en-IN&cc=IN`,
+    `https://in.search.yahoo.com/search?p=${q}`,
+    `https://search.brave.com/search?q=${q}&source=web`,
+    `https://html.duckduckgo.com/html/?q=${q}&kl=in-en`,
+  ];
+}
+
+// ── Brand sitemaps ─────────────────────────────────────────────────────────
+/** <loc> URLs from a sitemap or sitemap index. */
+export function sitemapLocs(xml) {
+  return [...String(xml).matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map(m => m[1].replace(/&amp;/g, '&'));
+}
+/** Words in a product URL's slug, for matching against our product name. */
+export function slugText(url) {
+  try {
+    const u = new URL(url);
+    return decodeURIComponent(u.pathname).replace(/\.(html?|aspx?)$/i, '').replace(/[\/_\-+.]+/g, ' ').trim();
+  } catch { return ''; }
+}
+/** Child sitemaps likely to hold products (skip blogs, pages, images). */
+export function productSitemaps(locs) {
+  const xmls = locs.filter(l => /\.xml(\.gz)?(\?|$)/i.test(l) && !/\.gz/i.test(l));
+  const prod = xmls.filter(l => /product/i.test(l));
+  return (prod.length ? prod : xmls.filter(l => !/(blog|page|post|image|video|categor|collection|article|store-?locator)/i.test(l))).slice(0, 12);
+}
+
+// ── Google: one search finds the product on every store at once ───────────
+export function googleUrl(query) {
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&gl=in&num=20&pws=0`;
+}
+/** Google's "unusual traffic" wall. */
+export function isGoogleBlock(url, text) {
+  return /google\.[a-z.]+\/sorry\//i.test(url) || /unusual traffic from your computer|not a robot/i.test(text || '');
 }

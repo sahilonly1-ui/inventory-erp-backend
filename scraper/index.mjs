@@ -9,10 +9,13 @@
 // Env: AGENT_KEY (required) · API_BASE · LIMIT (products per run, default 100)
 //      QUEUED_ONLY=1 (only products queued with "Check prices") · STORES=amazon,flipkart
 //      HEADLESS=0 (watch it work) · CHROME_PATH (custom Chromium) · DEBUG_DIR (default ./debug)
+//      WATCH=1 — stay running (showroom PC): poll the ERP every few seconds and
+//                refresh anything queued within seconds; also keeps due items fresh.
+//      CHANNEL=chrome — use the Google Chrome already installed on the machine.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -20,6 +23,7 @@ const LIMIT = Number(process.env.LIMIT || 300);
 const ONLY = (process.env.STORES || '').split(',').map(s => s.trim()).filter(Boolean);
 const DEBUG = process.env.DEBUG_DIR || path.resolve('debug');
 const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 6);
+const WATCH = process.env.WATCH === '1';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 if (!KEY && !process.env.SCRAPER_TEST) { console.error('AGENT_KEY is not set'); process.exit(1); }
@@ -75,8 +79,8 @@ async function open(page, url, { waitPrice = true } = {}) {
   if (!waitPrice) { await sleep(400); return; }
   await page.keyboard.press('Escape').catch(() => {}); // Flipkart's login popup
   // Wait for a rupee amount to render (Croma / Reliance draw prices with JS).
-  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 10_000 }).catch(() => {});
-  await sleep(500);
+  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 8_000 }).catch(() => {});
+  await sleep(300);
 }
 
 async function isBlocked(page) {
@@ -125,8 +129,12 @@ const diag = [];
 // ── Politeness: at most N pages open per store at once ────────────────────
 // Bursts of parallel requests are what get a server blocked. Amazon is the
 // strictest, so it gets one page at a time with a short gap.
-const STORE_SLOTS = { amazon: 1, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2 };
-const GAP_MS = { amazon: 1200, engine: 800 };
+const STORE_SLOTS = WATCH
+  ? { amazon: 2, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2, google: 1 }   // home connection: Amazon is less strict
+  : { amazon: 1, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2, google: 1 };
+// Google is searched one query at a time with a human-ish pause, which is what
+// keeps it from showing its "unusual traffic" page.
+const GAP_MS = WATCH ? { amazon: 400, engine: 300, google: 2500 } : { amazon: 1200, engine: 800, google: 4000 };
 const slots = {};
 async function withSlot(key, fn) {
   const s = (slots[key] ||= { busy: 0, waiters: [] });
@@ -142,7 +150,13 @@ async function withSlot(key, fn) {
 // ── Finding the product through Bing / DuckDuckGo ─────────────────────────
 // "site:amazon.in JBL PartyBox 130" finds the product page without touching the
 // store's own search, which is what stores block first.
-async function findViaEngine(page, store, job, domain) {
+async function findViaEngine(_page, store, job, domain) {
+  // Its own tab: a store page that is still loading or failed can't interrupt it.
+  const page = await _page.context().newPage();
+  try { return await engineSearch(page, store, job, domain); }
+  finally { await page.close().catch(() => {}); }
+}
+async function engineSearch(page, store, job, domain) {
   const queries = searchQueries(job.name, job.brand, job.variant);
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   let why = '';
@@ -162,10 +176,108 @@ async function findViaEngine(page, store, job, domain) {
       }
       const hit = pickBest(name, job.brand, [...byKey.values()]);
       if (hit) return { hit };
-      why += `${new URL(url).hostname}: ${byKey.size} links; `;
+      const host = new URL(url).hostname.replace(/^(www|html|in)\./, '');
+      why += `${host}: ${byKey.size} links` + (byKey.size ? '' : ` ("${(await page.title().catch(() => '')).slice(0, 40)}")`) + '; ';
     } catch (e) { why += `${url.slice(8, 30)}: ${e.message.slice(0, 60)}; `; }
   }
   return { hit: null, why };
+}
+
+// ── Google: one search per product, links for every store at once ─────────
+// Tries the EAN first (exact when a store shows it), then the product name. If
+// Google shows its captcha, it is skipped for 30 minutes and the other methods
+// (sitemap, store search, Bing/Yahoo/Brave) carry on.
+let googleBlockedUntil = 0;
+async function googleDiscover(context, job, stores) {
+  const want = (stores || []).filter(s => !s.url && (s.store !== 'official' || (s.officialSite && !MARKETPLACES.includes(s.officialSite))));
+  if (!want.length || Date.now() < googleBlockedUntil || process.env.GOOGLE === '0') return {};
+  const domainOf = s => (s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store]);
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  const queries = [...(job.ean && /^\d{8,14}$/.test(job.ean) ? [job.ean] : []), searchQueries(job.name, job.brand, job.variant)[0]];
+  const found = {};
+  const page = await context.newPage();
+  try {
+    for (const q of queries) {
+      const missing = want.filter(s => !found[s.store]);
+      if (!missing.length) break;
+      await withSlot('google', () => open(page, googleUrl(q), { waitPrice: false }));
+      const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 3000)).catch(() => '');
+      if (isGoogleBlock(page.url(), text)) {
+        googleBlockedUntil = Date.now() + 30 * 60_000;
+        diag.push({ store: 'google', product: job.name, what: 'google captcha — paused 30 min', detail: page.url().slice(0, 80) });
+        break;
+      }
+      const links = await page.evaluate(() => [...document.querySelectorAll('a[href]')].map(a => ({
+        href: a.href, text: (a.querySelector('h3')?.innerText || a.innerText || '').trim().slice(0, 300),
+      })));
+      const isEanQuery = q === job.ean;
+      for (const s of missing) {
+        const domain = domainOf(s);
+        const cands = [];
+        for (const l of links) {
+          const href = unwrapSearchLink(l.href);
+          if (!isProductUrl(s.store, href)) continue;
+          try { const h = new URL(href).hostname.replace(/^www\./, ''); if (!(h === domain || h.endsWith('.' + domain))) continue; } catch { continue; }
+          cands.push({ href, text: l.text.replace(/\s*[-|:]\s*(amazon\.in|flipkart|croma|reliance digital)[\s\S]*$/i, '') });
+        }
+        // An EAN hit is exact even when the title is worded differently; still
+        // require the model number + brand check so a wrong page is never used.
+        const hit = pickBest(name, job.brand, cands, isEanQuery ? 0.5 : 0.55);
+        if (hit) found[s.store] = hit.href;
+      }
+    }
+  } catch (e) {
+    diag.push({ store: 'google', product: job.name, what: 'google error', detail: String(e.message).slice(0, 120) });
+  } finally { await page.close().catch(() => {}); }
+  return found;
+}
+
+// ── Brand sites: read the product list from the sitemap ────────────────────
+// Brand sites (in.jbl.com, samsung.com …) often block or JS-render their search,
+// but publish every product URL in sitemap.xml. Loaded once per site per run.
+const sitemapCache = new Map();
+function loadSitemap(context, domain) {
+  if (!sitemapCache.has(domain)) sitemapCache.set(domain, (async () => {
+    const get = async u => {
+      try {
+        const r = await context.request.get(u, { timeout: 30_000, headers: { 'User-Agent': UA, Accept: 'application/xml,text/xml,text/plain,*/*' } });
+        return r.ok() ? await r.text() : '';
+      } catch { return ''; }
+    };
+    const base = `${process.env.SITEMAP_PROTO || 'https'}://${domain}`;
+    const robots = await get(`${base}/robots.txt`);
+    let roots = [...robots.matchAll(/^\s*sitemap:\s*(\S+)/gim)].map(m => m[1]).filter(u => u.includes(domain.replace(/^www\./, '')));
+    if (!roots.length) roots = [`${base}/sitemap_index.xml`, `${base}/sitemap.xml`];
+    const urls = new Set();
+    for (const root of roots.slice(0, 4)) {
+      const xml = await get(root);
+      const locs = sitemapLocs(xml);
+      if (!locs.length) continue;
+      const children = /<sitemapindex/i.test(xml) ? productSitemaps(locs) : [];
+      if (children.length) {
+        for (const c of children) {
+          const cx = await get(c);
+          // A second level of index (Shopify: sitemap.xml → sitemap_products_1.xml).
+          const cl = sitemapLocs(cx);
+          if (/<sitemapindex/i.test(cx)) for (const g of productSitemaps(cl).slice(0, 6)) sitemapLocs(await get(g)).forEach(u => urls.add(u));
+          else cl.forEach(u => urls.add(u));
+          if (urls.size > 60_000) break;
+        }
+      } else locs.forEach(u => urls.add(u));
+      if (urls.size) break;
+    }
+    return [...urls].filter(u => !/\.(jpg|jpeg|png|webp|gif|pdf)(\?|$)/i.test(u));
+  })());
+  return sitemapCache.get(domain);
+}
+
+async function findViaSitemap(context, job, domain) {
+  const urls = await loadSitemap(context, domain);
+  if (!urls.length) return { hit: null, why: 'sitemap: none; ' };
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  const cands = urls.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` }));
+  const hit = pickBest(name, job.brand, cands);
+  return hit ? { hit } : { hit: null, why: `sitemap: ${urls.length} urls, no match; ` };
 }
 
 // ── Finding the product on a search page ───────────────────────────────────
@@ -302,8 +414,18 @@ async function scrapeStore(context, job, s) {
       }
       const domain = s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store];
       let why = '';
-      // Amazon blocks its own search for cloud servers, so go through Bing first.
-      if (s.store === 'amazon') {
+      // 1. Google (shared by all stores of this product — one search, not five).
+      const g = await (job._google ||= googleDiscover(context, job, job.stores));
+      if (g[s.store]) url = g[s.store];
+      else if (Date.now() < googleBlockedUntil) why += 'google: paused (captcha); ';
+      else why += 'google: no match; ';
+      // 2. Brand sites: the sitemap — no search page, no bot checks.
+      if (!url && s.store === 'official') {
+        const m = await findViaSitemap(context, job, domain);
+        if (m.hit) url = m.hit.href; else why += m.why;
+      }
+      // 3. Amazon blocks its own search for cloud servers, so the other engines next.
+      if (!url && s.store === 'amazon') {
         const e = await findViaEngine(page, s.store, job, domain);
         if (e.hit) url = e.hit.href; else why += 'engines: ' + e.why;
       }
@@ -311,7 +433,8 @@ async function scrapeStore(context, job, s) {
         for (const q of searchQueries(job.name, job.brand, job.variant)) {
           const su = storeSearchUrl(s.store, q, s.officialSite);
           if (!su) break;
-          const blocked = await withSlot(s.store, async () => {
+          let blocked;
+          try { blocked = await withSlot(s.store, async () => {
             await open(page, su);
             if (s.store === 'amazon') await passInterstitial(page, su);
             // Croma / Reliance render results with JS after the page shell.
@@ -319,7 +442,8 @@ async function scrapeStore(context, job, s) {
               await page.waitForSelector('a[href*="/p/"], a[href*="/product/"]', { timeout: 12_000 }).catch(() => {});
             }
             return isBlocked(page);
-          });
+          }); } catch (e) { blocked = `error: ${String(e.message).slice(0, 50)}`; }
+          // A failed or blocked store search falls through to the search engines.
           if (blocked) { why += ` store search blocked (${blocked});`; break; }
           const f = await findOnSearch(page, s.store, job, s.officialSite);
           if (f.hit) { url = f.hit.href; break; }
@@ -372,20 +496,14 @@ async function scrapeStore(context, job, s) {
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
-async function main() {
-  const t0 = Date.now();
-  const qs = `?limit=${LIMIT}${process.env.QUEUED_ONLY === '1' ? '&queued=1' : ''}`;
-  const jobs = await api('/price-watch/bot/jobs' + qs);
-  console.log(`${jobs.length} product(s) to check`);
-  if (!jobs.length) return;
-
-  const { browser, context } = await launch();
+async function runJobs(context, jobs, mode) {
   const stats = { ok: 0, blocked: 0, not_listed: 0, not_found: 0, error: 0 };
   const perStore = {};
   let next = 0;
   const worker = async () => {
     while (next < jobs.length) {
       const job = jobs[next++];
+      const t = Date.now();
       const stores = job.stores.filter(s => !ONLY.length || ONLY.includes(s.store));
       const results = await Promise.all(stores.map(s => scrapeStore(context, job, s)));
       results.forEach(r => {
@@ -394,20 +512,66 @@ async function main() {
         ps[r.status] = (ps[r.status] || 0) + 1;
       });
       const line = results.map(r => `${r.store}:${r.status === 'ok' ? '₹' + r.price + (r.offers?.length ? `+${r.offers.length}off` : '') : r.status}`).join('  ');
-      console.log(`• ${job.name}\n    ${line}`);
-      try { await api(`/price-watch/bot/results/${job.itemId}`, { method: 'POST', body: JSON.stringify({ results }) }); }
+      console.log(`• ${job.name} (${Math.round((Date.now() - t) / 1000)}s)\n    ${line}`);
+      try { await api(`/price-watch/bot/results/${job.itemId}?worker=${mode}`, { method: 'POST', body: JSON.stringify({ results }) }); }
       catch (e) { console.log(`    ! could not save: ${e.message}`); }
     }
   };
   await Promise.all(Array.from({ length: Math.min(ITEM_CONCURRENCY, jobs.length) }, worker));
+  return { stats, perStore };
+}
+
+async function main() {
+  const t0 = Date.now();
+  const qs = `?limit=${LIMIT}${process.env.QUEUED_ONLY === '1' ? '&queued=1' : ''}&worker=cloud`;
+  const jobs = await api('/price-watch/bot/jobs' + qs);
+  console.log(`${jobs.length} product(s) to check`);
+  if (!jobs.length) return;
+  const { browser, context } = await launch();
+  const { stats, perStore } = await runJobs(context, jobs, 'cloud');
   await browser.close();
   console.log(`\nDone in ${Math.round((Date.now() - t0) / 1000)}s —`, stats);
   report(perStore);
 }
 
+// Always-on mode for the showroom PC. Queued products ("Refresh" in the ERP) are
+// picked up within ~4 s; when idle it refreshes a few due products at a time.
+async function watch() {
+  console.log('Price scraper running in watch mode — keep this window open. Ctrl+C to stop.');
+  let b = null, lastDue = 0, idleSince = Date.now();
+  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN || 10) * 60_000;
+  for (;;) {
+    try {
+      let jobs = await api('/price-watch/bot/jobs?queued=1&limit=12&worker=local', {}, 2);
+      let kind = 'requested';
+      if (!jobs.length && Date.now() - lastDue > DUE_EVERY) {
+        jobs = await api('/price-watch/bot/jobs?limit=20&worker=local', {}, 2); kind = 'due'; lastDue = Date.now();
+      }
+      if (!jobs.length) {
+        // Close the browser after 10 idle minutes to free memory; reopen on demand.
+        if (b && Date.now() - idleSince > 10 * 60_000) { await b.browser.close().catch(() => {}); b = null; }
+        await sleep(4000);
+        continue;
+      }
+      if (!b || !b.browser.isConnected()) b = await launch();
+      const t0 = Date.now();
+      console.log(`\n${new Date().toLocaleTimeString('en-IN')} — ${jobs.length} ${kind} product(s)`);
+      await runJobs(b.context, jobs, 'local');
+      console.log(`  done in ${Math.round((Date.now() - t0) / 1000)}s`);
+      idleSince = Date.now();
+    } catch (e) {
+      console.log(`! ${e.message} — retrying in 15 s`);
+      if (b && !b.browser.isConnected()) b = null;
+      await sleep(15_000);
+    }
+  }
+}
+
 /** Per-store results + example failures, as GitHub annotations and a job summary (both public). */
 function report(perStore) {
   const esc = s => String(s).replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, ' ');
+  const g = diag.filter(d => d.store === 'google');
+  if (g.length) console.log(`::warning title=google::${esc(g.slice(0, 2).map(d => `[${d.product}] ${d.what}`).join(' || '))}`);
   for (const [store, c] of Object.entries(perStore)) {
     const counts = Object.entries(c).map(([k, v]) => `${k} ${v}`).join(', ');
     const ex = diag.filter(d => d.store === store).slice(0, 2).map(d => `[${d.product}] ${d.what}: ${d.detail}`).join(' || ');
@@ -421,7 +585,7 @@ function report(perStore) {
   }
 }
 
-export { launch, scrapeStore, readPage };
+export { launch, scrapeStore, readPage, findViaSitemap };
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
-  main().catch(e => { console.error('FAILED:', e.message); process.exit(1); });
+  (WATCH ? watch() : main()).catch(e => { console.error('FAILED:', e.message); process.exit(1); });
 }

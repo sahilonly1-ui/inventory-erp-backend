@@ -54,3 +54,27 @@ assert.equal(titleScore('Amazon Fire TV Stick HD', 'Amazon', 'PVTAR Remote for A
 assert.equal(titleScore('JBL Flip 6', 'JBL', 'Hard Carry Case for JBL Flip 6'), 0);
 assert.equal(titleScore('Samsung Galaxy S25', 'Samsung', 'Tempered Glass Samsung Galaxy S25'), 0);
 console.log('accessory rules ok');
+// regressions from run #4
+const amz = parseOffer('Cashback Get 5% back with Amazon Pay ICICI Bank credit card for Prime members. 3% back for others. Not applicable on Amazon business transactions.');
+assert.equal(amz.percent, 3, JSON.stringify(amz)); assert.equal(amz.amount, null); assert.equal(amz.maxDiscount, null); assert.equal(amz.offerType, 'cashback');
+assert.ok(titleScore('JBL Party Box 720 Party Speakar 800W (Black)', 'JBL', 'JBL Partybox 720, Auracast, Futuristic Light Show, 800W, IPX4 Splashproof, 15 Hrs Playtime') >= 0.55);
+assert.equal(titleScore('JBL Party Box Club 120', 'JBL', 'JBL Partybox 120, AI Sound Boost, Futuristic Light'), 0);
+assert.ok(titleScore('JBL Party Box 110 Portable Party Speaker (Black) 160W', 'JBL', 'JBL PartyBox 110 Party Speaker with Lightshow') >= 0.55);
+assert.equal(titleScore('JBL Encore 2 Party Box', 'JBL', 'JBL PartyBox Encore Essential 2'), 0);
+assert.ok(titleScore('JBL Encore 2 Party Box', 'JBL', 'JBL PartyBox Encore 2 with 2 Wireless Mics') >= 0.55);
+assert.equal(titleScore('Samsung Galaxy S26 8GB 256GB', 'Samsung', 'Samsung Galaxy S26 5G (8GB, 512GB)'), 0);
+console.log('run-4 regressions ok');
+import { sitemapLocs, slugText, productSitemaps } from './lib.mjs';
+assert.equal(unwrapSearchLink('https://r.search.yahoo.com/_ylt=Aw/RV=2/RE=1/RO=10/RU=' + encodeURIComponent(target) + '/RK=2/RS=abc-'), target);
+assert.deepEqual(sitemapLocs('<urlset><url><loc>https://in.jbl.com/PARTYBOX-120.html</loc></url><url><loc> https://in.jbl.com/a?x=1&amp;y=2 </loc></url></urlset>'), ['https://in.jbl.com/PARTYBOX-120.html', 'https://in.jbl.com/a?x=1&y=2']);
+assert.equal(slugText('https://in.jbl.com/bluetooth-speakers/PARTYBOX-120.html'), 'bluetooth speakers PARTYBOX 120');
+assert.ok(titleScore('JBL Party Box 120', 'JBL', 'JBL ' + slugText('https://in.jbl.com/PARTYBOX-120.html')) >= 0.55);
+assert.equal(titleScore('JBL Party Box 120', 'JBL', 'JBL ' + slugText('https://in.jbl.com/PARTYBOX-CLUB-120.html')), 0);
+assert.deepEqual(productSitemaps(['https://x.com/sitemap_0-product.xml', 'https://x.com/sitemap_0-content.xml']), ['https://x.com/sitemap_0-product.xml']);
+console.log('sitemap helpers ok');
+import { googleUrl, isGoogleBlock } from './lib.mjs';
+assert.equal(unwrapSearchLink('https://www.google.com/url?q=' + encodeURIComponent(target) + '&sa=U'), target);
+assert.ok(googleUrl('6925281986451').includes('gl=in'));
+assert.ok(isGoogleBlock('https://www.google.com/sorry/index?continue=x', ''));
+assert.ok(isGoogleBlock('https://www.google.com/search?q=x', 'Our systems have detected unusual traffic from your computer network.'));
+console.log('google helpers ok');
