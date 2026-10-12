@@ -19,7 +19,7 @@ const KEY = process.env.AGENT_KEY;
 const LIMIT = Number(process.env.LIMIT || 100);
 const ONLY = (process.env.STORES || '').split(',').map(s => s.trim()).filter(Boolean);
 const DEBUG = process.env.DEBUG_DIR || path.resolve('debug');
-const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 2);
+const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 if (!KEY && !process.env.SCRAPER_TEST) { console.error('AGENT_KEY is not set'); process.exit(1); }
@@ -74,8 +74,8 @@ async function open(page, url) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   await page.keyboard.press('Escape').catch(() => {}); // Flipkart's login popup
   // Wait for a rupee amount to render (Croma / Reliance draw prices with JS).
-  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 15_000 }).catch(() => {});
-  await sleep(1200);
+  await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 10_000 }).catch(() => {});
+  await sleep(500);
 }
 
 async function isBlocked(page) {
