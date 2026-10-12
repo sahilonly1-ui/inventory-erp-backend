@@ -229,6 +229,8 @@ export async function setLink(itemId: string, store: StoreKey, url: string | nul
 // the jobs listed there, visits each store and posts what it saw back here.
 // No paid API or scraping service is involved.
 
+const NOT_LISTED_RETRY_DAYS = 3;   // re-check "not sold on this store" every few days
+
 export async function requestRefresh(id: string, rediscover = false) {
   if (rediscover) await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND "lockedByUser"=false`, id);
   await x(`UPDATE price_watch_items SET requested=true WHERE id=$1`, id);
@@ -337,6 +339,9 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
       .map(st => {
         const l = links.find(r => r.itemId === i.id && r.store === st.key);
         if (l?.notListed && l.lockedByUser) return null; // admin said: not sold here
+        // Searched recently and not sold there — skip for a few days instead of
+        // searching again every run ("Re-find pages" clears this immediately).
+        if (l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < NOT_LISTED_RETRY_DAYS * 86_400_000) return null;
         return {
           store: st.key, label: st.label,
           url: l?.url ?? null,
@@ -380,7 +385,7 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   if (!price) return { status: st === 'blocked' ? 'blocked' : 'not_found', url, notes: [...notes, r.note || 'No price reported'] };
   if (!url) return { status: 'unverified', url: null, price, notes: [...notes, 'No valid product URL, so the price was not trusted'] };
 
-  let status: 'ok' | 'suspect' = 'ok';
+  let status: 'ok' | 'suspect' = st === 'suspect' ? 'suspect' : 'ok';
   if (expected && expected > 0 && (price < expected * 0.5 || price > expected * 1.8)) {
     status = 'suspect'; notes.push(`Far from expected ~₹${Math.round(expected).toLocaleString('en-IN')}`);
   }
