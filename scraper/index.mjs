@@ -381,21 +381,29 @@ function readPage(store) {
 
   if (store === 'amazon') {
     res.title = txt(document.querySelector('#productTitle')) || null;
-    const box = document.querySelector('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_desktop, #corePrice_desktop');
-    const pay = box?.querySelector('.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, .a-price .a-offscreen');
+    // The first price block that actually holds a price (Amazon moves it around).
+    const box = [...document.querySelectorAll('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_desktop, #corePrice_desktop, #apex_offerDisplay_desktop, #buybox, #desktop_buybox')]
+      .find(b => b.querySelector('.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, .a-price .a-offscreen, .a-price-whole, #price_inside_buybox'));
+    const pay = box?.querySelector('.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, #price_inside_buybox, .a-price .a-offscreen');
     const whole = box?.querySelector('.priceToPay .a-price-whole, .a-price-whole');
     const pt = txt(pay) || (whole ? '₹' + txt(whole) : '');
     if (pt) { res.price = num(pt); res.priceText = pt; }
     const mrpEl = box?.querySelector('.basisPrice .a-offscreen, .a-price.a-text-price .a-offscreen');
     if (mrpEl) res.mrp = num(txt(mrpEl));
-    const av = txt(document.querySelector('#availability')).toLowerCase();
+    // innerText = only what is visible. Amazon keeps hidden "Currently unavailable"
+    // templates in the page; textContent would read them.
+    const vis = el => (el?.innerText || '').replace(/\s+/g, ' ').trim();
+    const av = vis(document.querySelector('#availability')).toLowerCase();
     if (av) res.inStock = !/(currently unavailable|out of stock)/.test(av);
+    const shown = el => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const canBuy = shown(document.querySelector('#add-to-cart-button')) || shown(document.querySelector('#buy-now-button'));
+    if (canBuy) res.inStock = true;
     // No buy box ("No featured offers available", "Currently unavailable", only
     // "See All Buying Options"): Amazon isn't selling it right now. Any other ₹
     // on the page belongs to variants, ads or "customers also viewed".
     const buyBox = document.querySelector('#buybox, #desktop_buybox, #rightCol');
-    const bbText = txt(buyBox).toLowerCase();
-    if (!res.price || /no featured offers available|currently unavailable/.test(bbText)) {
+    const bbText = vis(buyBox).toLowerCase();
+    if (!res.price || (!canBuy && /no featured offers available|currently unavailable/.test(bbText))) {
       if (/no featured offers available|currently unavailable|see all buying options/.test(bbText + ' ' + av)) res.inStock = false;
       res.price = null; res.priceText = null; res.mrp = null;
     }
