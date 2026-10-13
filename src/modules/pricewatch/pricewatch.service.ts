@@ -341,7 +341,8 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
         if (l?.notListed && l.lockedByUser) return null; // admin said: not sold here
         // Searched recently and not sold there — skip for a few days instead of
         // searching again every run ("Re-find pages" clears this immediately).
-        if (l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < NOT_LISTED_RETRY_DAYS * 86_400_000) return null;
+        // A product refreshed by hand ("requested") is searched on every store again.
+        if (!i.requested && l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < NOT_LISTED_RETRY_DAYS * 86_400_000) return null;
         return {
           store: st.key, label: st.label,
           url: l?.url ?? null,
@@ -413,7 +414,10 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
     return { ...clean, value: value > price * 0.5 ? 0 : value };
   }).filter(o => o.summary || o.bank);
 
-  const best = [...offers].sort((a, b) => b.value - a.value)[0];
+  // "Best deal" is what a customer pays on a full (non-EMI) payment; EMI-only
+  // savings are still listed under the store but don't set the effective price.
+  const best = offers.filter(o => !/^emi$/i.test(String(o.mode ?? '').trim()) && o.offerType !== 'no_cost_emi')
+    .sort((a, b) => b.value - a.value)[0];
   const effectivePrice = best && best.value > 0 ? price - best.value : null;
   const bestOffer = best && best.value > 0 ? [best.bank, best.cardType, best.mode].filter(Boolean).join(' · ') : null;
   if (r.note) notes.push(String(r.note).slice(0, 300));
@@ -429,7 +433,7 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
   const item = (await q(
     `SELECT i.*, p."sellingPrice"::float AS "ourPrice" FROM price_watch_items i LEFT JOIN products p ON p.id=i."productId" WHERE i.id=$1`, itemId))[0];
   if (!item) throw new NotFoundError('Item not found');
-  if (!Array.isArray(results) || !results.length) throw new BadRequestError('No results');
+  if (!Array.isArray(results)) throw new BadRequestError('results must be a list');
   const prevGood = await q(
     `SELECT DISTINCT ON (store) store, price::float FROM price_snapshots WHERE "itemId"=$1 AND status='ok' ORDER BY store, "fetchedAt" DESC`, itemId);
   const links = await q(`SELECT * FROM price_watch_links WHERE "itemId"=$1`, itemId);
@@ -449,7 +453,7 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
          WHERE price_watch_links."lockedByUser"=false`,
         itemId, r.store, v.url ?? null, v.status === 'not_listed');
     }
-    if (v.status !== 'not_listed') {
+    {
       await x(
         `INSERT INTO price_snapshots("itemId",store,url,status,price,mrp,"inStock",title,offers,"effectivePrice","bestOffer","priceText",notes,method)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`,
