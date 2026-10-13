@@ -451,8 +451,14 @@ function readPage(store) {
   // Only the product part of the page counts (not "similar products" below).
   if (store !== 'amazon') {
     const head = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 12000).toLowerCase();
-    const unavailable = /(currently unavailable|out of stock|sold out|notify me|coming soon)/.test(head);
-    const buyable = /(add to cart|buy now)/.test(head);
+    // Buttons decide, not words: offer text like "Buy now, pay later" must not
+    // make an unavailable product look buyable.
+    const btns = [...document.querySelectorAll('button, a, input[type="submit"], [role="button"]')]
+      .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top + window.scrollY < 2500; })
+      .map(b => ({ t: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().toLowerCase(), off: b.disabled || b.getAttribute('aria-disabled') === 'true' }));
+    const buyable = btns.some(b => !b.off && /^(add to cart|buy now|add to bag|buy)$/.test(b.t));
+    const notifyBtn = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
+    const unavailable = notifyBtn || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
     if (unavailable && !buyable) res.inStock = false;
     else if (res.inStock === null && buyable) res.inStock = true;
   }
@@ -474,7 +480,8 @@ async function scrapeStore(context, job, s) {
       const domain = s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store];
       let why = '';
       // 1. Google (shared by all stores of this product — one search, not five).
-      const g = await (job._google ||= googleDiscover(context, job, job.stores));
+      // A retry after a wrong saved page searches Google again just for this store.
+      const g = s._retried ? await googleDiscover(context, job, [s]) : await (job._google ||= googleDiscover(context, job, job.stores));
       if (g[s.store]) url = g[s.store];
       else if (Date.now() < googleBlockedUntil) why += 'google: paused (captcha); ';
       else why += 'google: no match; ';
@@ -518,6 +525,7 @@ async function scrapeStore(context, job, s) {
         const e = await findViaEngine(page, s.store, job, domain);
         if (e.hit) url = e.hit.href; else why += ' engines: ' + e.why;
       }
+      if (url && s._bad && urlKey(s.store, url) === urlKey(s.store, s._bad)) url = null;
       if (!url) {
         await debugDump(page, tag + '-search');
         const blockedAll = /blocked/.test(why) && !/links/.test(why);
@@ -539,6 +547,18 @@ async function scrapeStore(context, job, s) {
     }
     await expandOffers(page, s.store);
     const r = await page.evaluate(readPage, s.store);
+    // Is this page really our product? A link saved earlier (or picked from a
+    // search) can point at a sibling model — SB550 for SB590, SB180 for Bar 2.1
+    // Essential. A link the admin pasted is trusted as is.
+    const wanted = [job.name, job.variant].filter(Boolean).join(' ');
+    if (!s.locked && r.title && titleScore(wanted, job.brand, r.title) < 0.55) {
+      diag.push({ store: s.store, product: job.name, what: 'page is a different product', detail: `${r.title.slice(0, 80)} · ${page.url()}` });
+      if (s.url && !s._retried) {
+        await page.close().catch(() => {});
+        return scrapeStore(context, job, { ...s, url: null, _retried: true, _bad: page.url() });
+      }
+      return { store: s.store, status: 'not_listed', note: `Closest page was a different product: ${r.title.slice(0, 80)}` };
+    }
     if (!r.price && r.amazonNoBuyBox) {
       return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: 'Not sold on Amazon right now (no featured offer / unavailable)' };
     }

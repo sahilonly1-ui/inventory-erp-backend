@@ -118,3 +118,17 @@ assert.equal(nce.offerType, 'no_cost_emi'); assert.equal(nce.amount, null);
 const emiMonth = parseOffer('HDFC Bank Credit Card EMI from ₹2,375/month, Flat ₹1,500 off');
 assert.equal(emiMonth.amount, 1500, JSON.stringify(emiMonth));
 console.log('emi amounts ok');
+// soundbar mix-ups seen in the ERP
+const ess = 'JBL Bar 2.1 Essential Soundber with wireless Subwoofer (Black)';
+assert.equal(titleScore(ess, 'JBL', 'JBL Cinema SB180, Wireless Subwoofer 220 W Bluetooth Soundbar (Black, 2.1 Channel)'), 0);
+assert.equal(titleScore(ess, 'JBL', 'JBL CINEMA SB595 440W Bluetooth Soundbar with Remote (True Dolby Atmos, 3.1.2 Channel, Black)'), 0);
+assert.ok(titleScore(ess, 'JBL', 'JBL Bar 2.1 Essential Dolby Digital with Powerful Bass, Wireless Subwoofer') >= 0.55);
+assert.equal(titleScore('JBL Cinema SB590 Soundbar', 'JBL', 'JBL Cinema SB550 3.1 channel with Wireless Subwoofer, HDMI 250 W'), 0);
+assert.ok(titleScore('JBL Cinema SB590 Soundbar', 'JBL', 'JBL Cinema SB590 Deep Bass, Dolby Atmos Soundbar with Wireless Subwoofer') >= 0.55);
+assert.ok(titleScore('JBL Bar 500 Pro 5.1 Soundbar With Wireless Subwoofer (Black)', 'JBL', 'JBL 500 Pro 5.1 Channel Sound Bar with Dolby Atmos, Black') >= 0.55);
+assert.equal(titleScore('JBL Bar 500 Pro 5.1 Soundbar With Wireless Subwoofer (Black)', 'JBL', 'JBL Bar 500 MK2 5.1 Channel Soundbar'), 0);
+assert.ok(titleScore('JBL Party Box 720 Party Speakar 800W (Black)', 'JBL', 'JBL PartyBox 720 - Loudest Battery-Powered Party Speaker') >= 0.55);
+console.log('distinctive-word rules ok');
+assert.ok(titleScore('JBL Party Box 720 Party Speakar 800W (Black)', 'JBL', 'JBL PartyBox 720 - Loudest Battery-Powered Party Speaker with Superior Pro Sound and a Futuristic lightshow (Black)') >= 0.55);
+assert.equal(titleScore('JBL Bar 500 Soundbar', 'JBL', 'JBL Bar 500 Pro 5.1 Soundbar'), 0);
+console.log('variant proximity ok');

@@ -24,6 +24,12 @@ export function urlKey(store, href) {
 }
 
 // ── Matching a search result to our product ────────────────────────────────
+// Words that describe a category, not a model — they never decide a match.
+const GENERIC = new Set(['soundbar', 'sound', 'subwoofer', 'woofer', 'channel', 'dolby', 'atmos', 'home', 'theatre', 'theater', 'surround',
+  'speakers', 'earbuds', 'earphones', 'headphones', 'headphone', 'tws', 'true', 'smart', 'watch', 'smartwatch', 'tv', 'led', 'oled', 'qled',
+  'inch', 'inches', 'cm', 'display', 'deep', 'bass', 'stereo', 'audio', 'music', 'waterproof', 'ultra', 'portable', 'party', 'karaoke',
+  'microphone', 'mic', 'mics', 'noise', 'cancelling', 'canceling', 'anc', 'hdmi', 'earc', 'optical', 'bluetooth', 'wireless', 'wired', 'mobile', 'tablet',
+  '5g', '4g', 'dual', 'sim', 'ram', 'rom', 'storage', 'memory', 'eco']);
 const STOP = new Set(['with', 'and', 'the', 'for', 'of', 'in', 'by', 'new', 'latest', 'edition', 'version', 'speaker', 'speakers',
   'portable', 'bluetooth', 'wireless', 'wifi', 'wi', 'fi', 'smartphone', 'mobile', 'phone', 'android', 'india', 'black', 'white',
   'blue', 'grey', 'gray', 'red', 'green', 'silver', 'gold', 'party', 'box']);
@@ -60,7 +66,10 @@ export function titleScore(name, brand, candidate) {
   if (NOT_NEW.test(cand)) return 0;
   if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) return 0;
 
-  const all = tokens(name);
+  // "2.1", "5.1", "3.1.2" (channels) are specs, not model numbers.
+  const nameNoChannels = String(name).replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ');
+  const candTokensAll = tokens(cand);
+  const all = tokens(nameNoChannels);
   const has = t => new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(cand) || new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(squashed);
   for (let i = 0; i < all.length; i++) {
     const t = all[i];
@@ -73,13 +82,26 @@ export function titleScore(name, brand, candidate) {
   }
   // A model variant we didn't ask for ("S26 Ultra", "Clip 5 Pro") — but not when
   // it is part of a hyphenated adjective ("Ultra-Portable", "Max-Bass").
-  const rawLow = String(candidate).toLowerCase();
+  // Only counts next to the model number ("S26 Ultra", "Clip 5 Pro", "Encore
+  // Essential 2") — "Superior Pro Sound" further along the title is just marketing.
+  const rawToks = String(candidate).toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) || [];
+  const modelNums = all.filter(t => /\d/.test(t) && !SPEC.test(t));
+  const numAt = rawToks.map((t, i) => (modelNums.some(n => t === n || t.endsWith(n)) ? i : -1)).filter(i => i >= 0);
   for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
     if (all.includes(v)) continue;
-    if (new RegExp(`(^|[^a-z0-9-])${v}(?![a-z0-9-])`).test(rawLow)) return 0;
+    const near = numAt.length
+      ? rawToks.some((t, i) => t === v && numAt.some(d => i >= d - 1 && i <= d + 2))
+      : rawToks.includes(v);
+    if (near) return 0;
   }
+  // Distinctive words ("Essential", "Cinema", "Bar", "Boombox") identify the model:
+  // all must be present (one may be missing/misspelt when the name has 3 or more).
+  const brandN = norm(brand || '').replace(/ /g, '');
+  const distinctive = [...new Set(all.filter(t => !/\d/.test(t) && !isGenericWord(t) && t.length > 2 && t !== brandN))];
+  const missing = distinctive.filter(w => !wordFound(w, candTokensAll, squashed)).length;
+  if (missing > (distinctive.length >= 3 ? 1 : 0)) return 0;
   const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);
-  const hit = words.length ? words.filter(w => squashed.includes(w)).length / words.length : 1;
+  const hit = words.length ? words.filter(w => wordFound(w, candTokensAll, squashed)).length / words.length : 1;
   // Tie-break only: a listing full of words our name doesn't have is less likely to be it.
   const candWords = tokens(candidate).filter(t => !/\d/.test(t) && !STOP.has(t) && t.length > 1);
   const extra = candWords.length ? candWords.filter(w => !nameN.replace(/ /g, '').includes(w)).length / candWords.length : 0;
@@ -334,4 +356,28 @@ export function parseAmazonPanel(text, mode, price) {
   }
   const seen = new Set();
   return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
+}
+
+// ── Typo-tolerant word match ("Speakar" ~ "speaker", "Soundber" ~ "soundbar") ──
+function editDistance(a, b) {
+  if (Math.abs(a.length - b.length) > 2) return 3;
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+export function wordFound(word, candTokens, squashed) {
+  if (squashed.includes(word)) return true;
+  const tol = word.length >= 7 ? 2 : word.length >= 5 ? 1 : 0;
+  return tol > 0 && candTokens.some(t => editDistance(word, t) <= tol);
+}
+
+/** A category word, or a misspelling of one ("Speakar", "Soundber"). */
+function isGenericWord(w) {
+  if (STOP.has(w) || GENERIC.has(w)) return true;
+  if (w.length < 5) return false;
+  const tol = w.length >= 7 ? 2 : 1;
+  for (const g of [...STOP, ...GENERIC]) if (g.length >= 5 && editDistance(w, g) <= tol) return true;
+  return false;
 }
