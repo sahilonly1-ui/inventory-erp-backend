@@ -346,6 +346,7 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
         return {
           store: st.key, label: st.label,
           url: l?.url ?? null,
+          locked: !!l?.lockedByUser,   // pasted by the admin — never second-guessed
           searchUrl: l?.url ? null : searchUrl(st.key, query, i.brand),
           officialSite: st.key === 'official' ? officialDomains(i.brand)[0] ?? null : undefined,
         };
