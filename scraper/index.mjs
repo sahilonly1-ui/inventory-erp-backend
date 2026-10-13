@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -336,6 +336,51 @@ async function expandOffers(page, store) {
   } catch { /* fine */ }
 }
 
+/**
+ * Amazon "Save Extra with N offers" layout (what a signed-out browser gets).
+ * Each offer line has a "See All"/"Details" popup whose content Amazon loads from
+ * a URL written in the page (data-a-modal). Fetching those URLs from the page
+ * gives every bank offer with its terms — no clicking, works for every product.
+ */
+async function amazonSoppOffers(page, price) {
+  const texts = await page.evaluate(async () => {
+    const out = { lines: [], popups: [] };
+    // Each visible offer line, full text (Amazon truncates the visible copy).
+    for (const el of document.querySelectorAll('#soppATF_feature_div .a-truncate-full, #sopp-primary-ingress-0 .a-truncate-full')) {
+      out.lines.push((el.textContent || '').replace(/\s+/g, ' ').trim());
+    }
+    const toText = html => {
+      const d = new DOMParser().parseFromString(html, 'text/html');
+      d.querySelectorAll('script, style').forEach(n => n.remove());
+      d.querySelectorAll('br, p, div, li, tr, h1, h2, h3, h4, h5, section').forEach(n => n.append('\n'));
+      return (d.body?.textContent || '').replace(/[ \t\u00a0]+/g, ' ').replace(/\s*\n\s*/g, '\n');
+    };
+    const urls = [];
+    for (const el of document.querySelectorAll('[data-a-modal]')) {
+      try {
+        const m = JSON.parse(el.getAttribute('data-a-modal'));
+        if (m.url && /viewName:(bankOffer|cashback)SecondaryView/.test(m.url) && !urls.includes(m.url)) urls.push(m.url);
+      } catch { /* not JSON */ }
+    }
+    for (const u of urls.slice(0, 3)) {
+      try {
+        const r = await fetch(u, { credentials: 'include' });
+        if (r.ok) out.popups.push(toText(await r.text()));
+      } catch { /* blocked — the lines above still count */ }
+    }
+    return out;
+  }).catch(() => ({ lines: [], popups: [] }));
+  // Full popup lists first; the one-line summaries add anything they missed.
+  const offers = [];
+  const add = o => { if (!offers.some(x => x.bank === o.bank && x.cardType === o.cardType && x.offerType === o.offerType && x.amount === o.amount && x.percent === o.percent && x.maxDiscount === o.maxDiscount)) offers.push(o); };
+  for (const t of texts.popups) extractOffers(t).forEach(add);
+  for (const l of texts.lines) {
+    const o = parseOffer(l.replace(/\b(see all|details|shop items|sign up for free)\b/gi, ''));
+    if ((o.bank || o.offerType === 'cashback') && (o.amount || o.percent)) add(o);
+  }
+  return { offers, popupCount: texts.popups.length, lineCount: texts.lines.length };
+}
+
 /** Amazon: open "See all offers & discounts" and read exact savings, both tabs. */
 async function amazonPanelOffers(page, price) {
   try {
@@ -390,8 +435,9 @@ function readPage(store) {
     const whole = box?.querySelector('.priceToPay .a-price-whole, .a-price-whole');
     const pt = txt(pay) || (whole ? '₹' + txt(whole) : '');
     if (pt) { res.price = num(pt); res.priceText = pt; }
-    const mrpEl = box?.querySelector('.basisPrice .a-offscreen, .a-price.a-text-price .a-offscreen');
-    if (mrpEl) res.mrp = num(txt(mrpEl));
+    const mrpSel = '.basisPrice .a-offscreen, .a-price.a-text-price .a-offscreen, .apex-basisprice-offscreen-label, .apex-basisprice-value .a-offscreen';
+    const mrpEl = [box?.querySelector(mrpSel), document.querySelector('#centerCol ' + mrpSel.split(', ').join(', #centerCol '))].find(e => e && num(txt(e)));
+    if (mrpEl) res.mrp = num(txt(mrpEl).replace(/^[^\d₹]*/, ''));
     // innerText = only what is visible. Amazon keeps hidden "Currently unavailable"
     // templates in the page; textContent would read them.
     const vis = el => (el?.innerText || '').replace(/\s+/g, ' ').trim();
@@ -584,7 +630,10 @@ async function scrapeStore(context, job, s) {
     let offers;
     if (s.store === 'amazon') {
       const cards = parseAmazonCards(r.text);
-      offers = await amazonPanelOffers(page, r.price);
+      // Signed-out layout ("Save Extra with N offers") first — it is what the scraper
+      // normally sees; the signed-in "Payment offers" panel if that is shown instead.
+      const sopp = await amazonSoppOffers(page, r.price);
+      offers = sopp.offers.length ? sopp.offers : await amazonPanelOffers(page, r.price);
       for (const c of cards) {
         if (!offers.some(o => o.bank === c.bank && o.cardType === c.cardType && o.amount === c.amount && o.offerType === c.offerType)) offers.push(c);
       }

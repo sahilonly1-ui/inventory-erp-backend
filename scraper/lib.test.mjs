@@ -146,3 +146,10 @@ See all offers & discounts`);
 assert.deepEqual(cards.map(o => `${o.bank}|${o.cardType}|${o.offerType}|${o.mode}|${o.amount}`),
   ['SBI Card|Credit Card|instant_discount|EMI|4000', 'SBI Card|Credit Card|instant_discount|Full swipe|3250', 'Amazon Pay ICICI|Credit Card|cashback|Full swipe|1409']);
 console.log('amazon cards ok');
+const dc = parseOffer('Bank Offer (20): Additional Flat INR 500 Instant Discount on SBI Banks (DC full swipe) Cards Txn. Minimum purchase value INR 2490.00');
+assert.equal(dc.bank, 'SBI Card'); assert.equal(dc.amount, 500); assert.equal(dc.minTxn, 2490); assert.equal(dc.cardType, 'Debit Card'); assert.equal(dc.mode, 'Full swipe');
+const cb = parseOffer('Cashback: Get 5% back with Amazon Pay ICICI Bank credit card for Prime members. 3% back for others. Not applicable on EMI orders and Amazon business transactions.');
+assert.equal(cb.percent, 3); assert.equal(cb.mode, 'Full swipe'); assert.equal(cb.offerType, 'cashback');
+const pct = parseOffer('10% Instant Discount up to INR 3250 on SBI Credit Card Non EMI Txn. Minimum purchase value INR 5000');
+assert.equal(pct.percent, 10); assert.equal(pct.maxDiscount, 3250); assert.equal(pct.minTxn, 5000); assert.equal(pct.mode, 'Full swipe'); assert.equal(pct.cardType, 'Credit Card');
+console.log('amazon sopp texts ok');

@@ -165,15 +165,17 @@ export function parseOffer(text) {
 
   let offerType = 'other';
   if (/no cost emi/.test(lower)) offerType = 'no_cost_emi';
-  else if (/cashback/.test(lower)) offerType = 'cashback';
+  else if (/cashback|\d\s?% back\b|₹\s?[\d,]+ back\b/.test(lower)) offerType = 'cashback';
   else if (/exchange/.test(lower) && !bank) offerType = 'exchange';
   else if (/coupon/.test(lower) && !bank) offerType = 'coupon';
   else if (/(discount|\boff\b|save)/.test(lower)) offerType = 'instant_discount';
 
-  const credit = /credit/.test(lower), debit = /debit/.test(lower);
+  const credit = /credit|\bcc\b/.test(lower), debit = /debit|\bdc\b/.test(lower);
   const cardType = credit && debit ? 'Credit & Debit' : credit ? 'Credit Card' : debit ? 'Debit Card' : /\bupi\b/.test(lower) ? 'UPI' : null;
-  const emi = /\bemi\b/.test(lower) && offerType !== 'no_cost_emi';
-  const nonEmi = /(non[- ]?emi|full swipe|one[- ]?time|without emi)/.test(lower);
+  const notOnEmi = /not (applicable|valid|available) (on|for) emi/.test(lower);
+  // "Non EMI" is not an EMI mention.
+  const emi = /\bemi\b/.test(lower.replace(/non[- ]?emi/g, ' ')) && offerType !== 'no_cost_emi' && !notOnEmi;
+  const nonEmi = notOnEmi || /(non[- ]?emi|full swipe|one[- ]?time|without emi)/.test(lower);
   const mode = emi && nonEmi ? 'EMI & Full swipe' : nonEmi ? 'Full swipe' : emi ? (/(emi and non|emi & non|emi\/non)/.test(lower) ? 'EMI & Full swipe' : 'EMI') : null;
 
   const pcts = [...t.matchAll(/(\d+(?:\.\d+)?)\s?%/g)].map(m => Number(m[1]));
