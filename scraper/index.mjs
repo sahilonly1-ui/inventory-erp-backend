@@ -390,11 +390,21 @@ function readPage(store) {
     if (mrpEl) res.mrp = num(txt(mrpEl));
     const av = txt(document.querySelector('#availability')).toLowerCase();
     if (av) res.inStock = !/(currently unavailable|out of stock)/.test(av);
+    // No buy box ("No featured offers available", "Currently unavailable", only
+    // "See All Buying Options"): Amazon isn't selling it right now. Any other ₹
+    // on the page belongs to variants, ads or "customers also viewed".
+    const buyBox = document.querySelector('#buybox, #desktop_buybox, #rightCol');
+    const bbText = txt(buyBox).toLowerCase();
+    if (!res.price || /no featured offers available|currently unavailable/.test(bbText)) {
+      if (/no featured offers available|currently unavailable|see all buying options/.test(bbText + ' ' + av)) res.inStock = false;
+      res.price = null; res.priceText = null; res.mrp = null;
+    }
+    res.amazonNoBuyBox = !res.price;
   }
 
   // Generic: the biggest, un-struck rupee amount near the top of the page is
   // the selling price; a struck-through larger one next to it is the M.R.P.
-  if (!res.price) {
+  if (!res.price && store !== 'amazon') {
     const cands = [];
     for (const el of document.querySelectorAll('body *')) {
       if (el.children.length > 2) continue;
@@ -421,20 +431,33 @@ function readPage(store) {
       if (m) res.mrp = m.v;
     }
   }
-  if (res.ldPrice && (!res.price || (store !== 'amazon' && res.price < res.ldPrice * 0.5))) {
+  if (store !== 'amazon' && res.ldPrice && (!res.price || res.price < res.ldPrice * 0.5)) {
     res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice;   // the store's own structured price
   }
 
   if (!res.title) res.title = txt(document.querySelector('h1')) || document.title || null;
   const body = (document.body?.innerText || '');
-  if (res.inStock === null) {
-    const low = body.toLowerCase();
-    if (/(out of stock|sold out|currently unavailable|notify me when available)/.test(low)) res.inStock = false;
-    else if (/(add to cart|buy now)/.test(low)) res.inStock = true;
+  // Where "similar products / customers also viewed" rails begin: a line that is
+  // only that heading, in the lower part of the page. (Reliance has a "Similar
+  // Products" *button* right above its offers — that one must not cut anything.)
+  const railsAt = (() => {
+    const re = /^\s*(similar products|customers (also|who) (viewed|bought)[^\n]*|frequently bought together|you may also like|recommended for you|sponsored products[^\n]*)\s*$/gim;
+    let m;
+    while ((m = re.exec(body))) if (m.index > body.length * 0.35) return m.index;
+    return -1;
+  })();
+  // What the page shows beats the store's structured data: Reliance marks
+  // "Currently unavailable online … Notify Me" pages as InStock in its JSON-LD.
+  // Only the product part of the page counts (not "similar products" below).
+  if (store !== 'amazon') {
+    const head = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 12000).toLowerCase();
+    const unavailable = /(currently unavailable|out of stock|sold out|notify me|coming soon)/.test(head);
+    const buyable = /(add to cart|buy now)/.test(head);
+    if (unavailable && !buyable) res.inStock = false;
+    else if (res.inStock === null && buyable) res.inStock = true;
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
-  const cut = body.search(/(similar products|customers (also|who) (viewed|bought)|frequently bought|you may also like|recommended for you|sponsored products)/i);
-  res.text = (cut > 100 ? body.slice(0, cut) : body).slice(0, 60_000);
+  res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
   return res;
 }
 
@@ -516,6 +539,9 @@ async function scrapeStore(context, job, s) {
     }
     await expandOffers(page, s.store);
     const r = await page.evaluate(readPage, s.store);
+    if (!r.price && r.amazonNoBuyBox) {
+      return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: 'Not sold on Amazon right now (no featured offer / unavailable)' };
+    }
     if (!r.price) {
       await debugDump(page, tag);
       diag.push({ store: s.store, product: job.name, what: 'no price on product page', detail: `${page.url()} · ${await pageSnippet(page)}` });

@@ -157,7 +157,10 @@ export function parseOffer(text) {
   const pcts = [...t.matchAll(/(\d+(?:\.\d+)?)\s?%/g)].map(m => Number(m[1]));
   // "5% back for Prime members, 3% for others": count what every customer gets.
   const percent = !pcts.length ? null : (/prime/i.test(t) && pcts.length > 1 ? Math.min(...pcts) : pcts[0]);
-  const rupees = [...t.matchAll(RUPEE)].map(m => ({ v: Number(m[1].replace(/,/g, '')), at: m.index }));
+  // Amounts "per month" are EMI instalments, never a saving.
+  const rupees = [...t.matchAll(RUPEE)]
+    .filter(m => !/^\s*(\/-)?\s*(\/\s?m(o|onth)?\b|per month|p\.?m\.?\b|x\s?\d+\s?m)/i.test(t.slice(m.index + m[0].length, m.index + m[0].length + 16)))
+    .map(m => ({ v: Number(m[1].replace(/,/g, '')), at: m.index }));
   const minM = t.match(/(?:\bmin(?:imum)?\.?(?:\s*(?:txn|transaction|purchase|order|cart))?(?:\s*(?:value|amount))?(?:\s*of)?|(?:orders?|purchases?|transactions?|txns?)\s*(?:value\s*)?(?:of|above|over|worth)|above)\s*:?\s*(?:₹|rs\.?|inr)?\s?([\d,]+)/i);
   const minTxn = minM ? Number(minM[1].replace(/,/g, '')) : null;
   const upTo = t.match(/(?:up\s?to|upto|\bmax(?:imum)?(?: discount| cashback)?(?: of)?)\s*(?:₹|\brs\.?|\binr)\s?([\d,]+)/i);
@@ -173,6 +176,8 @@ export function parseOffer(text) {
     else amount = others[0] ?? null;
   } else if (!maxDiscount && others.length) maxDiscount = others[0];
 
+  // No-cost EMI is a facility, not a discount — unless it states the interest saved.
+  if (offerType === 'no_cost_emi' && !/(saving|save)/i.test(t)) { amount = null; maxDiscount = null; }
   return {
     bank, cardType, offerType, mode, amount, percent, maxDiscount, minTxn,
     summary: t.replace(/\b(T&C|Know more|View plans?|Details)\b/gi, '').replace(/\s+/g, ' ').trim().slice(0, 250),

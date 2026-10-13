@@ -113,3 +113,8 @@ assert.equal(parseAmazonPanel(panel, 'Full swipe', 45000).filter(o => o.minTxn =
 const flat = parseOffer('Flat ₹2,000 off on HDFC Bank Credit Card EMI');
 assert.equal(flat.amount, 2000);
 console.log('amazon panel ok');
+const nce = parseOffer('No Cost EMI Available from ₹14,999.83 /- per month.');
+assert.equal(nce.offerType, 'no_cost_emi'); assert.equal(nce.amount, null);
+const emiMonth = parseOffer('HDFC Bank Credit Card EMI from ₹2,375/month, Flat ₹1,500 off');
+assert.equal(emiMonth.amount, 1500, JSON.stringify(emiMonth));
+console.log('emi amounts ok');
