@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel } from './lib.mjs';
+import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -339,14 +339,16 @@ async function expandOffers(page, store) {
 /** Amazon: open "See all offers & discounts" and read exact savings, both tabs. */
 async function amazonPanelOffers(page, price) {
   try {
-    const link = page.getByText(/see all offers/i).first();
+    // Only a visible link — Amazon also keeps hidden copies of it in the page.
+    const link = page.getByText(/see all offers/i).filter({ visible: true }).first();
     if (!(await link.count())) return [];
-    await link.click({ timeout: 4000 });
-    await page.waitForFunction(() => /PAYMENT OFFERS|Save ₹/i.test(document.body.innerText), null, { timeout: 6000 }).catch(() => {});
+    await link.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await link.click({ timeout: 5000 });
+    await page.getByText(/^PAYMENT OFFERS$/i).filter({ visible: true }).first().waitFor({ timeout: 7000 }).catch(() => {});
     await sleep(800);
     const text = () => page.evaluate(() => document.body.innerText);
     const offers = parseAmazonPanel(await text(), 'Full swipe', price);
-    const emiTab = page.getByText(/^EMI plans$/i).first();
+    const emiTab = page.getByText(/^EMI plans$/i).filter({ visible: true }).first();
     if (await emiTab.count()) {
       await emiTab.click({ timeout: 3000 }).catch(() => {});
       await sleep(900);
@@ -577,8 +579,20 @@ async function scrapeStore(context, job, s) {
     }
     // Amazon: exact per-product savings from its Payment offers panel; the
     // headline "Upto ₹X" cards are only used if the panel can't be read.
-    const panel = s.store === 'amazon' ? await amazonPanelOffers(page, r.price) : [];
-    const offers = panel.length ? panel : extractOffers(r.text);
+    // Amazon: the "Payment offers" panel, else the offer cards on the page. Never
+    // Amazon's generic offer text — it mixes in other sellers' and EMI terms.
+    let offers;
+    if (s.store === 'amazon') {
+      const cards = parseAmazonCards(r.text);
+      offers = await amazonPanelOffers(page, r.price);
+      for (const c of cards) {
+        if (!offers.some(o => o.bank === c.bank && o.cardType === c.cardType && o.amount === c.amount && o.offerType === c.offerType)) offers.push(c);
+      }
+      if (!offers.length && /bank offer|cashback|no cost emi/i.test(r.text)) {
+        await debugDump(page, tag + '-offers');
+        diag.push({ store: 'amazon', product: job.name, what: 'offers on page but not readable', detail: page.url() });
+      }
+    } else offers = extractOffers(r.text);
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers,

@@ -381,3 +381,38 @@ function isGenericWord(w) {
   for (const g of [...STOP, ...GENERIC]) if (g.length >= 5 && editDistance(w, g) <= tol) return true;
   return false;
 }
+
+// ── Amazon offer cards on the product page (no click needed) ───────────────
+// "Buy for ₹43,749 / SBI Credit Card / -₹3,250"            → full-swipe saving
+// "No Cost EMI ₹3,583 x 12m / SBI Credit Card / -₹4,000"   → EMI saving
+// "Buy for ₹34,999 + cashback / Amazon Pay ICICI Bank Credit Card / ₹1,049" → cashback
+export function parseAmazonCards(text) {
+  const lines = String(text || '').split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const buy = lines[i].match(/^(?:or\s+)?buy for ₹\s?[\d,]+(?:\.\d+)?(\s*\+\s*cashback)?/i);
+    const emi = lines[i].match(/^no cost emi\b/i);
+    if (!buy && !emi) continue;
+    const block = lines.slice(i + 1, i + 5);
+    const cardIdx = block.findIndex(l => /(card|upi|bank)/i.test(l) && !/^(buy for|no cost emi)/i.test(l));
+    if (cardIdx < 0) continue;
+    let card = block[cardIdx];
+    let amt = card.match(/[-–]\s?₹\s?([\d,]+)\s*$/) || card.match(/₹\s?([\d,]+)\s*$/);
+    if (amt) card = card.slice(0, amt.index).trim();
+    else {
+      const next = block[cardIdx + 1] || '';
+      amt = next.match(/^[-–]?\s?₹\s?([\d,]+)(?:\.\d+)?$/);
+    }
+    if (!amt) continue;
+    const amount = Number(amt[1].replace(/,/g, ''));
+    const bank = BANKS.find(([, re]) => re.test(card))?.[0] ?? (/upi/i.test(card) ? 'UPI' : card.slice(0, 40));
+    const low = card.toLowerCase();
+    const cardType = /credit/.test(low) && /debit/.test(low) ? 'Credit & Debit' : /credit/.test(low) ? 'Credit Card' : /debit/.test(low) ? 'Debit Card' : /upi/.test(low) ? 'UPI' : null;
+    const cashback = !!(buy && buy[1]);
+    out.push({ bank, cardType, offerType: cashback ? 'cashback' : 'instant_discount', mode: emi ? 'EMI' : 'Full swipe',
+      amount, percent: null, maxDiscount: null, minTxn: null,
+      summary: `${cashback ? 'Cashback' : 'Save'} ₹${amount.toLocaleString('en-IN')} with ${card}${emi ? ' on No Cost EMI' : ''}` });
+  }
+  const seen = new Set();
+  return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
+}

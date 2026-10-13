@@ -132,3 +132,17 @@ console.log('distinctive-word rules ok');
 assert.ok(titleScore('JBL Party Box 720 Party Speakar 800W (Black)', 'JBL', 'JBL PartyBox 720 - Loudest Battery-Powered Party Speaker with Superior Pro Sound and a Futuristic lightshow (Black)') >= 0.55);
 assert.equal(titleScore('JBL Bar 500 Soundbar', 'JBL', 'JBL Bar 500 Pro 5.1 Soundbar'), 0);
 console.log('variant proximity ok');
+import { parseAmazonCards } from './lib.mjs';
+const cards = parseAmazonCards(`Offers
+No Cost EMI ₹3,583 x 12m
+SBI Credit Card -₹4,000
+Buy for ₹43,749
+SBI Credit Card
+-₹3,250
+Buy for ₹46,999 + cashback
+Amazon Pay ICICI Bank Credit Card
+₹1,409
+See all offers & discounts`);
+assert.deepEqual(cards.map(o => `${o.bank}|${o.cardType}|${o.offerType}|${o.mode}|${o.amount}`),
+  ['SBI Card|Credit Card|instant_discount|EMI|4000', 'SBI Card|Credit Card|instant_discount|Full swipe|3250', 'Amazon Pay ICICI|Credit Card|cashback|Full swipe|1409']);
+console.log('amazon cards ok');
