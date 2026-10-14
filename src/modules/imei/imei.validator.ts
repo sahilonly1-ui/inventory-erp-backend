@@ -29,6 +29,7 @@ export const receiveImeiSchema = z.object({
     .array(z.object({
       imei1: imei,
       imei2: imei.optional(),
+      serialNo: z.string().trim().min(1).max(60).optional(),
       imeiType: z.enum(['NIL','OPEN_BOX','DEMO','SECOND_IMEI']).default('NIL'),
     }))
     .min(1)

@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import { mergeHistory, CarriedFlags } from './imei.history';
+import { eventsForTxns } from './imei.events';
 import { asyncHandler } from '../../common/asyncHandler';
 import { prisma } from '../../config/prisma';
 import { ok } from '../../common/apiResponse';
-import { BadRequestError } from '../../common/errors';
+import { BadRequestError, NotFoundError } from '../../common/errors';
 import { imeiController } from './imei.controller';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
@@ -117,9 +119,16 @@ router.post('/restore-activations', authorize(PERMISSIONS.IMEI_MANAGE), asyncHan
     orderBy: { updatedAt: 'desc' },
   });
 
-  // Several deleted generations can exist for one IMEI; the newest wins.
-  const best = new Map<string, typeof deleted[number]>();
-  for (const d of deleted) if (!best.has(d.imei1)) best.set(d.imei1, d);
+  // Several deleted generations can exist for one IMEI. Each flag is taken from
+  // the most recent generation that actually had it, so a generation that lost
+  // the history earlier cannot hide the one that still has it.
+  const grouped = new Map<string, typeof deleted>();
+  for (const d of deleted) {
+    if (!grouped.has(d.imei1)) grouped.set(d.imei1, []);
+    grouped.get(d.imei1)!.push(d);
+  }
+  const best = new Map<string, CarriedFlags>();
+  for (const [k, rows] of grouped) best.set(k, mergeHistory(rows));
   const imeis = [...best.keys()];
   if (!imeis.length) {
     ok(res, { dryRun, candidates: 0, restored: 0, sample: [] });
@@ -525,6 +534,88 @@ router.post('/trace', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (req:
   }
 
   ok(res, { checked: codes.length, results });
+}));
+
+// Check — and optionally repair — the swipe/activation history of specific
+// units, or of every unit behind an entry.
+//
+// Re-creating a unit (editing a Stock In, re-entering a return) starts a fresh
+// row, and its history lives only on the earlier, soft-deleted generations.
+// This lays those generations out per unit and says whether the live row is
+// missing history that an earlier generation still holds. Nothing is changed
+// unless restore:true, and even then flags are only ever filled in where the
+// live row has none — a flag that is set is never overwritten.
+router.post('/audit-history', authorize(PERMISSIONS.IMEI_MANAGE), asyncHandler(async (req: Request, res: Response) => {
+  const restore = req.body?.restore === true;
+  let codes: string[] = Array.isArray(req.body?.imeis) ? req.body.imeis.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
+  const doc = req.body?.doc ? String(req.body.doc).trim() : '';
+
+  if (doc) {
+    const txns = await prisma.inventoryTransaction.findMany({ where: { remarks: { contains: doc } }, select: { id: true } });
+    const ids = txns.map(t => t.id);
+    if (ids.length) {
+      const live = await prisma.imeiInventory.findMany({ where: { stockInTxnId: { in: ids } }, select: { imei1: true } });
+      const returned = await eventsForTxns(prisma, ids, 'RETURNED');
+      codes.push(...live.map(u => u.imei1), ...returned.map(e => e.imei1));
+    }
+  }
+  codes = [...new Set(codes)];
+  if (!codes.length) throw new BadRequestError('Give imeis, or a doc number whose entry still has units.');
+
+  const rows = await prisma.imeiInventory.findMany({
+    where: { imei1: { in: codes } },
+    select: {
+      id: true, imei1: true, status: true, isDeleted: true, createdAt: true, deletedAt: true,
+      swiped: true, swipedAt: true, activated: true, activatedAt: true, updatedAt: true,
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  const byImei = new Map<string, typeof rows>();
+  for (const r of rows) {
+    if (!byImei.has(r.imei1)) byImei.set(r.imei1, []);
+    byImei.get(r.imei1)!.push(r);
+  }
+
+  const units: any[] = [];
+  const counts = { total: 0, hasHistory: 0, recoverable: 0, restored: 0, nothingToRecover: 0, noLiveUnit: 0 };
+  for (const code of codes) {
+    counts.total++;
+    const gens = byImei.get(code) ?? [];
+    const live = gens.find(g => !g.isDeleted);
+    const older = gens.filter(g => g.isDeleted);
+    const merged = mergeHistory(older);
+
+    let verdict: string;
+    const needsSwipe = !!live && merged.swiped && !live.swiped;
+    const needsAct = !!live && merged.activated && !live.activated;
+    if (!live) { verdict = 'no live unit'; counts.noLiveUnit++; }
+    else if (needsSwipe || needsAct) { verdict = 'recoverable'; counts.recoverable++; }
+    else if (live.swiped || live.activated) { verdict = 'has history'; counts.hasHistory++; }
+    else { verdict = older.length ? 'nothing to recover' : 'no earlier record'; counts.nothingToRecover++; }
+
+    if (restore && live && (needsSwipe || needsAct)) {
+      const data: Record<string, unknown> = {};
+      if (needsSwipe) { data.swiped = true; data.swipedAt = merged.swipedAt; }
+      if (needsAct) { data.activated = true; data.activatedAt = merged.activatedAt; }
+      await prisma.imeiInventory.update({ where: { id: live.id }, data });
+      verdict = 'restored';
+      counts.restored++;
+    }
+
+    units.push({
+      imei: code,
+      verdict,
+      live: live ? { status: live.status, swiped: live.swiped, activated: live.activated, created: live.createdAt.toISOString().slice(0, 10) } : null,
+      earlierGenerations: older.map(o => ({
+        swiped: o.swiped, swipedAt: o.swipedAt?.toISOString().slice(0, 10) ?? null,
+        activated: o.activated, activatedAt: o.activatedAt?.toISOString().slice(0, 10) ?? null,
+        deleted: o.deletedAt?.toISOString().slice(0, 10) ?? null,
+      })),
+    });
+  }
+
+  ok(res, { restore, counts, units: units.slice(0, 200) });
 }));
 
 // Review the units brought back by a restore run.

@@ -53,6 +53,7 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
     const words = search.trim().split(/\s+/).filter(Boolean);
     const wordCondition = (w: string) => ({ OR: [
       { imei1: { contains: w } },
+      { serialNo: { contains: w, mode: 'insensitive' } },
       { product: { ean: { contains: w } } },
       { product: { model: { contains: w, mode: 'insensitive' } } },
       { product: { brand: { contains: w, mode: 'insensitive' } } },
@@ -88,6 +89,7 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
   ws.columns = [
     { header: 'EAN',              key: 'ean',         width: 16 },
     { header: 'IMEI / Serial',    key: 'imei',        width: 22 },
+    { header: 'Sr. No.',          key: 'serialNo',    width: 22 },
     { header: 'Model',            key: 'model',       width: 36 },
     { header: 'Brand',            key: 'brand',       width: 16 },
     { header: 'Status',           key: 'status',      width: 14 },
@@ -104,6 +106,7 @@ router.post('/imei_filtered', authorize(PERMISSIONS.REPORTS_EXPORT), asyncHandle
     ws.addRow({
       ean:         r.product.ean,
       imei:        r.imei1,
+      serialNo:    (r as any).serialNo ?? '',
       model:       r.product.model,
       brand:       r.product.brand,
       status:      r.status,

@@ -5,6 +5,8 @@ import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
 import { inventoryService } from './inventory.service';
 import { eventsForTxns } from '../imei/imei.events';
+import { writeAudit } from '../../common/audit.service';
+import { TransactionType } from '@prisma/client';
 import { inventoryController } from './inventory.controller';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
@@ -358,7 +360,7 @@ router.post('/cleanup-orphans', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
     select: { id: true, imei1: true },
   });
   const levels = await prisma.stockLevel.findMany({
-    where: { productId: { in: productIds } },
+    where: { productId: product.id },
     select: { id: true, warehouseId: true, quantity: true },
   });
 
@@ -877,7 +879,7 @@ router.get('/product-history', authorize(PERMISSIONS.INVENTORY_READ), asyncHandl
   });
 
   const levels = await prisma.stockLevel.findMany({
-    where: { productId: product.id },
+    where: { productId: { in: productIds } },
     include: { warehouse: { select: { name: true } } },
   });
 
@@ -920,6 +922,9 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
     if (!returnedUnitIds.has(k)) returnedUnitIds.set(k, []);
     returnedUnitIds.get(k)!.push(ev.imeiId);
   }
+
+  // Serial numbers of the units found below, filled in once per transaction.
+  const serialOf = new Map<string, string | null>();
 
   // For each transaction, fetch IMEIs — no imeiRequired gate (may be false in DB).
   const enriched = await Promise.all(txns.map(async (t) => {
@@ -1001,6 +1006,11 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
         });
       }
     }
+    const unitIds = imeis.map(i => i.id).filter(Boolean);
+    if (unitIds.length) {
+      const withSerial = await prisma.imeiInventory.findMany({ where: { id: { in: unitIds } }, select: { id: true, serialNo: true } });
+      for (const u of withSerial) serialOf.set(u.id, u.serialNo ?? null);
+    }
     return {
       id: t.id,
       productId: t.product.id,
@@ -1016,7 +1026,7 @@ router.get('/transactions/entry-detail', authorize(PERMISSIONS.INVENTORY_READ), 
       warehouseName: t.warehouse.name,
       createdAt: t.createdAt,
       isReturn: !!returnedIds?.length,
-      imeis: imeis.map(i => ({ ...i, isReturn: !!returnedIds?.length })),
+      imeis: imeis.map(i => ({ ...i, serialNo: serialOf.get(i.id) ?? null, isReturn: !!returnedIds?.length })),
     };
   }));
 
@@ -1047,9 +1057,18 @@ router.get('/edit-sessions/:id', authorize(PERMISSIONS.INVENTORY_STOCK_IN), asyn
 
 // ── Admin: full purge — delete ALL imei + transaction data (fresh start) ────
 router.post('/admin/cleanup-orphaned-imeis', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
-  const { purgeAll } = req.body;
+  const { purgeAll, confirm } = req.body;
 
   if (purgeAll) {
+    // This hard-deletes every unit and every transaction, swipe/activation
+    // history included, and nothing can bring it back. A single stray request
+    // with purgeAll:true used to be enough; it now has to be spelled out.
+    if (confirm !== 'DELETE ALL DATA') {
+      throw new BadRequestError(
+        'Full purge permanently erases every unit, transaction and activation record. ' +
+        'If that is really intended, send confirm: "DELETE ALL DATA" with purgeAll.',
+      );
+    }
     // FULL PURGE: delete ALL imei_inventory and ALL inventory_transactions
     // Resets stock levels to 0 as well. Used for a clean slate.
     await prisma.$transaction(async (tx) => {

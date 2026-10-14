@@ -1,4 +1,5 @@
 import { Prisma, ImeiStatus } from '@prisma/client';
+import { mergeHistory, FlagRow, CarriedFlags } from './imei.history';
 import { prisma } from '../../config/prisma';
 
 export interface LockedImei {
@@ -15,7 +16,7 @@ export const imeiRepository = {
     tx: Prisma.TransactionClient,
     productId: string,
     warehouseId: string,
-    imeis: { imei1: string; imei2?: string | null; imeiType?: string }[],
+    imeis: { imei1: string; imei2?: string | null; serialNo?: string | null; imeiType?: string }[],
     createdBy: string,
     vendorId?: string,
     stockInTxnId?: string,
@@ -25,13 +26,21 @@ export const imeiRepository = {
     // Swipe/activation state lives on those rows, so without carrying it over
     // an unrelated edit silently wipes months of activation history. Look up
     // the most recent soft-deleted row per IMEI and restore its flags.
+    // Every deleted generation is read, not just the newest: an earlier edit
+    // may already have produced a generation without the flags, and copying
+    // only that one would pass the loss on while the real history sat a
+    // generation further back. See mergeHistory.
     const prior = await tx.imeiInventory.findMany({
       where: { imei1: { in: imeis.map(i => i.imei1) }, isDeleted: true },
       select: { imei1: true, swiped: true, swipedAt: true, activated: true, activatedAt: true, updatedAt: true },
-      orderBy: { updatedAt: 'desc' },
     });
-    const priorByImei = new Map<string, typeof prior[number]>();
-    for (const p of prior) if (!priorByImei.has(p.imei1)) priorByImei.set(p.imei1, p);
+    const gens = new Map<string, FlagRow[]>();
+    for (const p of prior) {
+      if (!gens.has(p.imei1)) gens.set(p.imei1, []);
+      gens.get(p.imei1)!.push(p);
+    }
+    const priorByImei = new Map<string, CarriedFlags>();
+    for (const [k, rows] of gens) priorByImei.set(k, mergeHistory(rows));
 
     return tx.imeiInventory.createMany({
       data: imeis.map((i) => {
@@ -41,6 +50,7 @@ export const imeiRepository = {
           warehouseId,
           imei1: i.imei1,
           imei2: i.imei2 ?? null,
+          serialNo: i.serialNo ?? null,
           imeiType: i.imeiType ?? 'NIL',
           status: ImeiStatus.IN_STOCK,
           supplierId: vendorId ?? null,
@@ -85,8 +95,9 @@ export const imeiRepository = {
   },
 
   findByImei1(imei1: string) {
+    // A unit is found by its IMEI or, for devices that have both, its serial.
     return prisma.imeiInventory.findFirst({
-      where: { imei1, isDeleted: false },
+      where: { isDeleted: false, OR: [{ imei1 }, { serialNo: imei1 }] },
       include: {
         product: { select: { id: true, ean: true, sku: true, model: true, brand: true } },
         warehouse: { select: { id: true, name: true, code: true } },
@@ -124,6 +135,7 @@ export const imeiRepository = {
           return { OR: [
             { imei1: { contains: params.search } },
             { imei2: { contains: params.search } },
+            { serialNo: { contains: params.search, mode: 'insensitive' } },
             { product: { ean: { contains: params.search } } },
             { product: { model: { contains: params.search, mode: 'insensitive' } } },
             { product: { brand: { contains: params.search, mode: 'insensitive' } } },
@@ -133,6 +145,7 @@ export const imeiRepository = {
         return { AND: words.map((w: string) => ({ OR: [
           { imei1: { contains: w } },
           { imei2: { contains: w } },
+          { serialNo: { contains: w, mode: 'insensitive' } },
           { product: { model: { contains: w, mode: 'insensitive' } } },
           { product: { brand: { contains: w, mode: 'insensitive' } } },
         ]}))};

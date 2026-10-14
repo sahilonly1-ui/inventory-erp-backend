@@ -411,6 +411,7 @@ model ImeiInventory {
   warehouse   Warehouse  @relation(fields: [warehouseId], references: [id])
   imei1       String // partial-unique WHERE is_deleted=false (migration)
   imei2       String? // partial-unique WHERE is_deleted=false AND imei2 IS NOT NULL
+  serialNo    String? // manufacturer serial, kept alongside the IMEI for devices that have both (tablets)
   status      ImeiStatus @default(IN_STOCK)
   imeiType    String @default("NIL") // NIL | OPEN_BOX | DEMO | SECOND_IMEI
   swiped      Boolean @default(false)

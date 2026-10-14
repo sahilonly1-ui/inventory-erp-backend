@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS imei_events (
 CREATE INDEX IF NOT EXISTS idx_imei_events_txn ON imei_events("txnId");
 CREATE INDEX IF NOT EXISTS idx_imei_events_imei ON imei_events("imeiId");
 
+-- Tablets carry both an IMEI and a serial number and both are needed. Until
+-- now a row with both saved only the IMEI and silently dropped the serial.
+ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "serialNo" TEXT;
+CREATE INDEX IF NOT EXISTS idx_imei_serial_no ON imei_inventory("serialNo");
+
 
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (

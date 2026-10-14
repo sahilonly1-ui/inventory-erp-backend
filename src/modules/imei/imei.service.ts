@@ -1,4 +1,4 @@
-import { ImeiStatus, TransactionType } from '@prisma/client';
+import { ImeiStatus, Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '../../config/prisma';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
@@ -26,6 +26,25 @@ function parseDispatchDate(d?: string | null): Date | null {
   return Number.isNaN(when.getTime()) ? null : when;
 }
 
+/**
+ * Map whatever was scanned to the unit's IMEI. A tablet is stored under its
+ * IMEI but also carries a serial number, and either may be what gets scanned
+ * at the counter — a serial scan has to find the same unit, not report it
+ * missing. Codes that match nothing are returned unchanged so the caller can
+ * still report them as not found.
+ */
+async function resolveCodes(tx: Prisma.TransactionClient, codes: string[]): Promise<string[]> {
+  if (!codes.length) return codes;
+  const rows = await tx.imeiInventory.findMany({
+    where: { isDeleted: false, OR: [{ imei1: { in: codes } }, { serialNo: { in: codes } }] },
+    select: { imei1: true, serialNo: true },
+  });
+  const known = new Set(rows.map(r => r.imei1));
+  const bySerial = new Map<string, string>();
+  for (const r of rows) if (r.serialNo) bySerial.set(r.serialNo, r.imei1);
+  return [...new Set(codes.map(c => (known.has(c) ? c : (bySerial.get(c) ?? c))))];
+}
+
 export const imeiService = {
   // Stock-in for IMEI products: create units + ledger inbound, same transaction.
   async receive(input: ReceiveImeiInput, actor: Actor) {
@@ -46,9 +65,21 @@ export const imeiService = {
         `Duplicate IMEI in this batch: ${list.slice(0, 5).join(', ')}${list.length > 5 ? ` (+${list.length - 5} more)` : ''}. Each IMEI can only be scanned once.`
       );
     }
+    const incomingSerials = input.imeis.map(i => i.serialNo).filter((v): v is string => !!v);
+    const dupSerials = incomingSerials.filter((v, idx) => incomingSerials.indexOf(v) !== idx);
+    if (dupSerials.length) {
+      throw new BadRequestError(`Duplicate Sr. No. in this batch: ${[...new Set(dupSerials)].slice(0, 5).join(', ')}. Each serial can only be scanned once.`);
+    }
     const existing = await prisma.imeiInventory.findMany({
-      where: { imei1: { in: incoming }, isDeleted: false },
-      select: { imei1: true, status: true, product: { select: { model: true } } },
+      where: {
+        isDeleted: false,
+        OR: [
+          { imei1: { in: incoming } },
+          { serialNo: { in: incoming } },
+          ...(incomingSerials.length ? [{ serialNo: { in: incomingSerials } }, { imei1: { in: incomingSerials } }] : []),
+        ],
+      },
+      select: { imei1: true, serialNo: true, status: true, product: { select: { model: true } } },
     });
     if (existing.length) {
       const detail = existing.slice(0, 5)
@@ -107,9 +138,10 @@ export const imeiService = {
       : TransactionType.STOCK_OUT;
 
     const groups = await prisma.$transaction(async (tx) => {
-      const locked = await imeiRepository.lockByImei1(tx, input.imeis);
+      const scanned = await resolveCodes(tx, input.imeis);
+      const locked = await imeiRepository.lockByImei1(tx, scanned);
       const foundSet = new Set(locked.map((r) => r.imei1));
-      const missing = input.imeis.filter((i) => !foundSet.has(i));
+      const missing = scanned.filter((i) => !foundSet.has(i));
       if (missing.length) throw new BadRequestError(
         `IMEI / Sr. No. not found in IMEI Tracker — these units were never scanned in:\n${missing.join(', ')}\n\nScan them in via Stock In first, or remove them from this dispatch.`,
         { missing },
@@ -276,9 +308,10 @@ export const imeiService = {
     const results: { productId: string; warehouseId: string; count: number; newQuantity: number }[] = [];
 
     await prisma.$transaction(async (tx) => {
-      const locked = await imeiRepository.lockByImei1(tx, codes);
+      const scanned = await resolveCodes(tx, codes);
+      const locked = await imeiRepository.lockByImei1(tx, scanned);
       const found = new Set(locked.map(r => r.imei1));
-      const missing = codes.filter(c => !found.has(c));
+      const missing = scanned.filter(c => !found.has(c));
       if (missing.length) {
         throw new BadRequestError(
           `Not in the tracker: ${missing.join(', ')}. A return can only be recorded for a unit that was sold from here — ` +

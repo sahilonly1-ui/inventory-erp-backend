@@ -1,7 +1,7 @@
 export interface ReceiveImeiInput {
   productId: string;
   warehouseId: string;
-  imeis: { imei1: string; imei2?: string | null; imeiType?: string }[];
+  imeis: { imei1: string; imei2?: string | null; serialNo?: string | null; imeiType?: string }[];
   vendorId?: string | null;
   remarks?: string;
 }
