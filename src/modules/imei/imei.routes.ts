@@ -489,15 +489,35 @@ router.post('/trace', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (req:
     const code = String(raw).trim();
 
     // Case-insensitive: serials get written down in a different case than scanned.
+    // A unit is matched on any of its codes: the first IMEI, the second IMEI of
+    // a dual-SIM phone, or its serial. Looking only at the first would report
+    // "never entered" for a unit that is on record under its other IMEI.
     const units = await prisma.imeiInventory.findMany({
-      where: { imei1: { equals: code, mode: 'insensitive' } },
+      where: {
+        OR: [
+          { imei1: { equals: code, mode: 'insensitive' } },
+          { imei2: { equals: code, mode: 'insensitive' } },
+          { serialNo: { equals: code, mode: 'insensitive' } },
+        ],
+      },
       select: {
-        id: true, imei1: true, status: true, isDeleted: true, deletedAt: true,
+        id: true, imei1: true, imei2: true, serialNo: true, status: true, isDeleted: true, deletedAt: true,
         createdAt: true, stockInTxnId: true, stockOutTxnId: true,
+        supplier: { select: { name: true } },
         product: { select: { ean: true, model: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    // When and to whom each sold unit went.
+    const saleIds = units.map(u => u.stockOutTxnId).filter((v): v is string => !!v);
+    const sales = saleIds.length
+      ? await prisma.inventoryTransaction.findMany({
+          where: { id: { in: saleIds } },
+          select: { id: true, createdAt: true, vendor: { select: { name: true } } },
+        })
+      : [];
+    const saleById = new Map(sales.map(t => [t.id, t]));
 
     // Serials that older code wrote into the entry notes instead of storing as
     // units — the record exists, just not where anything can use it.
@@ -518,6 +538,12 @@ router.post('/trace', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (req:
       verdict,
       units: units.map(u => ({
         product: u.product?.model, ean: u.product?.ean,
+        matchedOn: u.imei1.toLowerCase() === code.toLowerCase() ? 'IMEI 1'
+          : (u.imei2 ?? '').toLowerCase() === code.toLowerCase() ? 'IMEI 2' : 'Sr. No.',
+        imei1: u.imei1,
+        receivedFrom: u.supplier?.name ?? null,
+        soldOn: u.stockOutTxnId && saleById.get(u.stockOutTxnId) ? saleById.get(u.stockOutTxnId)!.createdAt.toISOString().slice(0, 10) : null,
+        soldTo: u.stockOutTxnId ? (saleById.get(u.stockOutTxnId)?.vendor?.name ?? null) : null,
         status: u.status, isDeleted: u.isDeleted,
         stockInDate: u.createdAt.toISOString().slice(0, 10),
         deletedAt: u.deletedAt ? u.deletedAt.toISOString().slice(0, 10) : null,
