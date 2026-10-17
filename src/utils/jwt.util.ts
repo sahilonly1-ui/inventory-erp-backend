@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
+import { ACCESS_TOKEN_TTL } from '../config/session';
 
 export interface AccessPayload {
   sub: string;
@@ -7,7 +8,7 @@ export interface AccessPayload {
 }
 
 export function signAccessToken(payload: AccessPayload): string {
-  const opts: jwt.SignOptions = { algorithm: 'HS256', expiresIn: env.JWT_ACCESS_TTL as never };
+  const opts: jwt.SignOptions = { algorithm: 'HS256', expiresIn: ACCESS_TOKEN_TTL as never };
   return jwt.sign(payload, env.JWT_ACCESS_SECRET, opts);
 }
 

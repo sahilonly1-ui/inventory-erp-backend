@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import { REFRESH_TOKEN_TTL_DAYS } from '../../config/session';
 import { sessionIsAlive } from './session.util';
 import { env } from '../../config/env';
 import { BadRequestError, UnauthorizedError } from '../../common/errors';
@@ -9,7 +10,7 @@ import { generateOpaqueToken, hashToken } from '../../utils/token.util';
 import { authRepository } from './auth.repository';
 import { LoginResult, RequestContext, TokenPair, AuthUserView } from './auth.dto';
 
-const refreshExpiry = () => new Date(Date.now() + env.JWT_REFRESH_TTL_DAYS * 86_400_000);
+const refreshExpiry = () => new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 86_400_000);
 const resetExpiry = () => new Date(Date.now() + env.PASSWORD_RESET_TTL_MIN * 60_000);
 
 export const authService = {
@@ -83,7 +84,7 @@ export const authService = {
     // the expiry is pushed out once less than half of it remains (rather than
     // on every refresh, to avoid a write each time).
     const remaining = existing.expiresAt.getTime() - Date.now();
-    const halfLife = (env.JWT_REFRESH_TTL_DAYS * 86_400_000) / 2;
+    const halfLife = (REFRESH_TOKEN_TTL_DAYS * 86_400_000) / 2;
     if (existing.revokedAt || remaining < halfLife) {
       await prisma.refreshToken.update({
         where: { id: existing.id },
