@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import { sessionIsAlive } from './session.util';
 import { env } from '../../config/env';
 import { BadRequestError, UnauthorizedError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
@@ -49,78 +50,51 @@ export const authService = {
   },
 
   // Refresh-token ROTATION with reuse detection.
+  /**
+   * Issue a fresh access token for a valid refresh token.
+   *
+   * The refresh token itself is NOT rotated. It used to be single-use, which
+   * cannot work when one browser has the app open in several windows: they
+   * share one stored token and can refresh at the same instant, so one always
+   * presents a token the other just retired — and that was treated as theft,
+   * ending every window's session. Logout, expiry, and removing or
+   * deactivating the user remain the ways a session ends.
+   *
+   * The expiry slides forward with use, so a session in regular use does not
+   * run into a fixed end date.
+   */
   async refresh(rawToken: string): Promise<TokenPair> {
     const tokenHash = hashToken(rawToken);
 
-    return prisma.$transaction(async (tx) => {
-      const existing = await tx.refreshToken.findUnique({ where: { tokenHash } });
-      if (!existing) throw new UnauthorizedError('Invalid refresh token');
+    const existing = await prisma.refreshToken.findUnique({ where: { tokenHash } });
+    if (!existing) throw new UnauthorizedError('Invalid refresh token');
 
-      if (existing.revokedAt) {
-        // A revoked token presented again is normally a stolen/replayed token —
-        // except this app opens the same session in several tabs, and a lost
-        // response (a timeout after the server already rotated the token, or
-        // two tabs refreshing within the same instant) presents the very same
-        // old token honestly. Both look identical here, so a short grace
-        // window is given: if this token was rotated only moments ago, the
-        // token it was rotated INTO is handed back again instead of treating
-        // the replay as an attack. Ending every tab's session over a network
-        // hiccup was the frequent-logout problem this replaces.
-        const GRACE_MS = 30_000;
-        const rotatedRecently = Date.now() - existing.revokedAt.getTime() < GRACE_MS;
-        if (rotatedRecently && existing.replacedByHash) {
-          const successor = await tx.refreshToken.findUnique({ where: { tokenHash: existing.replacedByHash } });
-          if (successor && !successor.revokedAt && successor.expiresAt > new Date()) {
-            const user = await tx.user.findFirstOrThrow({
-              where: { id: successor.userId, isDeleted: false, isActive: true },
-            });
-            // The successor's raw value cannot be recovered from its hash, so
-            // the caller is handed a fresh access token but must retry with
-            // whatever refresh token their own last successful response gave
-            // them — which, for the lost-response case, is this same rotation.
-            return {
-              accessToken: signAccessToken({ sub: user.id, email: user.email }),
-              refreshToken: rawToken,
-            };
-          }
-        }
+    const alive = await sessionIsAlive(existing, async (h) =>
+      prisma.refreshToken.findUnique({ where: { tokenHash: h } }),
+    );
+    if (!alive) throw new UnauthorizedError('Session has ended — please sign in again');
 
-        // Outside the grace window, or the successor is itself gone: treat as
-        // genuine reuse and end every session for this user.
-        await tx.refreshToken.updateMany({
-          where: { userId: existing.userId, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
-        await writeAudit(tx, {
-          userId: existing.userId,
-          action: 'UPDATE',
-          entityName: 'refresh_tokens',
-          entityId: existing.id,
-          newValue: { event: 'REUSE_DETECTED' },
-        });
-        throw new UnauthorizedError('Refresh token reuse detected');
-      }
-
-      if (existing.expiresAt < new Date()) throw new UnauthorizedError('Refresh token expired');
-
-      const { token, tokenHash: newHash } = generateOpaqueToken();
-      await tx.refreshToken.update({
-        where: { id: existing.id },
-        data: { revokedAt: new Date(), replacedByHash: newHash },
-      });
-      await tx.refreshToken.create({
-        data: { userId: existing.userId, tokenHash: newHash, expiresAt: refreshExpiry() },
-      });
-
-      const user = await tx.user.findFirstOrThrow({
-        where: { id: existing.userId, isDeleted: false, isActive: true },
-      });
-
-      return {
-        accessToken: signAccessToken({ sub: user.id, email: user.email }),
-        refreshToken: token,
-      };
+    const user = await prisma.user.findFirst({
+      where: { id: existing.userId, isDeleted: false, isActive: true },
     });
+    if (!user) throw new UnauthorizedError('Account is no longer active');
+
+    // A token retired by the old rotating scheme is brought back into use, and
+    // the expiry is pushed out once less than half of it remains (rather than
+    // on every refresh, to avoid a write each time).
+    const remaining = existing.expiresAt.getTime() - Date.now();
+    const halfLife = (env.JWT_REFRESH_TTL_DAYS * 86_400_000) / 2;
+    if (existing.revokedAt || remaining < halfLife) {
+      await prisma.refreshToken.update({
+        where: { id: existing.id },
+        data: { revokedAt: null, replacedByHash: null, expiresAt: refreshExpiry() },
+      });
+    }
+
+    return {
+      accessToken: signAccessToken({ sub: user.id, email: user.email }),
+      refreshToken: rawToken,
+    };
   },
 
   async logout(rawToken: string): Promise<void> {
