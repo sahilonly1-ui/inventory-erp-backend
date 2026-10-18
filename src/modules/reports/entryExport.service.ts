@@ -4,7 +4,8 @@ export interface EntryExportRow {
   productId: string;
   ean: string;
   model: string;
-  code: string;      // IMEI, or serial number when the unit has no IMEI
+  imei: string;      // IMEI (blank when the unit has only a serial number)
+  serial: string;    // Sr. No. (blank when the unit has only an IMEI)
   imeiType: string;
 }
 
@@ -99,13 +100,25 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
     (txns.find(t => t.remarks?.match(/Invoice:\s*([^|]+)/i))?.remarks?.match(/Invoice:\s*([^|]+)/i)?.[1] || '').trim() ||
     '';
 
-  const rows: EntryExportRow[] = units.map(u => ({
-    productId: u.productId,
-    ean: u.product.ean,
-    model: u.product.model,
-    code: u.imei1,
-    imeiType: (u as any).imeiType || 'NIL',
-  }));
+  // A unit saved with both codes keeps the IMEI in imei1 and the serial in
+  // serialNo. A unit saved with only one code keeps it in imei1 — a 14-17 digit
+  // number is an IMEI, anything else is a serial. Each gets its own column so
+  // neither is dropped from the sheet.
+  const isImeiLike = (c: string) => /^\d{14,17}$/.test(c);
+  const rows: EntryExportRow[] = units.map(u => {
+    const serialNo = ((u as any).serialNo || '').trim();
+    const code = (u.imei1 || '').trim();
+    const imei   = serialNo ? code : (isImeiLike(code) ? code : '');
+    const serial = serialNo ? serialNo : (isImeiLike(code) ? '' : code);
+    return {
+      productId: u.productId,
+      ean: u.product.ean,
+      model: u.product.model,
+      imei,
+      serial,
+      imeiType: (u as any).imeiType || 'NIL',
+    };
+  });
 
   // Products received without any unit-level code still belong on the sheet —
   // otherwise the export silently under-reports the entry.
@@ -115,36 +128,41 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
     const covered = codedByProduct.get(t.productId) || 0;
     const missing = Math.max(0, Math.abs(t.quantity) - covered);
     for (let i = 0; i < missing; i++) {
-      rows.push({ productId: t.productId, ean: t.product.ean, model: t.product.model, code: '—', imeiType: 'NIL' });
+      rows.push({ productId: t.productId, ean: t.product.ean, model: t.product.model, imei: '—', serial: '', imeiType: 'NIL' });
     }
     if (missing > 0) codedByProduct.set(t.productId, covered + missing);
   }
 
-  rows.sort((a, b) => a.model.localeCompare(b.model) || a.code.localeCompare(b.code));
+  rows.sort((a, b) => a.model.localeCompare(b.model) || (a.imei || a.serial).localeCompare(b.imei || b.serial));
 
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Stock In');
+  const kind = isOutbound ? 'Stock Out' : 'Stock In';
+  const ws = wb.addWorksheet(kind);
 
+  // The row counter is "#" so it can't be confused with the Sr. No. column,
+  // which holds the device serial number.
+  const HEADERS = ['#', 'EAN', 'Product Name', 'IMEI', 'Sr. No.', 'IMEI Type'];
   ws.columns = [
-    { header: 'Sr. No.',        key: 'sr',       width: 9 },
-    { header: 'EAN',            key: 'ean',      width: 18 },
-    { header: 'Product Name',   key: 'model',    width: 46 },
-    { header: 'IMEI / Sr. No.', key: 'code',     width: 24 },
-    { header: 'IMEI Type',      key: 'imeiType', width: 14 },
+    { header: '#',            key: 'sr',       width: 6 },
+    { header: 'EAN',          key: 'ean',      width: 18 },
+    { header: 'Product Name', key: 'model',    width: 46 },
+    { header: 'IMEI',         key: 'imei',     width: 20 },
+    { header: 'Sr. No.',      key: 'serial',   width: 22 },
+    { header: 'IMEI Type',    key: 'imeiType', width: 14 },
   ];
 
   // Title block above the table so the sheet stands alone as a record.
   ws.spliceRows(1, 0, [], [], [], []);
-  ws.getCell('A1').value = 'iTechArena — Stock In Entry';
+  ws.getCell('A1').value = `iTechArena — ${kind} Entry`;
   ws.getCell('A1').font = { bold: true, size: 14 };
   ws.getCell('A2').value = `Vendor: ${vendorName}`;
   ws.getCell('A3').value = `Invoice No: ${invoiceNo || '—'}`;
-  ws.getCell('A4').value = `Date Stocked In: ${fmtDate(stockedInAt)}`;
+  ws.getCell('A4').value = `${isOutbound ? 'Date Stocked Out' : 'Date Stocked In'}: ${fmtDate(stockedInAt)}`;
   for (const ref of ['A2', 'A3', 'A4']) ws.getCell(ref).font = { size: 11 };
 
   const headerRow = ws.getRow(5);
-  headerRow.values = ['Sr. No.', 'EAN', 'Product Name', 'IMEI / Sr. No.', 'IMEI Type'];
+  headerRow.values = HEADERS;
   headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   headerRow.eachCell(c => {
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
@@ -152,18 +170,19 @@ export async function buildEntryExport(txnIds: string[]): Promise<EntryExport> {
   });
 
   rows.forEach((r, i) => {
-    ws.addRow({ sr: i + 1, ean: r.ean, model: r.model, code: r.code, imeiType: r.imeiType });
+    ws.addRow({ sr: i + 1, ean: r.ean, model: r.model, imei: r.imei, serial: r.serial, imeiType: r.imeiType });
   });
 
   // Keep long EANs and IMEIs as text so Excel doesn't render them in
   // scientific notation or strip leading zeros.
   ws.getColumn('ean').numFmt = '@';
-  ws.getColumn('code').numFmt = '@';
+  ws.getColumn('imei').numFmt = '@';
+  ws.getColumn('serial').numFmt = '@';
 
   ws.views = [{ state: 'frozen', ySplit: 5 }];
-  ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: 5 } };
+  ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: HEADERS.length } };
 
-  const totalRow = ws.addRow({ sr: '', ean: '', model: `Total units: ${rows.length}`, code: '', imeiType: '' });
+  const totalRow = ws.addRow({ sr: '', ean: '', model: `Total units: ${rows.length}`, imei: '', serial: '', imeiType: '' });
   totalRow.font = { bold: true };
 
   const buffer = Buffer.from(await wb.xlsx.writeBuffer() as ArrayBuffer);

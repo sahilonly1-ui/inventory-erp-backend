@@ -44,6 +44,12 @@ export const receiveImeiSchema = z.object({
 
 export const dispatchImeiSchema = z.object({
   imeis: z.array(imei).min(1).max(2000),
+  // Serial numbers typed alongside an IMEI at Stock Out. Saved onto the unit
+  // when it doesn't already carry one, so the entry's export shows both.
+  serials: z.array(z.object({
+    code: imei,
+    serialNo: z.string().trim().min(1).max(60),
+  })).max(2000).optional(),
   channel: z.enum(['STOCK_OUT', 'MARKETPLACE']).default('STOCK_OUT'),
   referenceType: z.string().max(60).optional(),
   referenceId: z.string().max(120).optional(),

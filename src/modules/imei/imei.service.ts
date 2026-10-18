@@ -156,6 +156,23 @@ export const imeiService = {
 
       await imeiRepository.setStatus(tx, locked.map((r) => r.id), ImeiStatus.SOLD, actor.id);
 
+      // Keep a serial typed at Stock Out. Only fills an empty serialNo — a
+      // serial recorded at Stock In is never overwritten.
+      const serials = (input as any).serials as { code: string; serialNo: string }[] | undefined;
+      if (serials?.length) {
+        const byCode = new Map(serials.map(s => [s.code.trim(), s.serialNo.trim()]));
+        const lockedIds = locked.map((r) => r.id);
+        const current = await tx.imeiInventory.findMany({
+          where: { id: { in: lockedIds } }, select: { id: true, imei1: true, serialNo: true },
+        });
+        for (const u of current) {
+          const sn = byCode.get(u.imei1);
+          if (sn && !u.serialNo && sn !== u.imei1) {
+            await tx.imeiInventory.update({ where: { id: u.id }, data: { serialNo: sn } });
+          }
+        }
+      }
+
       const byGroup = new Map<string, LockedImei[]>();
       for (const r of locked) {
         const key = `${r.productId}::${r.warehouseId}`;
