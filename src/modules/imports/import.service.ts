@@ -1,3 +1,4 @@
+import { normalizeProductName } from '../../common/productName';
 import ExcelJS from 'exceljs';
 import { ImportType, TransactionType } from '@prisma/client';
 import { prisma } from '../../config/prisma';
@@ -85,7 +86,7 @@ async function applyRow(type: ImportType, row: Record<string, unknown>, _rowNo: 
       const data = productRowSchema.parse(row);
       const exists = await prisma.product.findFirst({ where: { isDeleted: false, OR: [{ ean: data.ean }, { sku: data.sku }] } });
       if (exists) throw new Error('duplicate EAN/SKU');
-      await prisma.product.create({ data: { ...data, createdBy: actor.id } });
+      await prisma.product.create({ data: { ...data, model: await normalizeProductName(data.model), createdBy: actor.id } });
       return;
     }
     case ImportType.VENDORS: {

@@ -44,8 +44,8 @@ export const IMEI_ALIASES: AliasMap = {
 
 export const productRowSchema = z.object({
   ean: z.string().min(6), sku: z.string().min(1), model: z.string().min(1), brand: z.string().min(1),
-  costPrice: z.coerce.number().nonnegative().default(0),
-  sellingPrice: z.coerce.number().nonnegative().default(0),
+  costPrice: z.coerce.number().positive('Cost Price is required and must be more than 0'),
+  sellingPrice: z.coerce.number().positive('MRP is required and must be more than 0'),
   gstRate: z.coerce.number().min(0).max(100).default(0),
   hsnCode: z.string().optional(),
   imeiRequired: booleanish.default(false),

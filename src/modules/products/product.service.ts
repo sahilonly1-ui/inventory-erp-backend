@@ -4,6 +4,7 @@ import { prisma } from '../../config/prisma';
 import { ConflictError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
 import { productRepository } from './product.repository';
+import { normalizeProductName, normalizeProductNameWith, loadNameVocab } from '../../common/productName';
 
 interface Actor { id: string; ip: string | null; }
 
@@ -51,6 +52,7 @@ async function cascadeCleanup(brandNames: string[], categoryIds: string[], actor
 export const productService = {
   // ── PRODUCTS ─────────────────────────────────────────────────────────────
   async create(input: any, actor: Actor) {
+    input = { ...input, model: await normalizeProductName(input.model) };
     const dup = await prisma.product.findFirst({
       where: { isDeleted: false, ean: input.ean },
     });
@@ -160,6 +162,11 @@ export const productService = {
       dedupMap.set(r.ean, r); // later occurrence overwrites earlier one
     }
     const normalized = [...dedupMap.values()];
+    // Same name clean-up as the Add Product form (double spaces, simple spelling slips).
+    try {
+      const vocab = await loadNameVocab();
+      for (const r of normalized) if (r.model) r.model = normalizeProductNameWith(r.model, vocab);
+    } catch { /* never block an import on the spell-check */ }
 
     const batchId = randomUUID(); // groups every audit entry from this single import call
 
@@ -309,11 +316,29 @@ export const productService = {
     });
     const existingSet = new Set(existing.map(p => p.ean));
     const existingByEan = new Map(existing.map(p => [p.ean, p]));
-    const toCreate = validRows.filter(r => !existingSet.has(r.ean));
+    const errors: string[] = [];
+    // New products need every mandatory field, same as the Add Product form.
+    const toCreate = validRows.filter(r => {
+      if (existingSet.has(r.ean)) return false;
+      const missing = [
+        !r.brand && 'Brand', !r.categoryId && 'Category',
+        !(r.costPrice > 0) && 'Cost Price', !(r.sellingPrice > 0) && 'MRP',
+      ].filter(Boolean);
+      if (missing.length) { errors.push(`${r.ean} (${r.model}): not created — missing ${missing.join(', ')}`); return false; }
+      return true;
+    });
     const toUpdate = validRows.filter(r =>  existingSet.has(r.ean));
+    // A blank price/brand/category in the file must not wipe what the product already has.
+    for (const r of toUpdate) {
+      const ex: any = existingByEan.get(r.ean);
+      if (!ex) continue;
+      if (!(r.costPrice > 0))    r.costPrice    = Number(ex.costPrice)    || 0;
+      if (!(r.sellingPrice > 0)) r.sellingPrice = Number(ex.sellingPrice) || 0;
+      if (!r.brand)      r.brand      = ex.brand || '';
+      if (!r.categoryId) (r as any).categoryId = ex.categoryId || null;
+    }
 
     let created = 0, updated = 0;
-    const errors: string[] = [];
 
     // Step 2: createMany for ALL new products — one query
     if (toCreate.length > 0) {
@@ -481,6 +506,7 @@ export const productService = {
   async update(id: string, input: any, actor: Actor) {
     const existing = await productRepository.findById(id);
     if (!existing) throw new NotFoundError('Product not found');
+    if (typeof input.model === 'string') input = { ...input, model: await normalizeProductName(input.model) };
     return prisma.$transaction(async (tx) => {
       // handle attributes separately
       const { attributes, ...productData } = input;

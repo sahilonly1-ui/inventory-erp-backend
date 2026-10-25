@@ -2,19 +2,22 @@ import { z } from 'zod';
 import { booleanish } from '../../common/zod';
 
 const money = z.coerce.number().nonnegative();
+// Prices a product must have: blank / 0 is rejected so a product can't be saved without them.
+const price = (label: string) => z.coerce.number({ invalid_type_error: `${label} is required` })
+  .positive(`${label} is required and must be more than 0`);
 const uuid  = z.string().uuid();
 const arr   = (s: z.ZodTypeAny) => z.union([s, z.array(s)]).transform(v => Array.isArray(v) ? v : [v]).optional();
 
 export const createProductSchema = z.object({
-  ean:           z.string().min(1).max(30),
-  model:         z.string().min(1).max(120),
-  brand:         z.string().min(1).max(80),
+  ean:           z.string().trim().min(1, 'EAN / Barcode is required').max(30),
+  model:         z.string().trim().min(1, 'Product Name is required').max(120),
+  brand:         z.string().trim().min(1, 'Brand is required').max(80),
   brandId:       uuid.optional(),
-  categoryId:    uuid.optional(),
+  categoryId:    z.string({ required_error: 'Category is required' }).uuid('Category is required'),
   description:   z.string().max(1000).optional(),
   status:        z.enum(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']).default('ACTIVE'),
-  costPrice:     money,
-  sellingPrice:  money,
+  costPrice:     price('Cost Price'),
+  sellingPrice:  price('MRP'),
   gstRate:       z.coerce.number().min(0).max(100).default(0),
   hsnCode:       z.string().max(20).optional(),
   vendorId:      uuid.optional(),
@@ -36,7 +39,7 @@ export const bulkUpdateSchema = z.object({
   categoryId:  uuid.optional(),
   vendorId:    uuid.optional(),
   status:      z.enum(['ACTIVE','INACTIVE','DISCONTINUED','OPEN_BOX_ONLY','BLOCKED']).optional(),
-  costPrice:   money.optional(),
+  costPrice:   price('Cost Price').optional(),
   sellingPrice:money.optional(),
   imeiRequired:booleanish.optional(),
   minStock:    z.coerce.number().int().nonnegative().optional(),
