@@ -897,6 +897,18 @@ Object.assign(inventoryService, {
         );
       }
 
+      // Remember exactly which units belong to which line, so the deletion can be restored.
+      const unitsByTxn = new Map<string, string[]>();
+      if (inboundTxnIds.length) {
+        const linked = await tx.imeiInventory.findMany({
+          where: { stockInTxnId: { in: inboundTxnIds }, isDeleted: false }, select: { id: true, stockInTxnId: true },
+        });
+        for (const u of linked) {
+          const k = u.stockInTxnId as string;
+          unitsByTxn.set(k, [...(unitsByTxn.get(k) ?? []), u.id]);
+        }
+      }
+
       let byTxnId = { count: 0 };
       if (inboundTxnIds.length) {
         byTxnId = await tx.imeiInventory.updateMany({
@@ -997,6 +1009,13 @@ Object.assign(inventoryService, {
           totalQty,
           products: productSummary,
           deletedAt: new Date().toISOString(),
+          // Full per-line data so Version History → Restore can rebuild the entry.
+          txns: txns.map(t => ({
+            txnId: t.id, productId: t.productId, warehouseId: t.warehouseId, type: t.type,
+            quantity: t.quantity, vendorId: t.vendorId ?? null, remarks: t.remarks ?? null,
+            referenceType: (t as any).referenceType ?? null, referenceId: (t as any).referenceId ?? null,
+            createdAt: t.createdAt.toISOString(), unitIds: unitsByTxn.get(t.id) ?? [],
+          })),
         },
         newValue: { fullyDeleted: true, txnCount: txnIds.length, reason: `Bulk deleted — ${vendorName} entry` },
         ipAddress: actor.ip,

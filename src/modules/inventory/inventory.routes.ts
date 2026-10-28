@@ -3,7 +3,8 @@ import { BadRequestError, NotFoundError } from '../../common/errors';
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
 import { ok } from '../../common/apiResponse';
-import { inventoryService } from './inventory.service';
+import { inventoryService, applyLedgerMovementTx } from './inventory.service';
+import { assertConsistentTx } from './reconciliation.service';
 import { eventsForTxns } from '../imei/imei.events';
 import { writeAudit } from '../../common/audit.service';
 import { TransactionType } from '@prisma/client';
@@ -224,6 +225,21 @@ router.post('/transactions/restore/:auditId', authorize(PERMISSIONS.INVENTORY_AD
     throw new BadRequestError('Audit log not found or is not a transaction deletion');
   }
   const old = auditLog.oldValue as any;
+
+  // Never restore the same deletion twice — that would double the stock.
+  const alreadyRestored = await prisma.auditLog.findFirst({
+    where: { action: 'CREATE', entityName: 'inventory_transactions',
+             oldValue: { path: ['restoredFromAuditId'], equals: auditLog.id } },
+    select: { id: true },
+  });
+  if (alreadyRestored) throw new BadRequestError('This entry has already been restored.');
+
+  // A whole entry deleted from the Dashboard (one grouped Version History row).
+  if (old?.bulk && Array.isArray(old.txnIds)) {
+    ok(res, await restoreBulkDeletion(auditLog, actor));
+    return;
+  }
+
   if (!old?.productId || !old?.warehouseId) {
     throw new BadRequestError('Insufficient data to restore — transaction was deleted before restore feature was enabled');
   }
@@ -1191,3 +1207,115 @@ router.get('/daily-summary', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler
 router.get('/dashboard-stats', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(async (req: Request, res: Response) => {
   ok(res, await inventoryService.dashboardStats());
 }));
+
+
+// ── Restore a whole deleted entry (grouped bulk deletion) ────────────────────
+// Newer deletions store every transaction in the audit row (old.txns). Older
+// ones stored only the transaction ids, so each transaction is rebuilt from the
+// CREATE audit written when it was first saved (product, warehouse, type,
+// quantity), and the units the deletion soft-deleted are brought back from the
+// IMEI table (same deleter, same moment, same products).
+async function restoreBulkDeletion(auditLog: { id: string; userId: string | null; createdAt: Date; oldValue: any }, actor: { id: string; ip: string | null }) {
+  const old = auditLog.oldValue as any;
+  const txnIds: string[] = old.txnIds;
+
+  type T = { txnId: string; productId: string; warehouseId: string; type: string; quantity: number;
+             vendorId: string | null; remarks: string | null; referenceType: string | null; referenceId: string | null;
+             createdAt: Date; unitIds?: string[] };
+  let txns: T[] = [];
+
+  if (Array.isArray(old.txns) && old.txns.length) {
+    txns = old.txns.map((t: any) => ({ ...t, createdAt: new Date(t.createdAt) }));
+  } else {
+    const creates = await prisma.auditLog.findMany({
+      where: { action: 'CREATE', entityName: 'inventory_transactions', entityId: { in: txnIds } },
+      orderBy: { createdAt: 'asc' },
+    });
+    const byId = new Map<string, any>();
+    for (const c of creates) if (!byId.has(c.entityId!)) byId.set(c.entityId!, c);
+    const missing = txnIds.filter(id => !byId.has(id));
+    if (missing.length) {
+      throw new BadRequestError(`Cannot restore: ${missing.length} of ${txnIds.length} line(s) in this entry have no saved record to rebuild from.`);
+    }
+    let vendorId: string | null = null;
+    if (old.vendor && old.vendor !== 'Unknown Supplier') {
+      const v = await prisma.vendor.findFirst({ where: { name: old.vendor, isDeleted: false }, select: { id: true } });
+      vendorId = v?.id ?? null;
+    }
+    txns = txnIds.map(id => {
+      const c = byId.get(id); const n = c.newValue as any;
+      return { txnId: id, productId: n.productId, warehouseId: n.warehouseId, type: n.type,
+               quantity: Number(n.quantity), vendorId, remarks: null, referenceType: null, referenceId: null,
+               createdAt: c.createdAt };
+    });
+  }
+
+  if (txns.some(t => t.quantity < 0)) {
+    throw new BadRequestError('This deleted entry contains Stock Out lines. Restoring a deleted Stock Out automatically is not supported — re-enter the dispatch from Stock Out.');
+  }
+  // Sanity check against what Version History showed for this deletion.
+  const total = txns.reduce((n, t) => n + Math.abs(t.quantity), 0);
+  if (old.totalQty != null && Number(old.totalQty) !== total) {
+    throw new BadRequestError(`Cannot restore safely: rebuilt ${total} unit(s) but the deletion recorded ${old.totalQty}.`);
+  }
+
+  // Units the deletion soft-deleted: same person, within a minute of it, same products.
+  const productIds = [...new Set(txns.map(t => t.productId))];
+  const at = auditLog.createdAt.getTime();
+  const units = Array.isArray(old.txns) && old.txns.some((t: any) => t.unitIds?.length)
+    ? await prisma.imeiInventory.findMany({ where: { id: { in: old.txns.flatMap((t: any) => t.unitIds ?? []) } } })
+    : await prisma.imeiInventory.findMany({
+        where: { isDeleted: true, productId: { in: productIds },
+                 ...(auditLog.userId ? { deletedBy: auditLog.userId } : {}),
+                 deletedAt: { gte: new Date(at - 60_000), lte: new Date(at + 60_000) } },
+        orderBy: { createdAt: 'asc' },
+      });
+  // A unit already back in stock under the same code (re-entered since) must not be duplicated.
+  const codes = units.map(u => u.imei1);
+  const live = codes.length ? await prisma.imeiInventory.findMany({
+    where: { imei1: { in: codes }, isDeleted: false }, select: { imei1: true } }) : [];
+  const liveSet = new Set(live.map(l => l.imei1));
+  if (liveSet.size) {
+    throw new BadRequestError(`Cannot restore: ${liveSet.size} unit(s) from this entry are already in stock again (${[...liveSet].slice(0, 5).join(', ')}). It looks like the entry was re-entered.`);
+  }
+
+  // The entry's date: the units carry the date the stock was entered for.
+  const entryDate = units.length ? units[0].createdAt : txns.reduce((d, t) => t.createdAt < d ? t.createdAt : d, txns[0].createdAt);
+
+  const restored = await prisma.$transaction(async (tx) => {
+    const unitPool = [...units];
+    const out: { product: string; qty: number; units: number }[] = [];
+    for (const t of txns) {
+      const move = await applyLedgerMovementTx(tx, {
+        productId: t.productId, warehouseId: t.warehouseId, type: t.type as TransactionType,
+        signedQty: t.quantity, vendorId: t.vendorId,
+        referenceType: t.referenceType ?? 'RESTORE', referenceId: t.referenceId ?? auditLog.id,
+        remarks: t.remarks ?? null, occurredAt: entryDate,
+      } as any, actor);
+      // Give this line back exactly as many of its own units as it received.
+      const mine = unitPool.filter(u => u.productId === t.productId && u.warehouseId === t.warehouseId).slice(0, t.quantity);
+      for (const u of mine) unitPool.splice(unitPool.indexOf(u), 1);
+      if (mine.length) {
+        await tx.imeiInventory.updateMany({
+          where: { id: { in: mine.map(u => u.id) } },
+          data: { isDeleted: false, deletedAt: null, deletedBy: null, stockInTxnId: move.transactionId, updatedBy: actor.id },
+        });
+      }
+      out.push({ product: t.productId, qty: t.quantity, units: mine.length });
+    }
+    for (const pid of productIds) {
+      const wh = txns.find(t => t.productId === pid)!.warehouseId;
+      await assertConsistentTx(tx, pid, wh, true, { strict: false });
+    }
+    await writeAudit(tx, {
+      userId: actor.id, action: 'CREATE', entityName: 'inventory_transactions', entityId: txnIds[0],
+      oldValue: { restoredFromAuditId: auditLog.id },
+      newValue: { restored: true, bulk: true, vendor: old.vendor ?? null, totalQty: total, products: old.products ?? null },
+      ipAddress: actor.ip,
+    });
+    return out;
+  }, { timeout: 120_000, maxWait: 20_000 });
+
+  return { restored: true, auditId: auditLog.id, lines: restored.length, totalQty: total,
+           unitsRestored: restored.reduce((n, r) => n + r.units, 0) };
+}
