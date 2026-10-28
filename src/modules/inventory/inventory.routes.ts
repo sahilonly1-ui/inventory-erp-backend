@@ -1250,27 +1250,50 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
     });
   }
 
-  if (txns.some(t => t.quantity < 0)) {
-    throw new BadRequestError('This deleted entry contains Stock Out lines. Restoring a deleted Stock Out automatically is not supported — re-enter the dispatch from Stock Out.');
-  }
   // Sanity check against what Version History showed for this deletion.
   const total = txns.reduce((n, t) => n + Math.abs(t.quantity), 0);
   if (old.totalQty != null && Number(old.totalQty) !== total) {
     throw new BadRequestError(`Cannot restore safely: rebuilt ${total} unit(s) but the deletion recorded ${old.totalQty}.`);
   }
 
-  // Units the deletion soft-deleted: same person, within a minute of it, same products.
   const productIds = [...new Set(txns.map(t => t.productId))];
   const at = auditLog.createdAt.getTime();
-  const units = Array.isArray(old.txns) && old.txns.some((t: any) => t.unitIds?.length)
-    ? await prisma.imeiInventory.findMany({ where: { id: { in: old.txns.flatMap((t: any) => t.unitIds ?? []) } } })
+  const win = { gte: new Date(at - 60_000), lte: new Date(at + 60_000) };
+  const hasUnitIds = Array.isArray(old.txns) && old.txns.some((t: any) => t.unitIds?.length);
+  const inbound  = txns.filter(t => t.quantity > 0);
+  const outbound = txns.filter(t => t.quantity < 0);
+
+  // Receipts: the units the deletion soft-deleted (same person, within a minute, same products).
+  const inProducts = [...new Set(inbound.map(t => t.productId))];
+  const units = !inbound.length ? [] : hasUnitIds
+    ? await prisma.imeiInventory.findMany({ where: { id: { in: inbound.flatMap(t => t.unitIds ?? []) } }, orderBy: { createdAt: 'asc' } })
     : await prisma.imeiInventory.findMany({
-        where: { isDeleted: true, productId: { in: productIds },
-                 ...(auditLog.userId ? { deletedBy: auditLog.userId } : {}),
-                 deletedAt: { gte: new Date(at - 60_000), lte: new Date(at + 60_000) } },
+        where: { isDeleted: true, productId: { in: inProducts },
+                 ...(auditLog.userId ? { deletedBy: auditLog.userId } : {}), deletedAt: win },
         orderBy: { createdAt: 'asc' },
       });
-  // A unit already back in stock under the same code (re-entered since) must not be duplicated.
+
+  // Dispatches: deleting a Stock Out put its units back IN_STOCK. Restoring it must
+  // mark those same units sold again — found by who/when the deletion touched them,
+  // and only if nothing has happened to them since.
+  const outProducts = [...new Set(outbound.map(t => t.productId))];
+  const soldBack = !outbound.length ? [] : hasUnitIds
+    ? await prisma.imeiInventory.findMany({ where: { id: { in: outbound.flatMap(t => t.unitIds ?? []) } } })
+    : await prisma.imeiInventory.findMany({
+        where: { isDeleted: false, status: 'IN_STOCK', stockOutTxnId: null, productId: { in: outProducts },
+                 ...(auditLog.userId ? { updatedBy: auditLog.userId } : {}), updatedAt: win },
+      });
+  for (const pid of outProducts) {
+    const need = outbound.filter(t => t.productId === pid).reduce((n, t) => n + Math.abs(t.quantity), 0);
+    const mine = soldBack.filter(u => u.productId === pid);
+    if (mine.some(u => u.isDeleted || u.status !== 'IN_STOCK')) {
+      throw new BadRequestError(`Cannot restore: some units of this Stock Out (${mine.filter(u => u.status !== 'IN_STOCK' || u.isDeleted).slice(0, 5).map(u => u.imei1).join(', ')}) have been sold or removed since. Re-enter the dispatch instead.`);
+    }
+    if (mine.length && mine.length !== need) {
+      throw new BadRequestError(`Cannot restore safely: the Stock Out had ${need} unit(s) of one product but ${mine.length} matching unit(s) were found. Re-enter the dispatch instead.`);
+    }
+  }
+  // A received unit already back in stock under the same code (re-entered since) must not be duplicated.
   const codes = units.map(u => u.imei1);
   const live = codes.length ? await prisma.imeiInventory.findMany({
     where: { imei1: { in: codes }, isDeleted: false }, select: { imei1: true } }) : [];
@@ -1279,11 +1302,13 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
     throw new BadRequestError(`Cannot restore: ${liveSet.size} unit(s) from this entry are already in stock again (${[...liveSet].slice(0, 5).join(', ')}). It looks like the entry was re-entered.`);
   }
 
-  // The entry's date: the units carry the date the stock was entered for.
+  // The entry's date: received units carry the date the stock was entered for;
+  // otherwise use when the lines were originally saved.
   const entryDate = units.length ? units[0].createdAt : txns.reduce((d, t) => t.createdAt < d ? t.createdAt : d, txns[0].createdAt);
 
   const restored = await prisma.$transaction(async (tx) => {
     const unitPool = [...units];
+    const soldPool = [...soldBack];
     const out: { product: string; qty: number; units: number }[] = [];
     for (const t of txns) {
       const move = await applyLedgerMovementTx(tx, {
@@ -1292,20 +1317,35 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
         referenceType: t.referenceType ?? 'RESTORE', referenceId: t.referenceId ?? auditLog.id,
         remarks: t.remarks ?? null, occurredAt: entryDate,
       } as any, actor);
-      // Give this line back exactly as many of its own units as it received.
-      const mine = unitPool.filter(u => u.productId === t.productId && u.warehouseId === t.warehouseId).slice(0, t.quantity);
-      for (const u of mine) unitPool.splice(unitPool.indexOf(u), 1);
-      if (mine.length) {
-        await tx.imeiInventory.updateMany({
-          where: { id: { in: mine.map(u => u.id) } },
-          data: { isDeleted: false, deletedAt: null, deletedBy: null, stockInTxnId: move.transactionId, updatedBy: actor.id },
-        });
+      if (t.quantity > 0) {
+        // Give this line back exactly as many of its own units as it received.
+        const mine = unitPool.filter(u => u.productId === t.productId && u.warehouseId === t.warehouseId).slice(0, t.quantity);
+        for (const u of mine) unitPool.splice(unitPool.indexOf(u), 1);
+        if (mine.length) {
+          await tx.imeiInventory.updateMany({
+            where: { id: { in: mine.map(u => u.id) } },
+            data: { isDeleted: false, deletedAt: null, deletedBy: null, stockInTxnId: move.transactionId, updatedBy: actor.id },
+          });
+        }
+        out.push({ product: t.productId, qty: t.quantity, units: mine.length });
+      } else {
+        // Mark this dispatch's own units sold again and link them to it.
+        const mine = soldPool.filter(u => u.productId === t.productId && u.warehouseId === t.warehouseId).slice(0, Math.abs(t.quantity));
+        for (const u of mine) soldPool.splice(soldPool.indexOf(u), 1);
+        if (mine.length) {
+          await tx.imeiInventory.updateMany({
+            where: { id: { in: mine.map(u => u.id) } },
+            data: { status: 'SOLD', stockOutTxnId: move.transactionId, updatedBy: actor.id },
+          });
+        }
+        out.push({ product: t.productId, qty: t.quantity, units: mine.length });
       }
-      out.push({ product: t.productId, qty: t.quantity, units: mine.length });
     }
     for (const pid of productIds) {
       const wh = txns.find(t => t.productId === pid)!.warehouseId;
-      await assertConsistentTx(tx, pid, wh, true, { strict: false });
+      // A dispatch must not leave more tracked units in stock than the stock count —
+      // strict for those, so a bad rebuild rolls the whole restore back.
+      await assertConsistentTx(tx, pid, wh, true, { strict: outProducts.includes(pid) });
     }
     await writeAudit(tx, {
       userId: actor.id, action: 'CREATE', entityName: 'inventory_transactions', entityId: txnIds[0],

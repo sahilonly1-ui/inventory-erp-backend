@@ -942,6 +942,7 @@ Object.assign(inventoryService, {
           });
         }
         if (sold.length) {
+          unitsByTxn.set(t.id, sold.map(r => r.id));
           await tx.imeiInventory.updateMany({
             where: { id: { in: sold.map(r => r.id) } },
             data: { status: 'IN_STOCK', updatedBy: actor.id, stockOutTxnId: null },
