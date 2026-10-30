@@ -624,7 +624,17 @@ export const productService = {
   },
 
   async updateBrand(id: string, input: { name: string }, actor: Actor) {
-    return prisma.brand.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
+    // Renaming a brand must rename it on its products too — the brand filters on
+    // IMEI Tracker / Stock Report read the product's brand text, so a rename that
+    // stopped at the Brand table left the old spelling behind as a second entry.
+    const before = await prisma.brand.findUnique({ where: { id } });
+    return prisma.$transaction(async (tx) => {
+      const b = await tx.brand.update({ where: { id }, data: { ...input, updatedBy: actor.id } });
+      const or: any[] = [{ brandId: id }];
+      if (before?.name) or.push({ brand: { equals: before.name, mode: 'insensitive' } });
+      await tx.product.updateMany({ where: { OR: or }, data: { brand: b.name, brandId: id, updatedBy: actor.id } });
+      return b;
+    });
   },
 
   async deleteBrand(id: string, actor: Actor) {

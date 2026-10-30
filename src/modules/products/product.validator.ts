@@ -11,7 +11,7 @@ const arr   = (s: z.ZodTypeAny) => z.union([s, z.array(s)]).transform(v => Array
 export const createProductSchema = z.object({
   ean:           z.string().trim().min(1, 'EAN / Barcode is required').max(30),
   model:         z.string().trim().min(1, 'Product Name is required').max(120),
-  brand:         z.string().trim().min(1, 'Brand is required').max(80),
+  brand:         z.string().transform(v => v.replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim()).pipe(z.string().min(1, 'Brand is required').max(80)),
   brandId:       uuid.optional(),
   categoryId:    z.string({ required_error: 'Category is required' }).uuid('Category is required'),
   description:   z.string().max(1000).optional(),
@@ -72,7 +72,7 @@ export const listProductsSchema = z.object({
 export const idParamSchema         = z.object({ id: z.string().uuid() });
 export const createCategorySchema  = z.object({ name: z.string().min(1).max(120), parentId: uuid.optional() });
 export const updateCategorySchema  = createCategorySchema.partial().refine(v => Object.keys(v).length > 0, 'No fields');
-export const createBrandSchema     = z.object({ name: z.string().min(1).max(80) });
+export const createBrandSchema     = z.object({ name: z.string().transform(v => v.replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim()).pipe(z.string().min(1).max(80)) });
 export const updateBrandSchema     = createBrandSchema;
 export const mergeBrandsSchema     = z.object({ sourceIds: z.array(uuid).min(1), targetId: uuid });
 export const setAttributesSchema   = z.object({ attributes: z.array(z.object({ key: z.string(), value: z.string() })) });

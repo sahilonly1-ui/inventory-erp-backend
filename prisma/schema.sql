@@ -596,3 +596,22 @@ CREATE TABLE IF NOT EXISTS price_watch_settings (
   value JSONB NOT NULL,
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+
+-- ── Brand name clean-up (idempotent, runs on every boot) ──────────────────
+-- The IMEI Tracker / Stock Report brand filters are built from the brand text
+-- on each product. A stray trailing space, non-breaking space or invisible
+-- character made the same brand appear twice (e.g. "JBL" and "JBL ").
+UPDATE products SET brand = btrim(regexp_replace(translate(brand, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g')) WHERE brand <> btrim(regexp_replace(translate(brand, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g'));
+UPDATE brands v SET "isDeleted" = true, "deletedAt" = now()
+  FROM brands c
+  WHERE v.id <> c.id AND v."isDeleted" = false AND c."isDeleted" = false
+    AND v.name <> btrim(regexp_replace(translate(v.name, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g')) AND c.name = btrim(regexp_replace(translate(v.name, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g'));
+UPDATE brands SET name = btrim(regexp_replace(translate(name, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g')), "updatedAt" = now()
+  WHERE name <> btrim(regexp_replace(translate(name, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g'))
+    AND NOT EXISTS (SELECT 1 FROM brands c WHERE c.name = btrim(regexp_replace(translate(brands.name, chr(160)||chr(8203)||chr(8204)||chr(8205)||chr(65279), ' '), '[[:space:]]+', ' ', 'g')));
+UPDATE products p SET brand = b.name, "brandId" = b.id
+  FROM brands b
+  WHERE b."isDeleted" = false AND lower(p.brand) = lower(b.name)
+    AND (p.brand <> b.name OR p."brandId" IS DISTINCT FROM b.id)
+    AND NOT EXISTS (SELECT 1 FROM brands b2 WHERE b2.id <> b.id AND b2."isDeleted" = false AND lower(b2.name) = lower(b.name));

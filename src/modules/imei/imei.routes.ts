@@ -790,9 +790,11 @@ router.get('/brands', authorize(PERMISSIONS.IMEI_READ), asyncHandler(async (_req
     distinct: ['productId'],
   });
   const seen: string[] = [];
+  const keys = new Set<string>();
   for (const r of rows) {
-    const b = r.product?.brand;
-    if (b && !seen.includes(b)) seen.push(b);
+    const b = (r.product?.brand ?? '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim();
+    const k = b.toLowerCase();
+    if (b && !keys.has(k)) { keys.add(k); seen.push(b); }
   }
   seen.sort((a, b) => a.localeCompare(b));
   const brands = seen;
