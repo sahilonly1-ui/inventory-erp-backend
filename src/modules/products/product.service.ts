@@ -4,7 +4,7 @@ import { prisma } from '../../config/prisma';
 import { ConflictError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
 import { productRepository } from './product.repository';
-import { normalizeProductName, normalizeProductNameWith, loadNameVocab } from '../../common/productName';
+import { normalizeProductName, normalizeProductNameWith, loadNameVocab, tidyProductName } from '../../common/productName';
 
 interface Actor { id: string; ip: string | null; }
 
@@ -506,7 +506,8 @@ export const productService = {
   async update(id: string, input: any, actor: Actor) {
     const existing = await productRepository.findById(id);
     if (!existing) throw new NotFoundError('Product not found');
-    if (typeof input.model === 'string') input = { ...input, model: await normalizeProductName(input.model) };
+    // An edit is deliberate: only tidy spacing, never "spell-correct" what was typed.
+    if (typeof input.model === 'string') input = { ...input, model: tidyProductName(input.model) };
     return prisma.$transaction(async (tx) => {
       // handle attributes separately
       const { attributes, ...productData } = input;

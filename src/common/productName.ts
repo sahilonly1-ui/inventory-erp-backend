@@ -16,6 +16,8 @@ const BASE_WORDS = `
 black white blue green grey gray silver gold rose pink purple violet red orange yellow
 brown beige cream navy teal mint lavender midnight starlight graphite titanium natural
 charcoal coral olive maroon peach aqua jet matte glossy frost pristine sparkling bronze
+sand dune lime khaki ivory pearl onyx obsidian slate stone ash smoke cyan magenta lilac
+copper champagne camo squad desert ocean sky forest moss sage blush ruby jade amber
 wireless wired bluetooth earbuds earphone earphones headphone headphones headset neckband
 neckbands speaker speakers charger charging adapter cable cover case tempered glass screen
 protector power bank smartwatch watch strap band phone smartphone tablet laptop keyboard
@@ -80,22 +82,30 @@ function matchCase(original: string, fixed: string): string {
   return fixed;
 }
 
-function fixWord(word: string, v: Vocab): string {
+const COLOURS = new Set(BASE_WORDS.slice(0, BASE_WORDS.indexOf('wireless')));
+
+function fixWord(word: string, v: Vocab, inBrackets = false): string {
   const k = word.toLowerCase();
   if (v.canon.has(k) && word !== word.toUpperCase()) return v.canon.get(k)!;
-  if (k.length < 4) return word;
+  // Only clear typos are touched: 5+ letters, never seen before anywhere.
+  // Shorter words ("Sand", "Dune", "Bend") are too often a real, rare word that
+  // sits one letter away from a common one ("Band") — those must be left alone.
+  if (k.length < 5) return word;
   if (word.length > 1 && word === word.toUpperCase()) return word;   // acronyms / codes: TWS, ANC, USB
   if (/[A-Z]/.test(word.slice(1))) return word;                     // brand styling: iPhone, AirPods, OnePlus
   const own = v.freq.get(k) || 0;
-  let best = '', bestF = 0;
-  for (const c of edits1(k)) {
+  if (own > 0) return word;                       // already used in the catalogue = a real word
+  if (inBrackets && COLOURS.has(k)) return word;
+  let best = '', bestF = 0, rivals = 0;
+  for (const c of new Set(edits1(k))) {
     const f = v.freq.get(c) || 0;
+    // Inside brackets (colour / variant) only correct towards a known colour.
+    if (!f || (inBrackets && !COLOURS.has(c))) continue;
+    rivals++;
     if (f > bestF) { best = c; bestF = f; }
   }
-  // Correct only when the typed word is unknown/rare and the suggestion is clearly common.
-  if (best && bestF >= 3 && bestF >= own * 10 && own <= 2) {
-    return v.canon.get(best) ?? matchCase(word, best);
-  }
+  // Exactly one plausible, clearly common word — otherwise it's a guess, so leave it.
+  if (best && rivals === 1 && bestF >= 5) return v.canon.get(best) ?? matchCase(word, best);
   return word;
 }
 
@@ -113,9 +123,13 @@ export function tidyProductName(raw: string): string {
 
 export function normalizeProductNameWith(raw: string, v: Vocab): string {
   const tidy = tidyProductName(raw);
+  let depth = 0;
   return tidy.split(' ').map(tok => {
+    const inBr = depth > 0 || tok.startsWith('(');
+    depth += (tok.match(/\(/g) || []).length - (tok.match(/\)/g) || []).length;
+    if (depth < 0) depth = 0;
     if (/\d/.test(tok)) return tok;                       // model codes, storage sizes
-    return tok.replace(/[A-Za-z]+/g, w => fixWord(w, v));
+    return tok.replace(/[A-Za-z]+/g, w => fixWord(w, v, inBr));
   }).join(' ');
 }
 
