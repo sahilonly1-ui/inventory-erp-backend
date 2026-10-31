@@ -295,3 +295,18 @@ export async function refetch(key: string, url: string | null) {
   await enqueue([{ key, title: e.title, brand: e.brand, categoryName: e.categoryName, url }]);
   return true;
 }
+
+// Self-test once per deploy: fetch one known phone end-to-end (not saved) and log the outcome.
+setTimeout(async () => {
+  const commit = process.env.RENDER_GIT_COMMIT || 'local';
+  try {
+    const seen: any[] = await (prisma as any).$queryRawUnsafe(`SELECT fields FROM spec_templates WHERE "categoryName" = '__selftest__'`);
+    if (seen[0]?.fields?.commit === commit) return;
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO spec_templates ("categoryName", fields) VALUES ('__selftest__', $1::jsonb)
+       ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ commit }));
+    const t0 = Date.now();
+    const r = await fetchSpecs('Samsung Galaxy A07 5G 4/128GB', 'Samsung', 'Smartphone', await templateFor('Smartphone'));
+    logger.info({ ms: Date.now() - t0, status: r.status, sources: r.sources, specs: r.specs }, 'Specs self-test');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs self-test failed'); }
+}, 40_000).unref();
