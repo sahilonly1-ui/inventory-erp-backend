@@ -615,3 +615,34 @@ UPDATE products p SET brand = b.name, "brandId" = b.id
   WHERE b."isDeleted" = false AND lower(p.brand) = lower(b.name)
     AND (p.brand <> b.name OR p."brandId" IS DISTINCT FROM b.id)
     AND NOT EXISTS (SELECT 1 FROM brands b2 WHERE b2.id <> b.id AND b2."isDeleted" = false AND lower(b2.name) = lower(b.name));
+
+-- ── Specifications tab ────────────────────────────────────────────────────
+-- One row per model+variant (colour ignored): specs are fetched once and kept.
+CREATE TABLE IF NOT EXISTS spec_entries (
+  key TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  brand TEXT,
+  "categoryName" TEXT,
+  specs JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  error TEXT,
+  "sourceUrl" TEXT,
+  manual BOOLEAN NOT NULL DEFAULT false,
+  "fetchedAt" TIMESTAMPTZ,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedBy" TEXT
+);
+-- Price shown on the specs sheet. Separate from the product's cost price.
+CREATE TABLE IF NOT EXISTS spec_prices (
+  "productId" TEXT PRIMARY KEY,
+  price NUMERIC(12,2) NOT NULL,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedBy" TEXT
+);
+-- Columns for categories without a built-in template (suggested once, then kept).
+CREATE TABLE IF NOT EXISTS spec_templates (
+  "categoryName" TEXT PRIMARY KEY,
+  fields JSONB NOT NULL,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
