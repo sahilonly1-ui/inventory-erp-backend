@@ -161,3 +161,17 @@ export async function askPlain(prompt: string): Promise<string> {
   if (!p) throw new Error('No AI key set on the server.');
   return p === 'gemini' ? gemini(prompt, false) : claude(prompt, false);
 }
+
+// After boot, confirm the AI key works so the logs show it (no customer data sent).
+setTimeout(async () => {
+  if (!GEMINI_KEY()) return;
+  try {
+    const model = await geminiModel();
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI_KEY() },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK.' }] }] }),
+    });
+    const d: any = await r.json().catch(() => ({}));
+    logger.info({ model, status: r.status, reply: d?.candidates?.[0]?.content?.parts?.[0]?.text?.slice(0, 20), error: d?.error?.message?.slice(0, 200) }, 'Gemini key check');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Gemini key check failed'); }
+}, 20_000).unref();
