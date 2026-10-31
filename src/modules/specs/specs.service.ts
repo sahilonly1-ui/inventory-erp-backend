@@ -1,7 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
-import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
+import { findPhonePage, readPhone, isGsmArena, parseResults } from './specs.gsmarena';
 import { aiProvider, askForSpecs, askPlain, getPage } from './specs.ai';
 
 /*
@@ -291,9 +291,14 @@ export async function refetch(key: string, url: string | null) {
 // One quick check after boot so the logs show whether GSMArena answers this server.
 setTimeout(() => {
   fetch('https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=galaxy%20a07', {
-    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' },
+    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36', accept: 'text/html', 'accept-language': 'en-IN,en;q=0.9' },
   }).then(async r => {
     const html = await r.text();
-    logger.info({ status: r.status, results: (html.match(/<div class="makers">[\s\S]*?<\/div>/)?.[0].match(/\.php"/g) ?? []).length }, 'GSMArena probe');
+    const i = html.search(/class="makers"/i);
+    logger.info({
+      status: r.status, length: html.length, title: html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.slice(0, 80),
+      results: parseResults(html).slice(0, 3), makersAt: i,
+      snippet: (i >= 0 ? html.slice(i, i + 400) : html.slice(0, 300)).replace(/\s+/g, ' '),
+    }, 'GSMArena probe');
   }).catch(e => logger.warn({ msg: e?.message }, 'GSMArena probe failed'));
 }, 15_000).unref();

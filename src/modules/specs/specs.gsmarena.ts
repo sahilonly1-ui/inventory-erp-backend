@@ -41,11 +41,21 @@ export function searchName(title: string): string {
 
 type Hit = { href: string; name: string };
 export function parseResults(html: string): Hit[] {
-  const box = html.match(/<div class="makers">([\s\S]*?)<\/div>/i)?.[1] ?? '';
+  // Phone pages look like "samsung_galaxy_a07_5g-14100.php". Read every such
+  // link that shows a name (inside the results block when present, else the page).
+  const start = html.search(/class="makers"/i);
+  const box = start >= 0 ? html.slice(start, start + 60_000) : html;
   const hits: Hit[] = [];
-  const re = /<a href="([^"]+\.php)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a[^>]+href="([a-z0-9_]+-\d+\.php)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(box))) hits.push({ href: m[1], name: decode(m[2]).replace(/\n/g, ' ').replace(/\s+/g, ' ') });
+  while ((m = re.exec(box))) {
+    const inner = m[2];
+    const span = inner.match(/<span[^>]*>([\s\S]*?)<\/span>/i)?.[1] ?? inner.match(/<strong[^>]*>([\s\S]*?)<\/strong>/i)?.[1];
+    const title = inner.match(/title="([^"]+)"/i)?.[1];
+    const name = decode(span ?? '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim()
+      || (title ? decode(title).split('.')[0] : '');
+    if (name && !hits.some(h => h.href === m![1])) hits.push({ href: m[1], name });
+  }
   return hits;
 }
 
