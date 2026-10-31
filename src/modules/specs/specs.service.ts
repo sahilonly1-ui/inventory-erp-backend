@@ -1,6 +1,8 @@
 import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
+import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
+import { aiProvider, askForSpecs, askPlain, getPage } from './specs.ai';
 
 /*
  * Specifications tab.
@@ -10,15 +12,14 @@ import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
  * background by an in-process queue: opening the tab enqueues whatever in-stock
  * model has no specs yet, and the page polls until they arrive.
  *
- * Fetching uses Claude with web search, told to use official brand pages first
- * and well-known spec sites (GSMArena, 91mobiles, Smartprix) after. When it
- * can't find a model, the row asks for a website link, and the specs are then
- * read from that page.
+ * Smartphones and Tablets are read straight from GSMArena (free). Everything
+ * else — and any phone GSMArena doesn't list — is fetched with Google Gemini's
+ * free tier using web search. When a model can't be found, the row asks for a
+ * website link, and the specs are then read from that page.
  */
 
-const API_KEY = () => process.env.ANTHROPIC_API_KEY || '';
-const MODEL = () => process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
-export const aiEnabled = () => !!API_KEY();
+export const aiEnabled = () => aiProvider() !== null;
+class NoAiError extends Error {}
 
 // ── Keys ──────────────────────────────────────────────────────────────────
 const clean = (s: string) => String(s ?? '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -46,10 +47,10 @@ export async function templateFor(categoryName: string): Promise<SpecField[]> {
   if (rows[0]?.fields?.length) return rows[0].fields;
   if (!aiEnabled()) return GENERIC;
   try {
-    const text = await callClaude(
+    const text = await askPlain(
       `A mobile & electronics retail shop in India prints a specifications sheet for customers. ` +
       `For the product category "${categoryName}", list the 5 to 7 most useful specification columns a customer compares. ` +
-      `Reply with JSON only: {"fields":[{"key":"camelCaseKey","label":"Short Label"}]}`, false);
+      `Reply with JSON only: {"fields":[{"key":"camelCaseKey","label":"Short Label"}]}`);
     const j = parseJson(text);
     const fields: SpecField[] = (j?.fields ?? [])
       .filter((f: any) => f?.key && f?.label)
@@ -64,32 +65,6 @@ export async function templateFor(categoryName: string): Promise<SpecField[]> {
     }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'spec template suggestion failed'); }
   return GENERIC;
-}
-
-// ── Claude ────────────────────────────────────────────────────────────────
-async function callClaude(prompt: string, useSearch: boolean, allowedDomains?: string[]): Promise<string> {
-  const body: any = {
-    model: MODEL(),
-    max_tokens: 2500,
-    messages: [{ role: 'user', content: prompt }],
-  };
-  if (useSearch) {
-    body.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6,
-      ...(allowedDomains?.length ? { allowed_domains: allowedDomains } : {}) }];
-  }
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 150_000);
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY(), 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    const data: any = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data?.error?.message || `AI request failed (${r.status})`);
-    return (data.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n');
-  } finally { clearTimeout(t); }
 }
 
 function parseJson(text: string): any {
@@ -116,53 +91,69 @@ function specPrompt(title: string, categoryName: string, fields: SpecField[], ex
   ].join('\n');
 }
 
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim();
-}
-
 type FetchResult = { status: 'OK' | 'NOT_FOUND'; specs: Record<string, string>; sources: string[] };
 
-async function fetchSpecs(title: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
-  let text = '';
-  if (url) {
-    // Read the page the user gave us. If the site blocks a direct read, search within that site instead.
-    let page = '';
-    try {
-      const r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36', accept: 'text/html' }, redirect: 'follow' });
-      if (r.ok) page = stripHtml(await r.text()).slice(0, 60_000);
-    } catch { /* fall through to site search */ }
-    if (page.length > 500) {
-      text = await callClaude(specPrompt(title, categoryName, fields,
-        `Read the specifications ONLY from this page content (from ${url}):\n"""${page}"""\nIn "sources" put ${JSON.stringify(url)}.`), false);
-    } else {
-      const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
-      text = await callClaude(specPrompt(title, categoryName, fields,
-        `The user says the specifications are on ${url}. Use that site.`), true, host ? [host] : undefined);
-    }
-  } else {
-    text = await callClaude(specPrompt(title, categoryName, fields, ''), true);
+const isPhoneLike = (fields: SpecField[]) => fields.some(f => f.key === 'processor');
+
+function finish(specs: Record<string, string>, sources: string[], fields: SpecField[], found = true): FetchResult {
+  const clean: Record<string, string> = {};
+  for (const f of fields) {
+    const v = specs?.[f.key];
+    if (v != null && String(v).trim() && !/^(n\/?a|unknown|-|—|not specified)$/i.test(String(v).trim())) clean[f.key] = String(v).trim().slice(0, 240);
   }
+  const src = sources.filter(u => /^https?:\/\//.test(String(u))).slice(0, 5);
+  const ok = found && Object.keys(clean).length >= Math.min(3, fields.length);
+  return { status: ok ? 'OK' : 'NOT_FOUND', specs: clean, sources: src };
+}
+
+async function viaAi(title: string, categoryName: string, fields: SpecField[], opts: { site?: string; pageText?: string; pageUrl?: string; note?: string }): Promise<FetchResult> {
+  if (!aiProvider()) throw new NoAiError('AI not set up');
+  const { text, sources } = await askForSpecs(specPrompt(title, categoryName, fields, opts.note ?? ''), {
+    search: !opts.pageText, query: title, site: opts.site, pageText: opts.pageText, pageUrl: opts.pageUrl,
+  });
   const j = parseJson(text);
   if (!j) throw new Error('Could not read the specifications from the AI reply');
-  const specs: Record<string, string> = {};
-  for (const f of fields) {
-    const v = j?.specs?.[f.key];
-    if (v != null && String(v).trim() && !/^(n\/?a|unknown|-|—)$/i.test(String(v).trim())) specs[f.key] = String(v).trim().slice(0, 240);
+  const src = [...(Array.isArray(j.sources) ? j.sources : []), ...sources];
+  return finish(j.specs ?? {}, src, fields, j.found !== false);
+}
+
+async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
+  // 1. A link the user gave.
+  if (url) {
+    if (isGsmArena(url) && isPhoneLike(fields)) {
+      const r = await readPhone(url, title);
+      return finish(r.specs, [url], fields);
+    }
+    const page = await getPage(url);
+    if (page.length > 500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
+    const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+    return viaAi(title, categoryName, fields, { site: host || undefined, note: `The specifications are on ${url}.` });
   }
-  const sources = (Array.isArray(j.sources) ? j.sources : []).filter((s: any) => /^https?:\/\//.test(String(s))).slice(0, 5);
-  const filled = Object.keys(specs).length;
-  if (j.found === false || filled < Math.min(3, fields.length)) return { status: 'NOT_FOUND', specs, sources };
-  return { status: 'OK', specs, sources };
+  // 2. Phones & tablets: GSMArena.
+  if (isPhoneLike(fields)) {
+    let gsmError: any = null;
+    try {
+      const page = await findPhonePage(title, brand);
+      if (page) {
+        const r = await readPhone(page, title);
+        const res = finish(r.specs, [page], fields);
+        if (res.status === 'OK') return res;
+      }
+    } catch (e) { gsmError = e; }
+    if (!aiProvider()) {
+      if (gsmError) throw gsmError;
+      return { status: 'NOT_FOUND', specs: {}, sources: [] };
+    }
+  }
+  // 3. Everything else (and phones GSMArena doesn't have): Gemini with web search.
+  return viaAi(title, categoryName, fields, {});
 }
 
 // ── Queue ─────────────────────────────────────────────────────────────────
 type Job = { key: string; title: string; brand: string; categoryName: string; url?: string | null };
 const queue: Job[] = [];
 const running = new Set<string>();
-const CONCURRENCY = 2;
+const CONCURRENCY = 1;   // GSMArena and the free AI tier both dislike bursts
 
 export async function enqueue(jobs: Job[]) {
   for (const j of jobs) {
@@ -187,21 +178,21 @@ function pump() {
 }
 
 async function runJob(job: Job) {
-  if (!aiEnabled()) {
-    await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'NO_AI', error = $2, "updatedAt" = now() WHERE key = $1`,
-      job.key, 'Automatic fetching is not set up yet (AI key missing on the server).');
-    return;
-  }
   await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'FETCHING', "updatedAt" = now() WHERE key = $1`, job.key);
   try {
     const fields = await templateFor(job.categoryName);
-    const r = await fetchSpecs(job.title, job.categoryName, fields, job.url);
+    const r = await fetchSpecs(job.title, job.brand, job.categoryName, fields, job.url);
     await prisma.$executeRawUnsafe(
       `UPDATE spec_entries SET status = $2, specs = $3::jsonb, sources = $4::jsonb, error = $5,
          manual = false, "fetchedAt" = now(), "updatedAt" = now() WHERE key = $1`,
       job.key, r.status, JSON.stringify(r.specs), JSON.stringify(r.sources),
       r.status === 'NOT_FOUND' ? 'Exact specifications could not be confirmed online.' : null);
   } catch (e: any) {
+    if (e instanceof NoAiError) {
+      await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'NO_AI', error = $2, "updatedAt" = now() WHERE key = $1`,
+        job.key, 'Automatic fetching for this category needs the free Gemini key on the server.');
+      return;
+    }
     logger.warn({ key: job.key, msg: e?.message }, 'spec fetch failed');
     await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'ERROR', error = $2, "updatedAt" = now() WHERE key = $1`,
       job.key, String(e?.message || 'Fetch failed').slice(0, 300));
@@ -296,3 +287,13 @@ export async function refetch(key: string, url: string | null) {
   await enqueue([{ key, title: e.title, brand: e.brand, categoryName: e.categoryName, url }]);
   return true;
 }
+
+// One quick check after boot so the logs show whether GSMArena answers this server.
+setTimeout(() => {
+  fetch('https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=galaxy%20a07', {
+    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' },
+  }).then(async r => {
+    const html = await r.text();
+    logger.info({ status: r.status, results: (html.match(/<div class="makers">[\s\S]*?<\/div>/)?.[0].match(/\.php"/g) ?? []).length }, 'GSMArena probe');
+  }).catch(e => logger.warn({ msg: e?.message }, 'GSMArena probe failed'));
+}, 15_000).unref();
