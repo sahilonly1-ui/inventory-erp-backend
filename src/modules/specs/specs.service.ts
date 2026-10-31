@@ -209,12 +209,24 @@ async function runJob(job: Job) {
 
 // ── Data for the tab ──────────────────────────────────────────────────────
 export async function inStockCategories() {
+  // Same sellable rule as the sheet: IMEI-tracked products count only regular
+  // in-stock units; others use the stock level.
   const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+    WITH lvl AS (
+      SELECT "productId", SUM(quantity) AS qty FROM stock_levels GROUP BY "productId"
+    ), units AS (
+      SELECT "productId",
+        COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND status = 'IN_STOCK') AS sellable,
+        COUNT(*) FILTER (WHERE ("imeiType" IN ('DEMO','OPEN_BOX') OR status IN ('DEMO','OPEN_BOX')) AND status != 'SOLD') AS other
+      FROM imei_inventory WHERE "isDeleted" = false GROUP BY "productId"
+    )
     SELECT c.id, c.name, COUNT(DISTINCT p.id) AS count
     FROM products p
     JOIN product_categories c ON c.id = p."categoryId"
+    JOIN lvl ON lvl."productId" = p.id
+    LEFT JOIN units u ON u."productId" = p.id
     WHERE p."isDeleted" = false
-      AND EXISTS (SELECT 1 FROM stock_levels s WHERE s."productId" = p.id AND s.quantity > 0)
+      AND (CASE WHEN u."productId" IS NOT NULL AND (u.sellable > 0 OR u.other > 0) THEN u.sellable ELSE lvl.qty END) > 0
     GROUP BY c.id, c.name ORDER BY c.name`);
   return rows.map((r: any) => ({ id: r.id, name: r.name, count: Number(r.count) }));
 }
@@ -227,6 +239,30 @@ export async function sheet(categoryId: string) {
     select: { id: true, ean: true, model: true, brand: true, costPrice: true, sellingPrice: true,
               stockLevels: { select: { quantity: true } } },
   });
+  // Sellable stock, counted exactly like the Stock Report: when a product has
+  // IMEI / serial units, only regular (NIL) units that are IN_STOCK count —
+  // demo and open-box units don't. Otherwise the stock level is the count.
+  const unitCounts: any[] = products.length ? await (prisma as any).$queryRawUnsafe(`
+    SELECT "productId",
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND status = 'IN_STOCK') AS sellable,
+      COUNT(*) FILTER (WHERE "imeiType" = 'NIL' AND status = 'IN_STOCK' AND activated = true) AS activated,
+      COUNT(*) FILTER (WHERE ("imeiType" = 'DEMO' OR status = 'DEMO') AND status != 'SOLD') AS demo,
+      COUNT(*) FILTER (WHERE ("imeiType" = 'OPEN_BOX' OR status = 'OPEN_BOX') AND status != 'SOLD') AS "openBox"
+    FROM imei_inventory
+    WHERE "isDeleted" = false AND "productId" = ANY($1::text[])
+    GROUP BY "productId"`, products.map((p: any) => p.id)) : [];
+  const unitsBy = new Map<string, any>(unitCounts.map((u: any) => [u.productId, u]));
+  const available = (p: any) => {
+    const u = unitsBy.get(p.id);
+    const level = p.stockLevels.reduce((n: number, s: any) => n + s.quantity, 0);
+    if (u && (Number(u.sellable) > 0 || Number(u.demo) > 0 || Number(u.openBox) > 0)) {
+      return { qty: Number(u.sellable), activated: Number(u.activated) };
+    }
+    return { qty: level, activated: 0 };
+  };
+  // Only what can actually be sold today.
+  for (let i = products.length - 1; i >= 0; i--) if (available(products[i]).qty <= 0) products.splice(i, 1);
+
   const fields = await templateFor(cat.name);
   const keys = [...new Set(products.map((p: any) => specKey(p.brand, p.model)))];
   const entries = keys.length ? await (prisma as any).$queryRawUnsafe(
@@ -259,7 +295,7 @@ export async function sheet(categoryId: string) {
     const cost = Number(p.costPrice);
     return {
       productId: p.id, ean: p.ean, brand: p.brand, model: p.model, key,
-      qty: p.stockLevels.reduce((n: number, s: any) => n + s.quantity, 0),
+      qty: available(p).qty, activated: available(p).activated,
       price: priceBy.get(p.id) ?? cost, priceEdited: priceBy.has(p.id), costPrice: cost, mrp: Number(p.sellingPrice),
       status: e?.status ?? 'PENDING', specs: e?.specs ?? {}, sources: e?.sources ?? [],
       error: e?.error ?? null, sourceUrl: e?.sourceUrl ?? null, manual: !!e?.manual,
