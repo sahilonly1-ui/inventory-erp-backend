@@ -43,7 +43,13 @@ async function geminiModel(): Promise<string> {
 
 class AiError extends Error { constructor(msg: string, public kind: 'grounding' | 'quota' | 'other') { super(msg); } }
 
+// Free keys usually get no Google Search quota. Once we see that, stop trying
+// grounding for a day and go straight to our own search + plain Gemini.
+let groundingOffUntil = 0;
+export const groundingAvailable = () => Date.now() >= groundingOffUntil;
+
 async function gemini(prompt: string, withSearch: boolean): Promise<string> {
+  if (withSearch && !groundingAvailable()) throw new AiError('Google Search grounding not available on this key', 'grounding');
   const model = await geminiModel();
   const body: any = { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1 } };
   if (withSearch) body.tools = [{ google_search: {} }];
@@ -54,7 +60,8 @@ async function gemini(prompt: string, withSearch: boolean): Promise<string> {
     const d: any = await r.json().catch(() => ({}));
     if (r.ok) return (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('\n');
     const msg = String(d?.error?.message || `Gemini error ${r.status}`);
-    if (withSearch && (r.status === 400 || r.status === 403 || /search|ground|tool/i.test(msg) || /limit: ?0/i.test(msg))) {
+    if (withSearch && (r.status === 400 || r.status === 403 || r.status === 429 || /search|ground|tool/i.test(msg))) {
+      groundingOffUntil = Date.now() + 24 * 3600_000;
       throw new AiError(msg, 'grounding');
     }
     if (r.status === 429) {
@@ -173,14 +180,6 @@ setTimeout(async () => {
     });
     const d: any = await r.json().catch(() => ({}));
     logger.info({ model, status: r.status, reply: d?.candidates?.[0]?.content?.parts?.[0]?.text?.slice(0, 20), error: d?.error?.message?.slice(0, 200) }, 'Gemini key check');
-    if (r.ok) {
-      // Does the free tier allow Google Search grounding on this key?
-      const g = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI_KEY() },
-        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'What is the chipset of the Samsung Galaxy A07 5G? One line.' }] }], tools: [{ google_search: {} }] }),
-      });
-      const gd: any = await g.json().catch(() => ({}));
-      logger.info({ status: g.status, reply: gd?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join(' ')?.slice(0, 120), error: gd?.error?.message?.slice(0, 200) }, 'Gemini search check');
-    }
+
   } catch (e: any) { logger.warn({ msg: e?.message }, 'Gemini key check failed'); }
 }, 20_000).unref();
