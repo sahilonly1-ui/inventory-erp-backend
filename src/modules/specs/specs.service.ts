@@ -1,7 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
-import { findPhonePage, readPhone, isGsmArena, parseResults } from './specs.gsmarena';
+import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
 import { aiProvider, askForSpecs, askPlain, getPage } from './specs.ai';
 
 /*
@@ -121,8 +121,13 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
   // 1. A link the user gave.
   if (url) {
     if (isGsmArena(url) && isPhoneLike(fields)) {
-      const r = await readPhone(url, title);
-      return finish(r.specs, [url], fields);
+      try {
+        const r = await readPhone(url, title);
+        return finish(r.specs, [url], fields);
+      } catch (e) {
+        if (!aiProvider()) throw new NoAiError('GSMArena unreachable');
+        return viaAi(title, categoryName, fields, { note: `Use the GSMArena page ${url} for this model.` });
+      }
     }
     const page = await getPage(url);
     if (page.length > 500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
@@ -141,9 +146,12 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
       }
     } catch (e) { gsmError = e; }
     if (!aiProvider()) {
-      if (gsmError) throw gsmError;
+      // GSMArena blocked / unreachable and no AI to fall back on.
+      if (gsmError) throw new NoAiError(String(gsmError?.message || 'GSMArena unreachable'));
       return { status: 'NOT_FOUND', specs: {}, sources: [] };
     }
+    // GSMArena didn't work: same sources through Google Search instead.
+    return viaAi(title, categoryName, fields, { note: 'GSMArena is the preferred source for this phone/tablet; the official brand website is equally good.' });
   }
   // 3. Everything else (and phones GSMArena doesn't have): Gemini with web search.
   return viaAi(title, categoryName, fields, {});
@@ -190,7 +198,7 @@ async function runJob(job: Job) {
   } catch (e: any) {
     if (e instanceof NoAiError) {
       await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'NO_AI', error = $2, "updatedAt" = now() WHERE key = $1`,
-        job.key, 'Automatic fetching for this category needs the free Gemini key on the server.');
+        job.key, 'Automatic fetching needs the free Gemini key on the server.');
       return;
     }
     logger.warn({ key: job.key, msg: e?.message }, 'spec fetch failed');
@@ -287,18 +295,3 @@ export async function refetch(key: string, url: string | null) {
   await enqueue([{ key, title: e.title, brand: e.brand, categoryName: e.categoryName, url }]);
   return true;
 }
-
-// One quick check after boot so the logs show whether GSMArena answers this server.
-setTimeout(() => {
-  fetch('https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=galaxy%20a07', {
-    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36', accept: 'text/html', 'accept-language': 'en-IN,en;q=0.9' },
-  }).then(async r => {
-    const html = await r.text();
-    const i = html.search(/class="makers"/i);
-    logger.info({
-      status: r.status, length: html.length, title: html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.slice(0, 80),
-      results: parseResults(html).slice(0, 3), makersAt: i,
-      snippet: (i >= 0 ? html.slice(i, i + 400) : html.slice(0, 300)).replace(/\s+/g, ' '),
-    }, 'GSMArena probe');
-  }).catch(e => logger.warn({ msg: e?.message }, 'GSMArena probe failed'));
-}, 15_000).unref();

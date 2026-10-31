@@ -13,14 +13,26 @@ const BASE = 'https://www.gsmarena.com/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 
 let last = 0;
+// GSMArena puts a Cloudflare check in front of cloud servers. When we hit it,
+// stop asking for a few hours instead of wasting every fetch on it.
+let blockedUntil = 0;
+export class GsmBlocked extends Error {}
+export const gsmBlocked = () => Date.now() < blockedUntil;
+
 async function politeGet(url: string): Promise<string> {
+  if (gsmBlocked()) throw new GsmBlocked('GSMArena is not reachable from the server right now.');
   const wait = last + 3500 - Date.now();
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   last = Date.now();
   const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html,application/xhtml+xml', 'accept-language': 'en-IN,en;q=0.9' }, redirect: 'follow' });
   if (r.status === 429 || r.status === 403) throw new Error('GSMArena is limiting requests right now — will try again later.');
   if (!r.ok) throw new Error(`GSMArena returned ${r.status}`);
-  return r.text();
+  const html = await r.text();
+  if (/Turnstile check|challenges\.cloudflare\.com/i.test(html.slice(0, 3000))) {
+    blockedUntil = Date.now() + 6 * 3600_000;
+    throw new GsmBlocked('GSMArena is not reachable from the server right now.');
+  }
+  return html;
 }
 
 const decode = (s: string) => s
