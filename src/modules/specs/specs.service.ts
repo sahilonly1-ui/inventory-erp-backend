@@ -423,3 +423,34 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
+
+// Diagnostics (temporary): which official brand sites answer this server, and how.
+setTimeout(async () => {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+  const sites: [string, string][] = [
+    ['www.gonoise.com', 'watch'], ['www.fireboltt.com', 'watch'], ['www.boultaudio.com', 'buds'], ['www.portronics.com', 'speaker'],
+    ['ambraneindia.com', 'power bank'], ['www.mivi.in', 'buds'], ['www.ptron.in', 'buds'], ['truke.in', 'buds'], ['urbn.in', 'power bank'],
+    ['stuffcool.in', 'charger'], ['gizmore.in', 'watch'], ['maximawatches.com', 'watch'], ['www.fastrack.in', 'smart watch'],
+    ['www.crossbeats.in', 'watch'], ['zebronics.com', 'speaker'], ['www.toreto.in', 'speaker'], ['www.saregama.com', 'carvaan'],
+    ['in.nothing.tech', 'phone'], ['www.lavamobiles.com', 'phone'], ['in.jbl.com', 'go 4'], ['www.marshall.com', 'willen'],
+    ['www.infinixmobility.com', 'hot'], ['www.oneplus.in', 'nord'], ['www.samsung.com/in', 'galaxy a07'], ['www.motorola.com/in', 'edge 70'],
+    ['www.mi.com/in', 'redmi note 14'], ['www.realme.com/in', 'narzo'], ['www.oppo.com/in', 'a5 pro'], ['www.vivo.com/in', 'y39'],
+    ['www.apple.com/in', 'iphone 16'], ['www.dizo.in', 'watch'], ['www.boat-lifestyle.com', 'stone'],
+  ];
+  for (const [d, q] of sites) {
+    const out: any = { site: d };
+    try {
+      const r = await fetch(`https://${d}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=3`, { headers: { 'user-agent': UA, accept: 'application/json' } });
+      const ct = r.headers.get('content-type') || '';
+      const j: any = ct.includes('json') ? await r.json().catch(() => null) : null;
+      out.shopify = r.status; out.n = j?.resources?.results?.products?.length ?? null; out.first = j?.resources?.results?.products?.[0]?.title?.slice(0, 50);
+    } catch (e: any) { out.shopifyErr = String(e?.message).slice(0, 60); }
+    try {
+      const r = await fetch(`https://${d}/search?q=${encodeURIComponent(q)}`, { headers: { 'user-agent': UA, accept: 'text/html' } });
+      const h = await r.text();
+      out.html = r.status; out.len = h.length; out.cf = /Just a moment|Turnstile|Attention Required/i.test(h.slice(0, 2000));
+      out.ld = (h.match(/application\/ld\+json/g) ?? []).length;
+    } catch (e: any) { out.htmlErr = String(e?.message).slice(0, 60); }
+    logger.info(out, 'Brand diag');
+  }
+}, 60_000).unref();
