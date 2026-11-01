@@ -2,7 +2,8 @@ import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
 import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
-import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl } from './specs.ai';
+import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl, groundingAvailable } from './specs.ai';
+import * as g360 from './specs.gadgets360';
 
 /*
  * Specifications tab.
@@ -124,44 +125,59 @@ function fromAiText(text: string, sources: string[], fields: SpecField[]): Fetch
 
 const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
+async function fromGadgets360(url: string, title: string, categoryName: string, fields: SpecField[]): Promise<FetchResult | null> {
+  const r = await g360.readProduct(url, title, fields.map(f => f.key));
+  const res = finish(r.specs, [url], fields);
+  if (res.status === 'OK') return res;
+  // Page found but our label mapping came up short: let the AI read the same page (one request).
+  if (aiProvider() && r.text.length > 1500) {
+    try { return await viaAi(title, categoryName, fields, { pageText: r.text, pageUrl: url }); } catch (e: any) { logger.warn({ msg: e?.message }, 'AI read of Gadgets 360 page failed'); }
+  }
+  return Object.keys(res.specs).length ? res : null;
+}
+
 async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
   // 1. A link the user gave: read that page, whichever way works.
   if (url) {
+    if (/gadgets360\.com/i.test(url)) {
+      const r = await fromGadgets360(url, title, categoryName, fields);
+      if (r) return r;
+    }
     if (isGsmArena(url) && isPhoneLike(fields)) {
       try { const r = await readPhone(url, title); const res = finish(r.specs, [url], fields); if (res.status === 'OK') return res; } catch { /* blocked */ }
     }
+    const page = await readPage(url);                                 // direct, then the free Jina reader
     if (!aiProvider()) throw new NoAiError('AI not set up');
+    if (page.length > 1500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
     const prompt = specPrompt(title, categoryName, fields, `Use the page ${url} for this model.`);
     const viaGoogle = await askWithUrl(prompt, url);                 // Google fetches the page itself
-    if (viaGoogle) {
-      const res = fromAiText(viaGoogle, [url], fields);
-      if (res.status === 'OK') return res;
-    }
-    const page = await readPage(url);                                 // direct, then the free Jina reader
-    if (page.length > 1500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
-    // Page can't be read from a server: search that site; its snippets still carry the specs.
-    const host = hostOf(url);
-    return viaAi(title, categoryName, fields, { note: `The user says the specifications are on ${url}.`,
-      queries: [host ? `site:${host} ${title}` : `${title} specifications`, `${title} specifications`] });
+    if (viaGoogle) return fromAiText(viaGoogle, [url], fields);
+    throw new Error('That website does not allow the server to read it. Try a Gadgets 360 or the brand\'s own page for this model.');
   }
-  // 2. Phones & tablets: GSMArena directly when it lets us in (it is paused for hours after a block).
+
+  // 2. Gadgets 360 — free, no AI, readable from the server. Phones, tablets, watches and more.
+  try {
+    const page = await g360.findProduct(title, brand);
+    if (page) {
+      const r = await fromGadgets360(page, title, categoryName, fields);
+      if (r && r.status === 'OK') return r;
+    }
+  } catch (e: any) { logger.warn({ msg: e?.message, title }, 'Gadgets 360 lookup failed'); }
+
+  // 3. GSMArena directly, when it lets us in (paused for hours after a block).
   if (isPhoneLike(fields)) {
     try {
       const page = await findPhonePage(title, brand);
-      if (page) {
-        const r = await readPhone(page, title);
-        const res = finish(r.specs, [page], fields);
-        if (res.status === 'OK') return res;
-      }
-    } catch { /* blocked or not found — use web search */ }
-    if (!aiProvider()) throw new NoAiError('AI not set up');
-    return viaAi(title, categoryName, fields, {
-      note: 'GSMArena or the official brand website are the preferred sources.',
-      queries: [`${title} specifications`, `${title} gsmarena`, `${title} specs price in India`],
-    });
+      if (page) { const r = await readPhone(page, title); const res = finish(r.specs, [page], fields); if (res.status === 'OK') return res; }
+    } catch { /* blocked */ }
   }
-  // 3. Everything else: web search + Gemini.
-  return viaAi(title, categoryName, fields, {});
+
+  // 4. AI with Google Search, only if the key has it (paid keys). Free keys: ask for a link.
+  if (aiProvider() && groundingAvailable()) {
+    try { return await viaAi(title, categoryName, fields, { note: 'GSMArena, Gadgets 360 or the official brand website are preferred.' }); }
+    catch (e: any) { logger.info({ msg: e?.message }, 'search-based fetch unavailable'); }
+  }
+  return { status: 'NOT_FOUND', specs: {}, sources: [] };
 }
 
 // ── Queue ─────────────────────────────────────────────────────────────────
@@ -358,42 +374,3 @@ setTimeout(async () => {
     await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs requeue failed'); }
 }, 30_000).unref();
-
-// Diagnostics (temporary): which spec sites can this server read directly, and does Gemini URL reading work.
-setTimeout(async () => {
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
-  const probe = async (name: string, url: string) => {
-    const t0 = Date.now();
-    try {
-      const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html', 'accept-language': 'en-IN,en;q=0.9' }, redirect: 'follow' });
-      const txt = await r.text();
-      const links = [...new Set([...txt.matchAll(/href="([^"]*galaxy[^"]*a07[^"]*)"/gi)].map(m => m[1]))].slice(0, 3);
-      logger.info({ name, status: r.status, ms: Date.now() - t0, len: txt.length, title: txt.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.slice(0, 70),
-        a07: /a07/i.test(txt), chip: /dimensity|helio|snapdragon|exynos/i.test(txt), links }, 'Specs diag2');
-    } catch (e: any) { logger.info({ name, err: e?.message }, 'Specs diag2'); }
-  };
-  await probe('gadgets360-search', 'https://www.gadgets360.com/search?searchtext=samsung+galaxy+a07+5g');
-  await probe('smartprix-search', 'https://www.smartprix.com/products/?q=samsung+galaxy+a07+5g');
-  await probe('mysmartprice-search', 'https://www.mysmartprice.com/msp/search/search.php?search_type=mobile&s=samsung+galaxy+a07+5g');
-  await probe('phonearena-search', 'https://www.phonearena.com/search?term=galaxy+a07+5g');
-  await probe('nanoreview-search', 'https://nanoreview.net/en/search?q=galaxy+a07+5g');
-  await probe('devicespecifications', 'https://www.devicespecifications.com/en/brand/c5f8ea');
-  await probe('samsung-in', 'https://www.samsung.com/in/smartphones/galaxy-a/galaxy-a07-5g-light-violet-128gb-sm-a076blvcins/');
-  if (process.env.GEMINI_API_KEY) {
-    for (const [name, url] of [['urlctx-gsm-page', 'https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php'], ['urlctx-gsm-search', 'https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=moto%20edge%2070%20fusion']]) {
-      for (const model of ['gemini-3.8-flash', 'gemini-3.5-flash']) {
-        const t0 = Date.now();
-        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-          method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `Open ${url} and reply with the first phone name and its chipset you see on that page, nothing else.` }] }], tools: [{ url_context: {} }] }),
-        });
-        const d: any = await r.json().catch(() => ({}));
-        logger.info({ name, model, status: r.status, ms: Date.now() - t0,
-          reply: d?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join(' ')?.slice(0, 150),
-          meta: JSON.stringify(d?.candidates?.[0]?.urlContextMetadata ?? null)?.slice(0, 250),
-          error: d?.error?.message?.slice(0, 160) }, 'Specs diag2');
-        if (r.status !== 503) break;
-      }
-    }
-  }
-}, 50_000).unref();
