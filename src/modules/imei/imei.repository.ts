@@ -7,6 +7,7 @@ export interface LockedImei {
   imei1: string;
   imei2: string | null;
   status: ImeiStatus;
+  imeiType?: string;
   productId: string;
   warehouseId: string;
 }
@@ -71,7 +72,7 @@ export const imeiRepository = {
   // Row-locks the given IMEIs FOR UPDATE so concurrent dispatches can't double-sell.
   lockByImei1(tx: Prisma.TransactionClient, imei1List: string[]) {
     return tx.$queryRaw<LockedImei[]>`
-      SELECT "id", "imei1", "imei2", "status", "productId", "warehouseId"
+      SELECT "id", "imei1", "imei2", "status", "imeiType", "productId", "warehouseId"
       FROM imei_inventory
       WHERE "imei1" IN (${Prisma.join(imei1List)}) AND "isDeleted" = false
       FOR UPDATE`;

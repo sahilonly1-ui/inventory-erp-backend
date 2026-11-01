@@ -228,7 +228,10 @@ export const imeiService = {
     const result = await prisma.$transaction(async (tx) => {
       const [row] = await imeiRepository.lockByImei1(tx, [imei]);
       if (!row) throw new NotFoundError(`IMEI ${imei} not found`);
-      if (row.status === target) return { imei, from: row.status, to: target, stockDelta: 0, productId: row.productId, warehouseId: row.warehouseId, newQuantity: null as number | null };
+      // Demo / Open Box units received as such sit at IN_STOCK with imeiType DEMO / OPEN_BOX.
+      // Choosing IN STOCK means "make it a regular sellable unit" — clear the type too.
+      const typeReset = String(target) === 'IN_STOCK' && ['DEMO', 'OPEN_BOX'].includes(String((row as any).imeiType));
+      if (row.status === target && !typeReset) return { imei, from: row.status, to: target, stockDelta: 0, productId: row.productId, warehouseId: row.warehouseId, newQuantity: null as number | null };
 
       // A unit already sold to a customer is locked here. This endpoint moves
       // the ledger directly (a RETURN or ADJUSTMENT entry with no paperwork
@@ -243,6 +246,9 @@ export const imeiService = {
 
       const delta = statusStockDelta(row.status, target);
       await imeiRepository.setStatus(tx, [row.id], target, actor.id);
+      if (typeReset) {
+        await tx.imeiInventory.update({ where: { id: row.id }, data: { imeiType: 'NIL' as any, updatedBy: actor.id } });
+      }
       // Update swiped flag if provided; record timestamp when swiping on
       if (swiped !== undefined) {
         await tx.imeiInventory.update({
@@ -267,7 +273,8 @@ export const imeiService = {
 
       await writeAudit(tx, {
         userId: actor.id, action: 'UPDATE', entityName: 'imei_inventory', entityId: row.id,
-        oldValue: { status: row.status }, newValue: { status: target, reason }, ipAddress: actor.ip,
+        oldValue: { status: row.status, ...(typeReset ? { imeiType: (row as any).imeiType } : {}) },
+        newValue: { status: target, reason, ...(typeReset ? { imeiType: 'NIL' } : {}) }, ipAddress: actor.ip,
       });
       await assertConsistentTx(tx, row.productId, row.warehouseId, true, { strict: true });
       return { imei, from: row.status, to: target, stockDelta: delta, productId: row.productId, warehouseId: row.warehouseId, newQuantity };
