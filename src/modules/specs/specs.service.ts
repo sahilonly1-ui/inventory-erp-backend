@@ -332,7 +332,7 @@ export async function refetch(key: string, url: string | null) {
   return true;
 }
 
-// Self-test once per deploy: fetch one known phone end-to-end (not saved) and log the outcome.
+// Diagnostics once per deploy: which free fetch routes work from this server.
 setTimeout(async () => {
   const commit = process.env.RENDER_GIT_COMMIT || 'local';
   try {
@@ -341,8 +341,34 @@ setTimeout(async () => {
     await prisma.$executeRawUnsafe(
       `INSERT INTO spec_templates ("categoryName", fields) VALUES ('__selftest__', $1::jsonb)
        ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ commit }));
-    const t0 = Date.now();
-    const r = await fetchSpecs('Samsung Galaxy A07 5G 4/128GB', 'Samsung', 'Smartphone', await templateFor('Smartphone'));
-    logger.info({ ms: Date.now() - t0, status: r.status, sources: r.sources, specs: r.specs }, 'Specs self-test');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs self-test failed'); }
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+    const probe = async (name: string, url: string, init: any = {}) => {
+      const t0 = Date.now();
+      try {
+        const r = await fetch(url, { headers: { 'user-agent': UA, ...(init.headers || {}) }, ...init });
+        const txt = await r.text();
+        logger.info({ name, status: r.status, ms: Date.now() - t0, len: txt.length, head: txt.slice(0, 160).replace(/\s+/g, ' '),
+          hasGalaxy: /galaxy a07/i.test(txt), hasChip: /dimensity|helio|snapdragon/i.test(txt) }, 'Specs diag');
+      } catch (e: any) { logger.info({ name, err: e?.message }, 'Specs diag'); }
+    };
+    await probe('jina-gsm-search', 'https://r.jina.ai/https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=galaxy%20a07%205g');
+    await probe('jina-gsm-page', 'https://r.jina.ai/https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php');
+    await probe('ddg', 'https://html.duckduckgo.com/html/?q=samsung%20galaxy%20a07%205g%20specifications');
+    await probe('ddg-lite', 'https://lite.duckduckgo.com/lite/?q=samsung%20galaxy%20a07%205g%20specifications');
+    await probe('bing', 'https://www.bing.com/search?q=samsung+galaxy+a07+5g+specifications&setlang=en-IN');
+    await probe('91mobiles', 'https://www.91mobiles.com/samsung-galaxy-a07-5g-price-in-india');
+    await probe('jina-91mobiles', 'https://r.jina.ai/https://www.91mobiles.com/samsung-galaxy-a07-5g-price-in-india');
+    if (process.env.GEMINI_API_KEY) {
+      const t0 = Date.now();
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'From https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php give only the chipset name.' }] }], tools: [{ url_context: {} }] }),
+      });
+      const d: any = await r.json().catch(() => ({}));
+      logger.info({ name: 'gemini-url-context', status: r.status, ms: Date.now() - t0,
+        reply: d?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join(' ')?.slice(0, 150),
+        meta: JSON.stringify(d?.candidates?.[0]?.urlContextMetadata ?? d?.candidates?.[0]?.url_context_metadata ?? null)?.slice(0, 200),
+        error: d?.error?.message?.slice(0, 200) }, 'Specs diag');
+    }
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs diag failed'); }
 }, 40_000).unref();
