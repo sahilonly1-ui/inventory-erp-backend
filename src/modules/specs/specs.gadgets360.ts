@@ -62,7 +62,9 @@ function score(ours: string, theirs: string): number {
   const numsOk = numsA.every(n => bs.has(n)) && numsB.every(n => as.has(n)) ? 1 : 0;
   // 5G/4G only nudges the choice (sites often leave it out of the name).
   const netA = A.find(w => NET.has(w)), netB = B.find(w => NET.has(w));
-  const net = netA && netB ? (netA === netB ? 0.15 : -0.3) : 0;
+  // Our names carry "5G" whenever the phone is 5G, so a 5G page for a name without it is
+  // most likely the other (4G) model — e.g. Redmi Note 11 vs Redmi Note 11 5G.
+  const net = netA && netB ? (netA === netB ? 0.15 : -0.3) : (!netA && netB === '5g' ? -0.45 : 0);
   return hit / a.length + numsOk - extra * 0.5 + net + (!netA && !netB ? 0.05 : 0);
 }
 

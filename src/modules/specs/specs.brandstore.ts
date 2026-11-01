@@ -53,9 +53,21 @@ const strip = (h: string) => String(h ?? '').replace(/<script[\s\S]*?<\/script>/
 
 const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9+]+/g, ' ').trim().split(' ').filter(w => w.length > 0);
 
-function score(ours: string, theirs: string, brand: string): number {
+// Descriptive words stores and our names use differently; they don't identify the model.
+const GENERIC = new Set(('portable wireless bluetooth speaker speakers party earbuds earphone earphones headphone headphones ' +
+  'neckband tws true with mic rgb smart watch smartwatch power bank charger adapter cable fast charging the and for ' +
+  'black white blue green grey gray silver gold red pink purple orange yellow beige navy teal type usb c led new edition ' +
+  'over ear in ear on ear noise cancelling anc enc stereo sound bass hd dual pro').split(' '));
+/** Model-identifying words: name + short model numbers; drops wattage, capacities and long part codes. */
+function core(s: string, brand: string): string[] {
   const b = brand.toLowerCase();
-  const a = words(ours).filter(w => w !== b), t = new Set(words(theirs));
+  const w = words(s).filter(x => x !== b && !GENERIC.has(x) && !/^\d+(w|mah|hrs?|h|mm|m|ft|cm)$/.test(x) && !/^\d{4,}$/.test(x));
+  // "POR 1976"-style part codes: drop the short brand prefix that goes with them.
+  return w.filter((x, i) => !(/^[a-z]{2,4}$/.test(x) && /^\d{4,}$/.test(words(s)[words(s).indexOf(x) + 1] ?? '')));
+}
+
+function score(ours: string, theirs: string, brand: string): number {
+  const a = core(ours, brand), t = new Set(words(theirs));
   if (!a.length) return 0;
   const hit = a.filter(w => t.has(w)).length;
   const nums = a.filter(w => /\d/.test(w));
@@ -68,17 +80,23 @@ export async function findOnBrandStore(brand: string, title: string): Promise<{ 
   const domains = STORES[brand.trim().toLowerCase()];
   if (!domains) return null;
   // Search with the model name, without colour and brand words.
-  const q = title.replace(new RegExp(`^${brand}\\s+`, 'i'), '').replace(/\s+/g, ' ').trim();
+  const full = title.replace(new RegExp(`^${brand}\\s+`, 'i'), '').replace(/\s+/g, ' ').trim();
+  const q = core(full, brand).join(' ') || full;          // search with the model words only: "Radiant 2"
+  const queries = [...new Set([q, full])];
   for (const d of domains) {
-    const res = await getJson(`https://${d}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=8`);
-    const products: any[] = res?.resources?.results?.products ?? [];
+    let products: any[] = [];
+    for (const qq of queries) {
+      const res = await getJson(`https://${d}/search/suggest.json?q=${encodeURIComponent(qq)}&resources[type]=product&resources[limit]=8`);
+      products = res?.resources?.results?.products ?? [];
+      if (products.length) break;
+    }
     if (!products.length) continue;
     let best: any = null, bestS = -9;
     for (const p of products) {
-      const s = score(q, `${p.title} ${p.handle ?? ''}`, brand);
+      const s = score(full, `${p.title} ${(p.handle ?? '').replace(/-/g, ' ')}`, brand);
       if (s > bestS) { best = p; bestS = s; }
     }
-    if (!best || bestS < 0.9) { logger.info({ brand, q, best: best?.title, score: bestS.toFixed(2) }, 'brand store: no confident match'); continue; }
+    if (!best || bestS < 1.25) { logger.info({ brand, q, best: best?.title, score: bestS.toFixed(2) }, 'brand store: no confident match'); continue; }
     const handle = best.handle || String(best.url || '').split('/products/')[1]?.split('?')[0];
     if (!handle) continue;
     const prod = await getJson(`https://${d}/products/${handle}.js`);
