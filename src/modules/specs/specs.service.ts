@@ -4,6 +4,7 @@ import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
 import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
 import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl, groundingAvailable } from './specs.ai';
 import * as g360 from './specs.gadgets360';
+import { findOnBrandStore } from './specs.brandstore';
 
 /*
  * Specifications tab.
@@ -95,6 +96,23 @@ function specPrompt(title: string, categoryName: string, fields: SpecField[], ex
 type FetchResult = { status: 'OK' | 'NOT_FOUND'; specs: Record<string, string>; sources: string[] };
 
 const isPhoneLike = (fields: SpecField[]) => fields.some(f => f.key === 'processor');
+/** Marks specs that came from the AI's own knowledge (no web page) — shown as "verify" on the sheet. */
+export const AI_KNOWLEDGE = 'ai:knowledge';
+
+async function fromKnowledge(title: string, categoryName: string, fields: SpecField[]): Promise<FetchResult | null> {
+  const shape = Object.fromEntries(fields.map(f => [f.key, `${f.label} — short`]));
+  const text = await askPlain([
+    `From your own knowledge, give the official specifications of this product sold in India: "${title}" (category: ${categoryName}).`,
+    `Only answer if you are confident you know this exact model (and variant). If you are not sure, or it may be a model you do not know, reply {"found": false}.`,
+    `Never guess a number. Leave out any field you are not sure about.`,
+    `Write each value briefly, one line, the facts a salesman tells a customer.`,
+    `Reply with JSON only: ${JSON.stringify({ found: true, specs: shape })}`,
+  ].join('\n'));
+  const j = parseJson(text);
+  if (!j || j.found === false) return null;
+  const r = finish(j.specs ?? {}, [AI_KNOWLEDGE], fields);
+  return r.status === 'OK' ? r : null;
+}
 
 function finish(specs: Record<string, string>, sources: string[], fields: SpecField[], found = true): FetchResult {
   const clean: Record<string, string> = {};
@@ -102,7 +120,7 @@ function finish(specs: Record<string, string>, sources: string[], fields: SpecFi
     const v = specs?.[f.key];
     if (v != null && String(v).trim() && !/^(n\/?a|unknown|-|—|not specified)$/i.test(String(v).trim())) clean[f.key] = String(v).trim().slice(0, 240);
   }
-  const src = sources.filter(u => /^https?:\/\//.test(String(u))).slice(0, 5);
+  const src = sources.filter(u => /^https?:\/\//.test(String(u)) || String(u) === AI_KNOWLEDGE).slice(0, 5);
   const ok = found && Object.keys(clean).length >= Math.min(3, fields.length);
   return { status: ok ? 'OK' : 'NOT_FOUND', specs: clean, sources: src };
 }
@@ -164,6 +182,20 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
     }
   } catch (e: any) { logger.warn({ msg: e?.message, title }, 'Gadgets 360 lookup failed'); }
 
+  // 2b. The brand's own website (official product page) — accessories, watches, audio.
+  if (aiProvider()) {
+    try {
+      const page = await findOnBrandStore(brand, title);
+      if (page) {
+        const r = await viaAi(title, categoryName, fields, { pageText: page.text, pageUrl: page.url });
+        if (r.status === 'OK') return r;
+      }
+    } catch (e: any) {
+      if (/daily limit/i.test(String(e?.message))) throw e;
+      logger.warn({ msg: e?.message, title }, 'brand store lookup failed');
+    }
+  }
+
   // 3. GSMArena directly, when it lets us in (paused for hours after a block).
   if (isPhoneLike(fields)) {
     try {
@@ -176,6 +208,11 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
   if (aiProvider() && groundingAvailable()) {
     try { return await viaAi(title, categoryName, fields, { note: 'GSMArena, Gadgets 360 or the official brand website are preferred.' }); }
     catch (e: any) { logger.info({ msg: e?.message }, 'search-based fetch unavailable'); }
+  }
+  // 5. Last resort: the AI's own knowledge, only when it is confident — flagged "verify" on the sheet.
+  if (aiProvider()) {
+    const r = await fromKnowledge(title, categoryName, fields);
+    if (r) return r;
   }
   return { status: 'NOT_FOUND', specs: {}, sources: [] };
 }
@@ -375,3 +412,14 @@ setTimeout(async () => {
     await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs requeue failed'); }
 }, 30_000).unref();
+
+// Every hour, retry fetches that failed (e.g. the free AI daily limit) so the
+// sheet keeps filling without anyone opening the tab.
+setInterval(async () => {
+  try {
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+      `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
+       WHERE status = 'ERROR' AND manual = false AND "updatedAt" < now() - interval '1 hour' ORDER BY "updatedAt" LIMIT 100`);
+    if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
+}, 60 * 60_000).unref();
