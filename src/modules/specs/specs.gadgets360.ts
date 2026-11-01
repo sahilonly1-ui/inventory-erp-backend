@@ -114,7 +114,8 @@ export function toColumns(rows: Record<string, string>, title: string, keys: str
   // Processor
   const make = find(/^processor make$/, /^chipset$/, /^soc$/);
   const proc = find(/^processor$/, /^processor name$/, /^cpu$/);
-  const procTxt = [make, proc && !make.toLowerCase().includes(proc.toLowerCase()) ? proc : ''].filter(Boolean).join(' — ');
+  const cap = (x: string) => x ? x[0].toUpperCase() + x.slice(1) : x;
+  const procTxt = make ? [make, proc && !make.toLowerCase().includes(proc.toLowerCase()) ? proc : ''].filter(Boolean).join(', ') : cap(proc);
   if (procTxt) out.processor = procTxt;
 
   // RAM & storage — our variant comes from the product name.
@@ -138,10 +139,15 @@ export function toColumns(rows: Record<string, string>, title: string, keys: str
   if (rear || front) out.camera = [rear && `${mp(rear) || rear} rear`, front && `${mp(front) || front} front`].filter(Boolean).join(', ');
 
   // Battery & charging
-  const mah = find(/^battery capacity/, /^battery$/);
+  const mahRaw = find(/^battery capacity/, /^battery$/);
   const charge = find(/^fast charging$/, /^wired charging/, /^charging speed/, /^charging$/);
-  const bat = [mah && (/(mah|hours|days)/i.test(mah) ? mah : `${mah} mAh`), charge && !/^(yes|no)$/i.test(charge) ? `${charge} charging` : charge && yes(charge) ? 'fast charging' : '']
-    .filter(Boolean).join(', ');
+  const num = mahRaw.match(/\d[\d,]*/)?.[0];
+  const mah = num ? `${num} mAh` : (/(hours|days)/i.test(mahRaw) ? mahRaw : '');
+  const watt = charge.match(/(\d+(?:\.\d+)?)\s*W\b/i)?.[1] ?? mahRaw.match(/(\d+(?:\.\d+)?)\s*W\b/i)?.[1];
+  const chargeTxt = watt ? `${watt}W charging`
+    : /^yes\b/i.test(charge) || /fast|proprietary|quick|turbo|warp|dart|super/i.test(charge) ? 'fast charging' : '';
+  const extra = mahRaw.match(/\(([^)]*)\)/)?.[1];                // "60% charge in 30 min", "lasts up to 2 days"
+  const bat = [mah, chargeTxt, extra && extra.length < 40 ? extra : ''].filter(Boolean).join(', ');
   if (bat) out.battery = bat;
 
   // OS & updates

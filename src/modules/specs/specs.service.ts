@@ -367,7 +367,8 @@ setTimeout(async () => {
        ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ commit }));
     const n = await prisma.$executeRawUnsafe(
       `UPDATE spec_entries SET status = 'PENDING', error = NULL, "updatedAt" = now() - interval '1 hour'
-       WHERE status IN ('ERROR', 'NOT_FOUND', 'NO_AI') AND manual = false`);
+       WHERE manual = false AND (status IN ('ERROR', 'NOT_FOUND', 'NO_AI')
+          OR (status = 'OK' AND sources::text ILIKE '%gadgets360%'))`);   // Gadgets 360 rows: re-read with the latest parser (no AI cost)
     logger.info({ requeued: n }, 'Specs: earlier failures queued for another try');
     const rows: any[] = await (prisma as any).$queryRawUnsafe(
       `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries WHERE status = 'PENDING' ORDER BY "updatedAt" LIMIT 300`);
