@@ -2,7 +2,7 @@ import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
 import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
-import { aiProvider, askForSpecs, askPlain, getPage } from './specs.ai';
+import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl } from './specs.ai';
 
 /*
  * Specifications tab.
@@ -106,37 +106,46 @@ function finish(specs: Record<string, string>, sources: string[], fields: SpecFi
   return { status: ok ? 'OK' : 'NOT_FOUND', specs: clean, sources: src };
 }
 
-async function viaAi(title: string, categoryName: string, fields: SpecField[], opts: { site?: string; pageText?: string; pageUrl?: string; note?: string }): Promise<FetchResult> {
+async function viaAi(title: string, categoryName: string, fields: SpecField[],
+                     opts: { site?: string; pageText?: string; pageUrl?: string; note?: string; queries?: string[] }): Promise<FetchResult> {
   if (!aiProvider()) throw new NoAiError('AI not set up');
   const { text, sources } = await askForSpecs(specPrompt(title, categoryName, fields, opts.note ?? ''), {
-    search: !opts.pageText, query: title, site: opts.site, pageText: opts.pageText, pageUrl: opts.pageUrl,
+    search: !opts.pageText, query: title, site: opts.site, pageText: opts.pageText, pageUrl: opts.pageUrl, queries: opts.queries,
   });
+  return fromAiText(text, sources, fields);
+}
+
+function fromAiText(text: string, sources: string[], fields: SpecField[]): FetchResult {
   const j = parseJson(text);
   if (!j) throw new Error('Could not read the specifications from the AI reply');
   const src = [...(Array.isArray(j.sources) ? j.sources : []), ...sources];
-  return finish(j.specs ?? {}, src, fields, j.found !== false);
+  return finish(j.specs ?? {}, [...new Set(src)], fields, j.found !== false);
 }
 
+const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+
 async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
-  // 1. A link the user gave.
+  // 1. A link the user gave: read that page, whichever way works.
   if (url) {
     if (isGsmArena(url) && isPhoneLike(fields)) {
-      try {
-        const r = await readPhone(url, title);
-        return finish(r.specs, [url], fields);
-      } catch (e) {
-        if (!aiProvider()) throw new NoAiError('GSMArena unreachable');
-        return viaAi(title, categoryName, fields, { note: `Use the GSMArena page ${url} for this model.` });
-      }
+      try { const r = await readPhone(url, title); const res = finish(r.specs, [url], fields); if (res.status === 'OK') return res; } catch { /* blocked */ }
     }
-    const page = await getPage(url);
-    if (page.length > 500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
-    const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
-    return viaAi(title, categoryName, fields, { site: host || undefined, note: `The specifications are on ${url}.` });
+    if (!aiProvider()) throw new NoAiError('AI not set up');
+    const prompt = specPrompt(title, categoryName, fields, `Use the page ${url} for this model.`);
+    const viaGoogle = await askWithUrl(prompt, url);                 // Google fetches the page itself
+    if (viaGoogle) {
+      const res = fromAiText(viaGoogle, [url], fields);
+      if (res.status === 'OK') return res;
+    }
+    const page = await readPage(url);                                 // direct, then the free Jina reader
+    if (page.length > 1500) return viaAi(title, categoryName, fields, { pageText: page, pageUrl: url });
+    // Page can't be read from a server: search that site; its snippets still carry the specs.
+    const host = hostOf(url);
+    return viaAi(title, categoryName, fields, { note: `The user says the specifications are on ${url}.`,
+      queries: [host ? `site:${host} ${title}` : `${title} specifications`, `${title} specifications`] });
   }
-  // 2. Phones & tablets: GSMArena.
+  // 2. Phones & tablets: GSMArena directly when it lets us in (it is paused for hours after a block).
   if (isPhoneLike(fields)) {
-    let gsmError: any = null;
     try {
       const page = await findPhonePage(title, brand);
       if (page) {
@@ -144,16 +153,14 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
         const res = finish(r.specs, [page], fields);
         if (res.status === 'OK') return res;
       }
-    } catch (e) { gsmError = e; }
-    if (!aiProvider()) {
-      // GSMArena blocked / unreachable and no AI to fall back on.
-      if (gsmError) throw new NoAiError(String(gsmError?.message || 'GSMArena unreachable'));
-      return { status: 'NOT_FOUND', specs: {}, sources: [] };
-    }
-    // GSMArena didn't work: same sources through Google Search instead.
-    return viaAi(title, categoryName, fields, { note: 'GSMArena is the preferred source for this phone/tablet; the official brand website is equally good.' });
+    } catch { /* blocked or not found — use web search */ }
+    if (!aiProvider()) throw new NoAiError('AI not set up');
+    return viaAi(title, categoryName, fields, {
+      note: 'GSMArena or the official brand website are the preferred sources.',
+      queries: [`${title} specifications`, `${title} gsmarena`, `${title} specs price in India`],
+    });
   }
-  // 3. Everything else (and phones GSMArena doesn't have): Gemini with web search.
+  // 3. Everything else: web search + Gemini.
   return viaAi(title, categoryName, fields, {});
 }
 
@@ -195,6 +202,7 @@ async function runJob(job: Job) {
          manual = false, "fetchedAt" = now(), "updatedAt" = now() WHERE key = $1`,
       job.key, r.status, JSON.stringify(r.specs), JSON.stringify(r.sources),
       r.status === 'NOT_FOUND' ? 'Exact specifications could not be confirmed online.' : null);
+    logger.info({ key: job.key, status: r.status, filled: Object.keys(r.specs).length, sources: r.sources.slice(0, 2), link: !!job.url }, 'spec fetched');
   } catch (e: any) {
     if (e instanceof NoAiError) {
       await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'NO_AI', error = $2, "updatedAt" = now() WHERE key = $1`,
@@ -332,7 +340,7 @@ export async function refetch(key: string, url: string | null) {
   return true;
 }
 
-// Diagnostics once per deploy: which free fetch routes work from this server.
+// Once per deploy: give earlier failures another go with the current engine.
 setTimeout(async () => {
   const commit = process.env.RENDER_GIT_COMMIT || 'local';
   try {
@@ -341,34 +349,12 @@ setTimeout(async () => {
     await prisma.$executeRawUnsafe(
       `INSERT INTO spec_templates ("categoryName", fields) VALUES ('__selftest__', $1::jsonb)
        ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ commit }));
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
-    const probe = async (name: string, url: string, init: any = {}) => {
-      const t0 = Date.now();
-      try {
-        const r = await fetch(url, { headers: { 'user-agent': UA, ...(init.headers || {}) }, ...init });
-        const txt = await r.text();
-        logger.info({ name, status: r.status, ms: Date.now() - t0, len: txt.length, head: txt.slice(0, 160).replace(/\s+/g, ' '),
-          hasGalaxy: /galaxy a07/i.test(txt), hasChip: /dimensity|helio|snapdragon/i.test(txt) }, 'Specs diag');
-      } catch (e: any) { logger.info({ name, err: e?.message }, 'Specs diag'); }
-    };
-    await probe('jina-gsm-search', 'https://r.jina.ai/https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=galaxy%20a07%205g');
-    await probe('jina-gsm-page', 'https://r.jina.ai/https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php');
-    await probe('ddg', 'https://html.duckduckgo.com/html/?q=samsung%20galaxy%20a07%205g%20specifications');
-    await probe('ddg-lite', 'https://lite.duckduckgo.com/lite/?q=samsung%20galaxy%20a07%205g%20specifications');
-    await probe('bing', 'https://www.bing.com/search?q=samsung+galaxy+a07+5g+specifications&setlang=en-IN');
-    await probe('91mobiles', 'https://www.91mobiles.com/samsung-galaxy-a07-5g-price-in-india');
-    await probe('jina-91mobiles', 'https://r.jina.ai/https://www.91mobiles.com/samsung-galaxy-a07-5g-price-in-india');
-    if (process.env.GEMINI_API_KEY) {
-      const t0 = Date.now();
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent`, {
-        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'From https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php give only the chipset name.' }] }], tools: [{ url_context: {} }] }),
-      });
-      const d: any = await r.json().catch(() => ({}));
-      logger.info({ name: 'gemini-url-context', status: r.status, ms: Date.now() - t0,
-        reply: d?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join(' ')?.slice(0, 150),
-        meta: JSON.stringify(d?.candidates?.[0]?.urlContextMetadata ?? d?.candidates?.[0]?.url_context_metadata ?? null)?.slice(0, 200),
-        error: d?.error?.message?.slice(0, 200) }, 'Specs diag');
-    }
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs diag failed'); }
-}, 40_000).unref();
+    const n = await prisma.$executeRawUnsafe(
+      `UPDATE spec_entries SET status = 'PENDING', error = NULL, "updatedAt" = now() - interval '1 hour'
+       WHERE status IN ('ERROR', 'NOT_FOUND', 'NO_AI') AND manual = false`);
+    logger.info({ requeued: n }, 'Specs: earlier failures queued for another try');
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+      `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries WHERE status = 'PENDING' ORDER BY "updatedAt" LIMIT 300`);
+    await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs requeue failed'); }
+}, 30_000).unref();
