@@ -28,7 +28,12 @@ const decode = (s: string) => s
   .replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'")
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&times;/g, 'x').replace(/\s+/g, ' ').replace(/\s+,/g, ',').trim();
 
-const norm = (s: string) => s.toLowerCase().replace(/\bgalaxy\b|\bmoto\b/g, ' ').replace(/[^a-z0-9+]+/g, ' ').trim();
+// Brand / series words that one side often has and the other doesn't.
+const FILLER = new Set(['galaxy', 'moto', 'motorola', 'xiaomi', 'mi', 'samsung', 'apple', 'oneplus', 'vivo', 'oppo', 'realme', 'poco', 'iqoo', 'nothing', 'smartphone', 'mobile', 'phone']);
+const NET = new Set(['5g', '4g', 'lte']);
+const tokens = (s: string) => s.toLowerCase()
+  .replace(/([a-z]*\d+)[\s_-]+([a-z])\b/g, '$1$2')          // "c25_y" / "c21 -y" → "c25y" / "c21y"
+  .replace(/[^a-z0-9+]+/g, ' ').trim().split(' ').filter(w => w && !FILLER.has(w));
 
 export function cleanSearchName(title: string): string {
   return title
@@ -47,29 +52,36 @@ export function parseSearch(html: string): Hit[] {
 }
 
 function score(ours: string, theirs: string): number {
-  const a = norm(ours).split(' ').filter(Boolean), b = norm(theirs).split(' ').filter(Boolean);
+  const A = tokens(ours), B = tokens(theirs);
+  const a = A.filter(w => !NET.has(w)), b = B.filter(w => !NET.has(w));
   if (!a.length || !b.length) return 0;
   const as = new Set(a), bs = new Set(b);
   const hit = a.filter(w => bs.has(w)).length;
-  const extra = b.filter(w => !as.has(w)).length;
+  const extra = b.filter(w => !as.has(w)).length;               // "pro", "plus", "max" we don't have
   const numsA = a.filter(w => /\d/.test(w)), numsB = b.filter(w => /\d/.test(w));
   const numsOk = numsA.every(n => bs.has(n)) && numsB.every(n => as.has(n)) ? 1 : 0;
-  return hit / a.length + numsOk - extra * 0.35;
+  // 5G/4G only nudges the choice (sites often leave it out of the name).
+  const netA = A.find(w => NET.has(w)), netB = B.find(w => NET.has(w));
+  const net = netA && netB ? (netA === netB ? 0.15 : -0.3) : 0;
+  return hit / a.length + numsOk - extra * 0.5 + net + (!netA && !netB ? 0.05 : 0);
 }
 
 export async function findProduct(title: string, brand: string): Promise<string | null> {
   const name = cleanSearchName(title);
-  const tries = [name, `${brand} ${name.replace(new RegExp(`^${brand}\\s+`, 'i'), '')}`];
-  let best: { url: string; s: number } | null = null;
-  for (const q of [...new Set(tries)]) {
+  const noBrand = name.replace(new RegExp(`^${brand}\\s+`, 'i'), '').trim();
+  const tries = [name, noBrand, `${brand} ${noBrand}`];
+  let best: { url: string; s: number; name: string } | null = null;
+  for (const q of [...new Set(tries.filter(Boolean))]) {
     const html = await get(`${BASE}/search?searchtext=${encodeURIComponent(q)}`);
     for (const h of parseSearch(html)) {
       const s = score(name, h.name);
-      if (!best || s > best.s) best = { url: h.url, s };
+      if (!best || s > best.s) best = { url: h.url, s, name: h.name };
     }
     if (best && best.s >= 1.8) break;
   }
-  return best && best.s >= 1.5 ? best.url : null;
+  if (best && best.s >= 1.6) return best.url;
+  logger.info({ title, best: best?.name, score: best?.s?.toFixed(2) }, 'Gadgets 360: no confident match');
+  return null;
 }
 
 /** Every label → value pair on the page (tables, definition lists, two-span rows). */
