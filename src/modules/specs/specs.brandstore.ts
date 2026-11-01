@@ -46,10 +46,11 @@ const strip = (h: string) => String(h ?? '').replace(/<script[\s\S]*?<\/script>/
 const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9+]+/g, ' ').trim().split(' ').filter(w => w.length > 0);
 
 // Descriptive words stores and our names use differently; they don't identify the model.
-const GENERIC = new Set(('portable wireless bluetooth speaker speakers party earbuds earphone earphones headphone headphones ' +
-  'neckband tws true with mic rgb smart watch smartwatch power bank charger adapter cable fast charging the and for ' +
+const GENERIC = new Set(('portable wireless bluetooth speaker speakers earbuds earphone earphones headphone headphones ' +
+  'neckband tws true with mic rgb smart watch smartwatch bank charger adapter cable fast charging the and for ' +
   'black white blue green grey gray silver gold red pink purple orange yellow beige navy teal type usb c led new edition ' +
-  'over ear in ear on ear noise cancelling anc enc stereo sound bass hd dual pro').split(' '));
+  'over ear in ear on ear noise cancelling anc enc stereo hd').split(' '));
+// Note: "sound", "bass", "party", "power", "pro", "dual" stay — they are often part of model names (SoundDrum, BassBuds, Party Glory).
 /** Model-identifying words: name + short model numbers; drops wattage, capacities and long part codes. */
 function core(s: string, brand: string): string[] {
   const b = brand.toLowerCase();
