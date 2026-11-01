@@ -4,7 +4,7 @@ import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
 import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
 import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl, groundingAvailable } from './specs.ai';
 import * as g360 from './specs.gadgets360';
-import { findOnBrandStore } from './specs.brandstore';
+import { findOnBrandStore, specPairs, pairsToColumns, storeBrands } from './specs.brandstore';
 
 /*
  * Specifications tab.
@@ -154,6 +154,28 @@ async function fromGadgets360(url: string, title: string, categoryName: string, 
   return Object.keys(res.specs).length ? res : null;
 }
 
+async function fromBrandSite(title: string, brand: string, categoryName: string, fields: SpecField[]): Promise<FetchResult | null> {
+  // The brand's own website (official product page). Spec rows are read directly;
+  // the AI only tidies up when the page is too loosely written.
+  try {
+    const page = await findOnBrandStore(brand, title);
+    if (page) {
+      const direct = finish(pairsToColumns(specPairs(page.html, page.text), fields.map(f => f.key)), [page.url], fields);
+      const enough = Object.keys(direct.specs).length >= Math.max(3, Math.ceil(fields.length * 0.6));
+      if (direct.status === 'OK' && (enough || !aiProvider())) return direct;
+      if (aiProvider()) {
+        const r = await viaAi(title, categoryName, fields, { pageText: page.text, pageUrl: page.url });
+        if (r.status === 'OK') return r;
+      }
+      if (direct.status === 'OK') return direct;
+    }
+  } catch (e: any) {
+    if (/daily limit/i.test(String(e?.message))) throw e;
+    logger.warn({ msg: e?.message, title }, 'brand store lookup failed');
+  }
+  return null;
+}
+
 async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
   // 1. A link the user gave: read that page, whichever way works.
   if (url) {
@@ -173,6 +195,9 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
     throw new Error('That website does not allow the server to read it. Try a Gadgets 360 or the brand\'s own page for this model.');
   }
 
+  // 2a. Accessories, audio, watches: the brand's own website comes first — most authentic, no AI needed.
+  if (!isPhoneLike(fields)) { const r = await fromBrandSite(title, brand, categoryName, fields); if (r) return r; }
+
   // 2. Gadgets 360 — free, no AI, readable from the server. Phones, tablets, watches and more.
   try {
     const page = await g360.findProduct(title, brand);
@@ -182,19 +207,8 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
     }
   } catch (e: any) { logger.warn({ msg: e?.message, title }, 'Gadgets 360 lookup failed'); }
 
-  // 2b. The brand's own website (official product page) — accessories, watches, audio.
-  if (aiProvider()) {
-    try {
-      const page = await findOnBrandStore(brand, title);
-      if (page) {
-        const r = await viaAi(title, categoryName, fields, { pageText: page.text, pageUrl: page.url });
-        if (r.status === 'OK') return r;
-      }
-    } catch (e: any) {
-      if (/daily limit/i.test(String(e?.message))) throw e;
-      logger.warn({ msg: e?.message, title }, 'brand store lookup failed');
-    }
-  }
+  // 2b. Phones: the brand's own website as well, after Gadgets 360.
+  if (isPhoneLike(fields)) { const r = await fromBrandSite(title, brand, categoryName, fields); if (r) return r; }
 
   // 3. GSMArena directly, when it lets us in (paused for hours after a block).
   if (isPhoneLike(fields)) {
@@ -405,7 +419,8 @@ setTimeout(async () => {
     const n = await prisma.$executeRawUnsafe(
       `UPDATE spec_entries SET status = 'PENDING', error = NULL, "updatedAt" = now() - interval '1 hour'
        WHERE manual = false AND (status IN ('ERROR', 'NOT_FOUND', 'NO_AI')
-          OR (status = 'OK' AND sources::text ILIKE '%gadgets360%'))`);   // Gadgets 360 rows: re-read with the latest parser (no AI cost)
+          OR (status = 'OK' AND sources::text ILIKE '%gadgets360%')
+          OR (status = 'OK' AND sources::text ILIKE '%ai:knowledge%' AND lower(brand) = ANY($1::text[])))`, storeBrands());   // Gadgets 360 rows: re-read with the latest parser (no AI cost)
     logger.info({ requeued: n }, 'Specs: earlier failures queued for another try');
     const rows: any[] = await (prisma as any).$queryRawUnsafe(
       `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries WHERE status = 'PENDING' ORDER BY "updatedAt" LIMIT 300`);
@@ -423,34 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary): which official brand sites answer this server, and how.
-setTimeout(async () => {
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
-  const sites: [string, string][] = [
-    ['www.gonoise.com', 'watch'], ['www.fireboltt.com', 'watch'], ['www.boultaudio.com', 'buds'], ['www.portronics.com', 'speaker'],
-    ['ambraneindia.com', 'power bank'], ['www.mivi.in', 'buds'], ['www.ptron.in', 'buds'], ['truke.in', 'buds'], ['urbn.in', 'power bank'],
-    ['stuffcool.in', 'charger'], ['gizmore.in', 'watch'], ['maximawatches.com', 'watch'], ['www.fastrack.in', 'smart watch'],
-    ['www.crossbeats.in', 'watch'], ['zebronics.com', 'speaker'], ['www.toreto.in', 'speaker'], ['www.saregama.com', 'carvaan'],
-    ['in.nothing.tech', 'phone'], ['www.lavamobiles.com', 'phone'], ['in.jbl.com', 'go 4'], ['www.marshall.com', 'willen'],
-    ['www.infinixmobility.com', 'hot'], ['www.oneplus.in', 'nord'], ['www.samsung.com/in', 'galaxy a07'], ['www.motorola.com/in', 'edge 70'],
-    ['www.mi.com/in', 'redmi note 14'], ['www.realme.com/in', 'narzo'], ['www.oppo.com/in', 'a5 pro'], ['www.vivo.com/in', 'y39'],
-    ['www.apple.com/in', 'iphone 16'], ['www.dizo.in', 'watch'], ['www.boat-lifestyle.com', 'stone'],
-  ];
-  for (const [d, q] of sites) {
-    const out: any = { site: d };
-    try {
-      const r = await fetch(`https://${d}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=3`, { headers: { 'user-agent': UA, accept: 'application/json' } });
-      const ct = r.headers.get('content-type') || '';
-      const j: any = ct.includes('json') ? await r.json().catch(() => null) : null;
-      out.shopify = r.status; out.n = j?.resources?.results?.products?.length ?? null; out.first = j?.resources?.results?.products?.[0]?.title?.slice(0, 50);
-    } catch (e: any) { out.shopifyErr = String(e?.message).slice(0, 60); }
-    try {
-      const r = await fetch(`https://${d}/search?q=${encodeURIComponent(q)}`, { headers: { 'user-agent': UA, accept: 'text/html' } });
-      const h = await r.text();
-      out.html = r.status; out.len = h.length; out.cf = /Just a moment|Turnstile|Attention Required/i.test(h.slice(0, 2000));
-      out.ld = (h.match(/application\/ld\+json/g) ?? []).length;
-    } catch (e: any) { out.htmlErr = String(e?.message).slice(0, 60); }
-    logger.info(out, 'Brand diag');
-  }
-}, 60_000).unref();
