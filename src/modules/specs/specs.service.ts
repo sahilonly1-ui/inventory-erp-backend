@@ -358,3 +358,42 @@ setTimeout(async () => {
     await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs requeue failed'); }
 }, 30_000).unref();
+
+// Diagnostics (temporary): which spec sites can this server read directly, and does Gemini URL reading work.
+setTimeout(async () => {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+  const probe = async (name: string, url: string) => {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html', 'accept-language': 'en-IN,en;q=0.9' }, redirect: 'follow' });
+      const txt = await r.text();
+      const links = [...new Set([...txt.matchAll(/href="([^"]*galaxy[^"]*a07[^"]*)"/gi)].map(m => m[1]))].slice(0, 3);
+      logger.info({ name, status: r.status, ms: Date.now() - t0, len: txt.length, title: txt.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.slice(0, 70),
+        a07: /a07/i.test(txt), chip: /dimensity|helio|snapdragon|exynos/i.test(txt), links }, 'Specs diag2');
+    } catch (e: any) { logger.info({ name, err: e?.message }, 'Specs diag2'); }
+  };
+  await probe('gadgets360-search', 'https://www.gadgets360.com/search?searchtext=samsung+galaxy+a07+5g');
+  await probe('smartprix-search', 'https://www.smartprix.com/products/?q=samsung+galaxy+a07+5g');
+  await probe('mysmartprice-search', 'https://www.mysmartprice.com/msp/search/search.php?search_type=mobile&s=samsung+galaxy+a07+5g');
+  await probe('phonearena-search', 'https://www.phonearena.com/search?term=galaxy+a07+5g');
+  await probe('nanoreview-search', 'https://nanoreview.net/en/search?q=galaxy+a07+5g');
+  await probe('devicespecifications', 'https://www.devicespecifications.com/en/brand/c5f8ea');
+  await probe('samsung-in', 'https://www.samsung.com/in/smartphones/galaxy-a/galaxy-a07-5g-light-violet-128gb-sm-a076blvcins/');
+  if (process.env.GEMINI_API_KEY) {
+    for (const [name, url] of [['urlctx-gsm-page', 'https://www.gsmarena.com/samsung_galaxy_a07_5g-14409.php'], ['urlctx-gsm-search', 'https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=moto%20edge%2070%20fusion']]) {
+      for (const model of ['gemini-3.8-flash', 'gemini-3.5-flash']) {
+        const t0 = Date.now();
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `Open ${url} and reply with the first phone name and its chipset you see on that page, nothing else.` }] }], tools: [{ url_context: {} }] }),
+        });
+        const d: any = await r.json().catch(() => ({}));
+        logger.info({ name, model, status: r.status, ms: Date.now() - t0,
+          reply: d?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join(' ')?.slice(0, 150),
+          meta: JSON.stringify(d?.candidates?.[0]?.urlContextMetadata ?? null)?.slice(0, 250),
+          error: d?.error?.message?.slice(0, 160) }, 'Specs diag2');
+        if (r.status !== 503) break;
+      }
+    }
+  }
+}, 50_000).unref();
