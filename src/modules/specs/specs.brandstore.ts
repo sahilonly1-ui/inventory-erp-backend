@@ -59,7 +59,17 @@ function core(s: string, brand: string): string[] {
 }
 
 function score(ours: string, theirs: string, brand: string): number {
-  const a = core(ours, brand), t = new Set(words(theirs));
+  const tw = words(theirs);
+  const t = new Set(tw);
+  // Joined / split spellings: "Sound Drum" ↔ "SoundDrum", "Stone Arc" ↔ "StoneArc".
+  for (let i = 0; i < tw.length - 1; i++) t.add(tw[i] + tw[i + 1]);
+  let a = core(ours, brand);
+  const merged: string[] = [];
+  for (let i = 0; i < a.length; i++) {
+    if (i < a.length - 1 && !t.has(a[i]) && t.has(a[i] + a[i + 1])) { merged.push(a[i] + a[i + 1]); i++; }
+    else merged.push(a[i]);
+  }
+  a = merged;
   if (!a.length) return 0;
   const hit = a.filter(w => t.has(w)).length;
   const nums = a.filter(w => /\d/.test(w));
