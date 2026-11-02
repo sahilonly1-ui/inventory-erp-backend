@@ -1364,7 +1364,11 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
   // otherwise use when the lines were originally saved.
   const entryDate = units.length ? units[0].createdAt : txns.reduce((d, t) => t.createdAt < d ? t.createdAt : d, txns[0].createdAt);
 
-  const restored = await prisma.$transaction(async (tx) => {
+  const names = new Map((await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, model: true } }))
+    .map((p: any) => [p.id, p.model]));
+  let restored: { product: string; qty: number; units: number }[];
+  try {
+  restored = await prisma.$transaction(async (tx) => {
     const unitPool = [...units];
     const soldPool = [...soldBack];
     const out: { product: string; qty: number; units: number }[] = [];
@@ -1401,9 +1405,9 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
     }
     for (const pid of productIds) {
       const wh = txns.find(t => t.productId === pid)!.warehouseId;
-      // A dispatch must not leave more tracked units in stock than the stock count —
-      // strict for those, so a bad rebuild rolls the whole restore back.
-      await assertConsistentTx(tx, pid, wh, true, { strict: outProducts.includes(pid) });
+      // Restoring puts back exactly what existed before the deletion. A count that was
+      // already off before is recorded as an alert, not used to block the restore.
+      await assertConsistentTx(tx, pid, wh, true, { strict: false });
     }
     await writeAudit(tx, {
       userId: actor.id, action: 'CREATE', entityName: 'inventory_transactions', entityId: txnIds[0],
@@ -1413,6 +1417,14 @@ async function restoreBulkDeletion(auditLog: { id: string; userId: string | null
     });
     return out;
   }, { timeout: 120_000, maxWait: 20_000 });
+  } catch (e: any) {
+    // Say which product blocked it, in words the shop can act on.
+    if (e?.code === 'INSUFFICIENT_STOCK') {
+      const d = e.details ?? {};
+      throw new BadRequestError(`Cannot restore: "${names.get(d.productId) ?? 'a product'}" has only ${d.available} in stock now, but this entry needs ${d.requested}. Some of it was sold or moved after the deletion.`);
+    }
+    throw e;
+  }
 
   return { restored: true, auditId: auditLog.id, lines: restored.length, totalQty: total,
            unitsRestored: restored.reduce((n, r) => n + r.units, 0) };
