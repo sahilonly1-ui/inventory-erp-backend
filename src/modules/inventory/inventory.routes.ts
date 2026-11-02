@@ -1,4 +1,8 @@
-import { prisma } from '../../config/prisma';
+import { z } from 'zod';
+import { prisma, inOneTransaction } from '../../config/prisma';
+import { imeiService } from '../imei/imei.service';
+import { receiveImeiSchema, dispatchImeiSchema, returnImeiSchema } from '../imei/imei.validator';
+import { WILDCARD } from '../../constants/permissions';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../../common/asyncHandler';
@@ -1189,6 +1193,60 @@ router.get('/transactions', authorize(PERMISSIONS.INVENTORY_READ), asyncHandler(
 // ── Bulk-delete a supplier's full entry (single grouped audit record) ────────
 router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
   ok(res, await inventoryController.bulkReverseTransactions(req, res));
+}));
+
+// ── Edit an entry: replace it, all or nothing ────────────────────────────────
+// The old entry is reversed and the new lines saved in ONE database transaction.
+// If any step fails (a unit no longer in stock, a bad code, a dropped
+// connection), everything rolls back and the original entry stays exactly as it was.
+router.post('/entries/replace', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+  const actor = { id: req.user!.id, ip: req.ip ?? null };
+  const body = z.object({
+    deleteIds: z.array(z.string().min(1)).max(2000),
+    ops: z.array(z.object({
+      type: z.enum(['imeiDispatch', 'imeiReceive', 'imeiReturn', 'stockIn', 'stockOut']),
+      body: z.any(),
+    })).max(500),
+  }).parse(req.body);
+
+  // Each new line is checked exactly as its normal screen would check it, before anything changes.
+  const need: Record<string, string> = {
+    imeiDispatch: PERMISSIONS.INVENTORY_STOCK_OUT, stockOut: PERMISSIONS.INVENTORY_STOCK_OUT,
+    imeiReceive: PERMISSIONS.INVENTORY_STOCK_IN, imeiReturn: PERMISSIONS.INVENTORY_STOCK_IN, stockIn: PERMISSIONS.INVENTORY_STOCK_IN,
+  };
+  const schemas: Record<string, any> = { imeiDispatch: dispatchImeiSchema, imeiReceive: receiveImeiSchema, imeiReturn: returnImeiSchema, stockIn: stockInSchema, stockOut: stockOutSchema };
+  const perms: Set<string> = req.user!.permissions as any;
+  const ops = body.ops.map((op, i) => {
+    if (!perms.has(WILDCARD) && !perms.has(need[op.type])) throw new BadRequestError(`You are not allowed to save line ${i + 1} (${op.type}).`);
+    const parsed = schemas[op.type].safeParse(op.body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new BadRequestError(`Line ${i + 1}: ${issue?.path?.join('.') || ''} ${issue?.message || 'invalid'}`.trim());
+    }
+    return { type: op.type, body: parsed.data };
+  });
+
+  if (body.deleteIds.length) {
+    const found = await prisma.inventoryTransaction.count({ where: { id: { in: body.deleteIds }, isDeleted: false } as any });
+    if (found !== body.deleteIds.length) {
+      throw new BadRequestError('The original entry is no longer there — it was already deleted or edited (maybe Update was pressed twice). Nothing was changed. Open the entry again from the Dashboard, or restore it from Version History.');
+    }
+  }
+
+  const results = await inOneTransaction(async () => {
+    if (body.deleteIds.length > 1) await (inventoryService as any).bulkReverseTransactions(body.deleteIds, actor);
+    else if (body.deleteIds.length === 1) await (inventoryService as any).reverseTransaction(body.deleteIds[0], actor);
+    const out: any[] = [];
+    for (const op of ops) {
+      if (op.type === 'imeiDispatch') out.push(await imeiService.dispatch(op.body, actor));
+      else if (op.type === 'imeiReceive') out.push(await imeiService.receive(op.body, actor));
+      else if (op.type === 'imeiReturn') out.push(await (imeiService as any).returnUnits(op.body, actor));
+      else if (op.type === 'stockIn') out.push(await inventoryService.stockIn(op.body, actor));
+      else out.push(await inventoryService.stockOut(op.body, actor));
+    }
+    return out;
+  });
+  ok(res, { replaced: body.deleteIds.length, saved: results.length, results });
 }));
 
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
