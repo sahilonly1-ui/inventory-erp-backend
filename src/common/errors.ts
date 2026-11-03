@@ -42,6 +42,7 @@ export class InsufficientStockError extends AppError {
 
 export class ReconciliationError extends AppError {
   constructor(details: unknown) {
-    super('Stock reconciliation mismatch', 409, 'RECONCILIATION_MISMATCH', details);
+    const d: any = details ?? {};
+    super(d.model ? `Stock count mismatch for "${d.model}": ${d.reason}.` : 'Stock reconciliation mismatch', 409, 'RECONCILIATION_MISMATCH', details);
   }
 }

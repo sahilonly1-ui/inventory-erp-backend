@@ -58,7 +58,12 @@ export async function assertConsistentTx(
 
   if (!consistent) {
     const detail = { productId, warehouseId, ledger, level, imeiCount };
-    if (opts.strict && blocking) throw new ReconciliationError(detail);
+    if (opts.strict && blocking) {
+      const prod = await tx.product.findUnique({ where: { id: productId }, select: { model: true } }).catch(() => null);
+      throw new ReconciliationError({ ...detail, model: prod?.model ?? null,
+        reason: !ledgerOk ? `entries add up to ${ledger} but the stock count says ${level}`
+                          : `${imeiCount} units are marked in stock but the stock count is ${level}` });
+    }
 
     // Logging must never abort a valid movement. Wrap both writes so that a
     // schema mismatch, missing userId, or any other failure in the audit/
