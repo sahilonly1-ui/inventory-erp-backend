@@ -19,12 +19,22 @@ export interface ReconcileResult {
 // strict=true  -> throws (rolls back the movement) — used inside IMEI writes.
 // strict=false -> records an audit alert + notification — used by the scheduled
 //                 / on-demand reconciliation sweep.
+export type StockSnapshot = { ledger: number; level: number; imeiCount: number };
+
+/** The three numbers before a movement, so a check afterwards can tell what the movement itself changed. */
+export async function snapshotTx(tx: Prisma.TransactionClient, productId: string, warehouseId: string): Promise<StockSnapshot> {
+  const ledger = await inventoryRepository.ledgerSum(tx, productId, warehouseId);
+  const levelRow = await tx.stockLevel.findUnique({ where: { productId_warehouseId: { productId, warehouseId } } });
+  const imeiCount = await imeiRepository.countInStock(tx, productId, warehouseId);
+  return { ledger, level: levelRow?.quantity ?? 0, imeiCount: imeiCount ?? 0 };
+}
+
 export async function assertConsistentTx(
   tx: Prisma.TransactionClient,
   productId: string,
   warehouseId: string,
   imeiRequired: boolean,
-  opts: { strict: boolean },
+  opts: { strict: boolean; before?: StockSnapshot },
 ): Promise<ReconcileResult> {
   const ledger = await inventoryRepository.ledgerSum(tx, productId, warehouseId);
   const levelRow = await tx.stockLevel.findUnique({
@@ -54,7 +64,18 @@ export async function assertConsistentTx(
   const imeiUnderCount = imeiCount !== null && imeiCount < level;
 
   const consistent = ledgerOk && !imeiOverflow && !imeiUnderCount;
-  const blocking = !ledgerOk || imeiOverflow;
+  let blocking = !ledgerOk || imeiOverflow;
+  // With a before-snapshot, only block what THIS movement made worse. A gap that
+  // already existed (e.g. units left marked in stock after an untracked sale)
+  // must not stop unrelated, correct entries — it is reported as an alert instead.
+  if (opts.before) {
+    const b = opts.before;
+    const overflowBefore = Math.max(0, b.imeiCount - b.level);
+    const overflowNow = Math.max(0, (imeiCount ?? 0) - level);
+    const ledgerGapBefore = Math.abs(b.ledger - b.level);
+    const ledgerGapNow = Math.abs(ledger - level);
+    blocking = overflowNow > overflowBefore || ledgerGapNow > ledgerGapBefore;
+  }
 
   if (!consistent) {
     const detail = { productId, warehouseId, ledger, level, imeiCount };

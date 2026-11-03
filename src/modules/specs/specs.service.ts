@@ -438,19 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary, read-only): products whose stock numbers disagree.
-setTimeout(async () => {
-  try {
-    const rows: any[] = await (prisma as any).$queryRawUnsafe(`
-      WITH l AS (SELECT "productId", "warehouseId", SUM(quantity)::int AS ledger FROM inventory_transactions GROUP BY 1,2),
-           u AS (SELECT "productId", "warehouseId", COUNT(*)::int AS units FROM imei_inventory WHERE "isDeleted" = false AND status = 'IN_STOCK' GROUP BY 1,2)
-      SELECT p.model, s."productId", s.quantity AS level, COALESCE(l.ledger,0) AS ledger, COALESCE(u.units,0) AS units
-      FROM stock_levels s JOIN products p ON p.id = s."productId"
-      LEFT JOIN l ON l."productId" = s."productId" AND l."warehouseId" = s."warehouseId"
-      LEFT JOIN u ON u."productId" = s."productId" AND u."warehouseId" = s."warehouseId"
-      WHERE s.quantity <> COALESCE(l.ledger,0) OR COALESCE(u.units,0) > s.quantity
-      ORDER BY p.model LIMIT 60`);
-    logger.info({ count: rows.length, rows }, 'Stock mismatch diag');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Stock mismatch diag failed'); }
-}, 25_000).unref();

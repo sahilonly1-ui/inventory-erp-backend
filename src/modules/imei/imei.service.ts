@@ -4,7 +4,7 @@ import { BadRequestError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
 import { emitStockChanged } from '../../common/events';
 import { applyLedgerMovementTx } from '../inventory/inventory.service';
-import { assertConsistentTx } from '../inventory/reconciliation.service';
+import { assertConsistentTx, snapshotTx } from '../inventory/reconciliation.service';
 import { inventoryRepository } from '../inventory/inventory.repository';
 import { imeiRepository, LockedImei } from './imei.repository';
 import { Actor } from '../inventory/inventory.dto';
@@ -91,6 +91,7 @@ export const imeiService = {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      const before = await snapshotTx(tx, input.productId, input.warehouseId);
       // Create the InventoryTransaction FIRST so we get its ID to link to IMEI records
       // Opening Stock sends type:'OPENING' so these show up in the Opening
       // Stock "View & Manage" tab (which filters by type=OPENING) instead of
@@ -116,7 +117,7 @@ export const imeiService = {
         parseDispatchDate((input as any).txnDate) ?? undefined,
       );
       // strict: same-tx writes must reconcile, or we roll back.
-      await assertConsistentTx(tx, input.productId, input.warehouseId, true, { strict: true });
+      await assertConsistentTx(tx, input.productId, input.warehouseId, true, { strict: true, before });
       return move;
     }, {
       // Large entries do several round trips per product group. The default 5s
@@ -154,6 +155,11 @@ export const imeiService = {
         });
       }
 
+      const beforeBy = new Map<string, any>();
+      for (const r of locked) {
+        const k = `${r.productId}::${r.warehouseId}`;
+        if (!beforeBy.has(k)) beforeBy.set(k, await snapshotTx(tx, r.productId, r.warehouseId));
+      }
       await imeiRepository.setStatus(tx, locked.map((r) => r.id), ImeiStatus.SOLD, actor.id);
 
       // Keep a serial typed at Stock Out. Only fills an empty serialNo — a
@@ -205,7 +211,7 @@ export const imeiService = {
           data: { stockOutTxnId: move.transactionId ?? null },
         });
 
-        await assertConsistentTx(tx, productId, warehouseId, true, { strict: true });
+        await assertConsistentTx(tx, productId, warehouseId, true, { strict: true, before: beforeBy.get(key) });
         out.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });
       }
       return out;
@@ -245,6 +251,7 @@ export const imeiService = {
       }
 
       const delta = statusStockDelta(row.status, target);
+      const before = await snapshotTx(tx, row.productId, row.warehouseId);
       await imeiRepository.setStatus(tx, [row.id], target, actor.id);
       if (typeReset) {
         await tx.imeiInventory.update({ where: { id: row.id }, data: { imeiType: 'NIL' as any, updatedBy: actor.id } });
@@ -276,7 +283,7 @@ export const imeiService = {
         oldValue: { status: row.status, ...(typeReset ? { imeiType: (row as any).imeiType } : {}) },
         newValue: { status: target, reason, ...(typeReset ? { imeiType: 'NIL' } : {}) }, ipAddress: actor.ip,
       });
-      await assertConsistentTx(tx, row.productId, row.warehouseId, true, { strict: true });
+      await assertConsistentTx(tx, row.productId, row.warehouseId, true, { strict: true, before });
       return { imei, from: row.status, to: target, stockDelta: delta, productId: row.productId, warehouseId: row.warehouseId, newQuantity };
     }, {
       // Large entries do several round trips per product group. The default 5s
@@ -363,6 +370,8 @@ export const imeiService = {
         groups.get(k)!.push(r);
       }
 
+      const beforeRet = new Map<string, any>();
+      for (const k of groups.keys()) { const [pid, wid] = k.split('::'); beforeRet.set(k, await snapshotTx(tx, pid, wid)); }
       for (const [k, rows] of groups) {
         const [productId, warehouseId] = k.split('::');
         const move = await applyLedgerMovementTx(tx, {
@@ -397,7 +406,7 @@ export const imeiService = {
         });
 
         // Units and level must still agree after the return.
-        await assertConsistentTx(tx, productId, warehouseId, true, { strict: true });
+        await assertConsistentTx(tx, productId, warehouseId, true, { strict: true, before: beforeRet.get(k) });
         results.push({ productId, warehouseId, count: rows.length, newQuantity: move.newQuantity });
       }
     }, { timeout: 120_000, maxWait: 20_000 });
