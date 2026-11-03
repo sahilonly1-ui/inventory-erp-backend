@@ -438,26 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary, read-only): full history of selected units.
-setTimeout(async () => {
-  for (const code of ['icgd6308577', 'miyr2858481', 'anjq3340438']) {
-    try {
-      const u: any[] = await (prisma as any).$queryRawUnsafe(
-        `SELECT id, imei1, "serialNo", status, "imeiType", "isDeleted", "productId", "stockInTxnId", "stockOutTxnId", "createdAt", "updatedAt", "updatedBy"
-         FROM imei_inventory WHERE imei1 = $1 OR "serialNo" = $1`, code);
-      const ids = u.map(x => x.id);
-      const txIds = u.flatMap(x => [x.stockInTxnId, x.stockOutTxnId]).filter(Boolean);
-      const txns: any[] = txIds.length ? await (prisma as any).$queryRawUnsafe(
-        `SELECT t.id, t.type, t.quantity, t."createdAt", t."referenceType", t.remarks, v.name AS vendor
-         FROM inventory_transactions t LEFT JOIN vendors v ON v.id = t."vendorId" WHERE t.id = ANY($1::text[])`, txIds) : [];
-      const audits: any[] = await (prisma as any).$queryRawUnsafe(
-        `SELECT "createdAt", action, "entityName", "entityId", "oldValue"::text AS old, "newValue"::text AS new
-         FROM audit_logs WHERE "entityId" = ANY($1::text[]) OR "oldValue"::text ILIKE $2 OR "newValue"::text ILIKE $2
-         ORDER BY "createdAt" LIMIT 25`, ids, `%${code}%`);
-      const events: any[] = await (prisma as any).$queryRawUnsafe(
-        `SELECT * FROM imei_events WHERE "imeiId" = ANY($1::text[]) ORDER BY "createdAt" LIMIT 20`, ids).catch(() => []);
-      logger.info({ code, units: u, txns, audits: audits.map(a => ({ ...a, old: a.old?.slice(0, 300), new: a.new?.slice(0, 300) })), events }, 'Unit history diag');
-    } catch (e: any) { logger.warn({ code, msg: e?.message }, 'Unit history diag failed'); }
-  }
-}, 25_000).unref();
