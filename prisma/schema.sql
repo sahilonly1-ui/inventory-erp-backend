@@ -646,3 +646,12 @@ CREATE TABLE IF NOT EXISTS spec_templates (
   fields JSONB NOT NULL,
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+
+-- ── Serial tracking follows the units (idempotent) ─────────────────────────
+-- A product whose units were stocked in with serial numbers is serial-tracked:
+-- Stock In / Stock Out then ask for the serial of every unit, so the serials
+-- and the stock count can't drift apart again.
+UPDATE products p SET "serialRequired" = true
+  WHERE p."isDeleted" = false AND p."imeiRequired" = false AND p."serialRequired" = false
+    AND EXISTS (SELECT 1 FROM imei_inventory u WHERE u."productId" = p.id AND u."isDeleted" = false);

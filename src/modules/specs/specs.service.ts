@@ -438,3 +438,20 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
+
+// Diagnostics (temporary, read-only): every product whose serials/IMEIs and stock count disagree.
+setTimeout(async () => {
+  try {
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+      WITH l AS (SELECT "productId", SUM(quantity)::int AS ledger FROM inventory_transactions GROUP BY 1),
+           s AS (SELECT "productId", SUM(quantity)::int AS level FROM stock_levels GROUP BY 1),
+           u AS (SELECT "productId", COUNT(*) FILTER (WHERE status = 'IN_STOCK')::int AS units, COUNT(*)::int AS anyunits
+                 FROM imei_inventory WHERE "isDeleted" = false GROUP BY 1)
+      SELECT p.model, p.brand, COALESCE(s.level,0) AS level, COALESCE(l.ledger,0) AS ledger, COALESCE(u.units,0) AS units
+      FROM products p JOIN u ON u."productId" = p.id
+      LEFT JOIN s ON s."productId" = p.id LEFT JOIN l ON l."productId" = p.id
+      WHERE p."isDeleted" = false AND (COALESCE(u.units,0) <> COALESCE(s.level,0) OR COALESCE(l.ledger,0) <> COALESCE(s.level,0))
+      ORDER BY p.brand, p.model`);
+    for (let i = 0; i < rows.length; i += 25) logger.info({ total: rows.length, part: i / 25, rows: rows.slice(i, i + 25) }, 'Serial mismatch list');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Serial mismatch list failed'); }
+}, 25_000).unref();

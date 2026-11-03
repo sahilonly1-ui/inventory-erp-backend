@@ -85,7 +85,17 @@ async function ensureNonImeiProduct(productId: string) {
   const product = await repo.findActiveProduct(productId);
   if (!product) throw new NotFoundError('Product not found');
   if (product.imeiRequired) {
-    throw new BadRequestError('This product is IMEI-tracked; use the /imei endpoints');
+    throw new BadRequestError(`"${product.model}" is IMEI-tracked — scan the IMEI of each unit.`);
+  }
+  // A product whose units carry a serial (scanned at Stock In) must move by serial too.
+  // Moving it by plain quantity leaves the serials and the stock count out of step —
+  // exactly how serials of sold units ended up still showing "in stock".
+  if ((product as any).serialRequired) {
+    throw new BadRequestError(`"${product.model}" is serial-tracked — scan or type the serial number of each unit.`);
+  }
+  const tracked = await prisma.imeiInventory.count({ where: { productId, isDeleted: false, status: 'IN_STOCK' as any } });
+  if (tracked > 0) {
+    throw new BadRequestError(`"${product.model}" has ${tracked} unit(s) in stock with serial / IMEI numbers — scan the serial or IMEI of each unit instead of entering a quantity.`);
   }
   return product;
 }
@@ -373,7 +383,9 @@ export const inventoryService = {
 
     // Effective requirement = product setting OR brand setting
     const imeiRequired = product.imeiRequired || (brandRecord?.imeiRequired ?? false);
-    const srnoRequired = brandRecord?.srnoRequired ?? false;
+    // Serial needed if the product says so, the brand says so, or its units already carry serials.
+    const hasUnits = await prisma.imeiInventory.count({ where: { productId: product.id, isDeleted: false, status: 'IN_STOCK' as any } });
+    const srnoRequired = !imeiRequired && (!!(product as any).serialRequired || (brandRecord?.srnoRequired ?? false) || hasUnits > 0);
 
     return {
       product: {
