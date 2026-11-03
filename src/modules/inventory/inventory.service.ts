@@ -126,6 +126,45 @@ async function undoReturns(
   }
 }
 
+
+// A stock movement made by changing a unit's status in IMEI Tracker (SOLD → IN STOCK
+// etc.) is not a receipt or a dispatch: it carries no units of its own. Deleting it
+// means putting that unit back to the status it had before the change.
+async function undoStatusChanges(tx: any, txns: any[], actor: { id: string }): Promise<Set<string>> {
+  const handled = new Set<string>();
+  for (const t of txns) {
+    if (t.referenceType !== 'IMEI_STATUS') continue;
+    const m = String(t.remarks ?? '').match(/status\s+([A-Z_]+)\s*->\s*([A-Z_]+)/);
+    let unitId: string | null = t.referenceId ?? null;
+    let from = m?.[1] ?? null, to = m?.[2] ?? null;
+    if (!unitId || !from) {
+      // Older changes: find the unit from the audit entry written at the same moment.
+      const near = await tx.auditLog.findMany({
+        where: { entityName: 'imei_inventory', action: 'UPDATE',
+                 createdAt: { gte: new Date(t.createdAt.getTime() - 15_000), lte: new Date(t.createdAt.getTime() + 15_000) } },
+        orderBy: { createdAt: 'asc' },
+      });
+      for (const a of near) {
+        const ov: any = a.oldValue ?? {}, nv: any = a.newValue ?? {};
+        if (!ov.status || !nv.status || ov.status === nv.status) continue;
+        if (to && nv.status !== to) continue;
+        const u = await tx.imeiInventory.findFirst({ where: { id: a.entityId, productId: t.productId }, select: { id: true } });
+        if (u) { unitId = u.id; from = from ?? ov.status; to = to ?? nv.status; break; }
+      }
+    }
+    if (!unitId || !from) {
+      throw new BadRequestError('This entry came from a status change in IMEI Tracker and its unit could not be identified. Change the unit\'s status back in IMEI Tracker instead.');
+    }
+    const unit = await tx.imeiInventory.findUnique({ where: { id: unitId }, select: { status: true, imei1: true } });
+    if (unit && to && unit.status !== to) {
+      throw new BadRequestError(`Cannot delete: unit ${unit.imei1} has changed again since (now ${unit.status}). Change it in IMEI Tracker instead.`);
+    }
+    if (unit) await tx.imeiInventory.update({ where: { id: unitId }, data: { status: from as any, updatedBy: actor.id } });
+    handled.add(t.id);
+  }
+  return handled;
+}
+
 export const inventoryService = {
   async stockIn(input: {
     productId: string; warehouseId: string; quantity: number;
@@ -628,6 +667,9 @@ Object.assign(inventoryService, {
         });
       }
 
+      // 2. Status-change entries: just undo the status change on that unit.
+      const statusUndone = await undoStatusChanges(tx, [txn], actor);
+      if (!statusUndone.size) {
       // 2a. Reverse a dispatch: the sold units must return to IN_STOCK, or
       // deleting a Stock Out silently leaves its units marked SOLD forever
       // while the stock level says they are back — the two disagreeing is
@@ -759,6 +801,8 @@ Object.assign(inventoryService, {
             });
           }
         }
+      }
+
       }
 
       // 3. Write audit log with FULL data (needed for restore)

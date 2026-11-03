@@ -273,7 +273,8 @@ export const imeiService = {
           type: delta > 0 ? TransactionType.RETURN : TransactionType.ADJUSTMENT,
           signedQty: delta,
           referenceType: 'IMEI_STATUS',
-          remarks: reason ?? `status ${row.status} -> ${target}`,
+          referenceId: row.id,           // the unit, so deleting this entry can undo the change
+          remarks: `status ${row.status} -> ${target}${reason ? ` (${reason})` : ''}`,
         }, actor);
         newQuantity = move.newQuantity;
       }
