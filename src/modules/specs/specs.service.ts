@@ -438,30 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary, read-only): every product whose serials/IMEIs and stock count disagree.
-setTimeout(async () => {
-  try {
-    const rows: any[] = await (prisma as any).$queryRawUnsafe(`
-      WITH l AS (SELECT "productId", SUM(quantity)::int AS ledger FROM inventory_transactions GROUP BY 1),
-           s AS (SELECT "productId", SUM(quantity)::int AS level FROM stock_levels GROUP BY 1),
-           u AS (SELECT "productId", COUNT(*) FILTER (WHERE status = 'IN_STOCK')::int AS units, COUNT(*)::int AS anyunits
-                 FROM imei_inventory WHERE "isDeleted" = false GROUP BY 1)
-      SELECT p.model, p.brand, COALESCE(s.level,0) AS level, COALESCE(l.ledger,0) AS ledger, COALESCE(u.units,0) AS units
-      FROM products p JOIN u ON u."productId" = p.id
-      LEFT JOIN s ON s."productId" = p.id LEFT JOIN l ON l."productId" = p.id
-      WHERE p."isDeleted" = false AND (COALESCE(u.units,0) <> COALESCE(s.level,0) OR COALESCE(l.ledger,0) <> COALESCE(s.level,0))
-      ORDER BY p.brand, p.model`);
-    for (const r of rows) {
-      const units: any[] = await (prisma as any).$queryRawUnsafe(
-        `SELECT u.imei1, u."serialNo", to_char(u."createdAt", 'DD Mon YYYY') AS added, t.type AS via, left(t.remarks, 40) AS remarks
-         FROM imei_inventory u JOIN products p ON p.id = u."productId" LEFT JOIN inventory_transactions t ON t.id = u."stockInTxnId"
-         WHERE p.model = $1 AND u."isDeleted" = false AND u.status = 'IN_STOCK' ORDER BY u."createdAt"`, r.model);
-      const sales: any[] = await (prisma as any).$queryRawUnsafe(
-        `SELECT to_char(t."createdAt", 'DD Mon YYYY') AS on, t.type, t.quantity, t."referenceType", v.name AS vendor
-         FROM inventory_transactions t JOIN products p ON p.id = t."productId" LEFT JOIN vendors v ON v.id = t."vendorId"
-         WHERE p.model = $1 ORDER BY t."createdAt"`, r.model);
-      logger.info({ ...r, inStockUnits: units, ledger: sales }, 'Serial mismatch detail');
-    }
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Serial mismatch list failed'); }
-}, 25_000).unref();
