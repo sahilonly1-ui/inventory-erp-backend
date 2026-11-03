@@ -1227,7 +1227,7 @@ router.post('/entries/replace', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
   });
 
   if (body.deleteIds.length) {
-    const found = await prisma.inventoryTransaction.count({ where: { id: { in: body.deleteIds }, isDeleted: false } as any });
+    const found = await prisma.inventoryTransaction.count({ where: { id: { in: body.deleteIds } } });
     if (found !== body.deleteIds.length) {
       throw new BadRequestError('The original entry is no longer there — it was already deleted or edited (maybe Update was pressed twice). Nothing was changed. Open the entry again from the Dashboard, or restore it from Version History.');
     }
