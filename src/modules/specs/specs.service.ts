@@ -438,17 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary, read-only): full ledger of one product.
-setTimeout(async () => {
-  const pid = '50bb541b-7a94-4b83-87bc-6cda0ff1468d';
-  try {
-    const txns: any[] = await (prisma as any).$queryRawUnsafe(
-      `SELECT t.id, t.type, t.quantity, t."createdAt", t."referenceType", t."referenceId", left(t.remarks, 60) AS remarks, v.name AS vendor
-       FROM inventory_transactions t LEFT JOIN vendors v ON v.id = t."vendorId" WHERE t."productId" = $1 ORDER BY t."createdAt"`, pid);
-    const lvl: any[] = await (prisma as any).$queryRawUnsafe(`SELECT quantity FROM stock_levels WHERE "productId" = $1`, pid);
-    const units: any[] = await (prisma as any).$queryRawUnsafe(
-      `SELECT imei1, status, "imeiType", "stockOutTxnId" FROM imei_inventory WHERE "productId" = $1 AND "isDeleted" = false ORDER BY status, imei1`, pid);
-    logger.info({ level: lvl, ledgerSum: txns.reduce((n, t) => n + t.quantity, 0), txns, units }, 'Ledger diag');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Ledger diag failed'); }
-}, 25_000).unref();

@@ -157,7 +157,17 @@ async function undoStatusChanges(tx: any, txns: any[], actor: { id: string }): P
     }
     const unit = await tx.imeiInventory.findUnique({ where: { id: unitId }, select: { status: true, imei1: true } });
     if (unit && to && unit.status !== to) {
-      throw new BadRequestError(`Cannot delete: unit ${unit.imei1} has changed again since (now ${unit.status}). Change it in IMEI Tracker instead.`);
+      // The unit has moved on since (e.g. sold). Its status stays as it is now.
+      // Removing just this entry is still right when it brings the stock count back
+      // in line with the units actually in stock (the stock level is already
+      // adjusted for this deletion at this point).
+      const lvl = await tx.stockLevel.findFirst({ where: { productId: t.productId, warehouseId: t.warehouseId }, select: { quantity: true } });
+      const inStock = await tx.imeiInventory.count({ where: { productId: t.productId, warehouseId: t.warehouseId, isDeleted: false, status: 'IN_STOCK' } });
+      if ((lvl?.quantity ?? 0) !== inStock) {
+        throw new BadRequestError(`Cannot delete: unit ${unit.imei1} has changed again since (now ${unit.status}), and removing this entry would not make the stock count match the units in stock. Change it in IMEI Tracker instead.`);
+      }
+      handled.add(t.id);
+      continue;
     }
     if (unit) await tx.imeiInventory.update({ where: { id: unitId }, data: { status: from as any, updatedBy: actor.id } });
     handled.add(t.id);
