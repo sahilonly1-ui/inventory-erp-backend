@@ -40,6 +40,12 @@ router.post('/categories/bulk-import', authorize(PERMISSIONS.CATEGORIES_MANAGE),
 }));
 router.post(  '/categories',       authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(createCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.createCategory(req.body, actor(req)), 201)));
 router.patch( '/categories/:id',   authorize(PERMISSIONS.CATEGORIES_MANAGE), validate(updateCategorySchema), asyncHandler(async (req, res) => ok(res, await productService.updateCategory(req.params.id, req.body, actor(req)))));
+router.post('/categories/merge', authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (req, res) => {
+  const names: string[] = Array.isArray(req.body?.names) ? req.body.names.map(String) : [];
+  ok(res, await productService.mergeCategories({
+    names, targetName: String(req.body?.targetName ?? ''), dryRun: req.body?.dryRun !== false,
+  }, actor(req)));
+}));
 router.post('/categories/dedup', authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (_r, res) => ok(res, await productService.deduplicateCategories())));
 router.delete('/categories/:id',   authorize(PERMISSIONS.CATEGORIES_MANAGE), asyncHandler(async (req, res) => { await productService.deleteCategory(req.params.id, actor(req)); ok(res, { message: 'Deleted' }); }));
 

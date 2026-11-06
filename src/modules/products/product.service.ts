@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client';
+import { pickKeeper, CategoryLite } from './category.merge';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../config/prisma';
-import { ConflictError, NotFoundError } from '../../common/errors';
+import { BadRequestError, ConflictError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
 import { productRepository } from './product.repository';
 import { normalizeProductName, normalizeProductNameWith, loadNameVocab, tidyProductName } from '../../common/productName';
@@ -811,6 +812,128 @@ export const productService = {
       } catch (e: any) { errors.push(`${name}: ${e.message?.slice(0, 50)}`); }
     }
     return { created, updated, deleted, errors: errors.slice(0, 20), totalErrors: errors.length };
+  },
+
+  /**
+   * Merge near-duplicate categories ("Smartphone" / "Smartphones") into one.
+   *
+   * The existing dedup only joins categories whose names are identical apart
+   * from case, so it never touches these. This takes the names explicitly, moves
+   * every product (and any sub-category) onto the survivor, renames it to the
+   * chosen name, and retires the rest — retired, not erased, so nothing that
+   * still points at one is left dangling.
+   *
+   * Three other places refer to a category and would otherwise be left behind:
+   * Price Watch remembers categories by NAME (so products in a merged-away name
+   * would silently drop out of its scope), saved Product Master views store the
+   * category's id, and spec templates are keyed by category name. Each is
+   * pointed at the survivor. Preview by default; nothing changes unless
+   * dryRun is false.
+   */
+  async mergeCategories(input: { names: string[]; targetName: string; dryRun: boolean }, actor: Actor) {
+    const target = input.targetName.trim();
+    const names = [...new Set(input.names.map(n => n.trim().toLowerCase()).filter(Boolean))];
+    if (!target) throw new BadRequestError('targetName is required');
+    if (names.length < 2) throw new BadRequestError('Give at least two category names to merge');
+
+    const all: (CategoryLite & { parentId: string | null })[] = await prisma.productCategory.findMany({
+      where: { isDeleted: false },
+      select: { id: true, name: true, parentId: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    const matches = all.filter(c => names.includes(c.name.trim().toLowerCase()));
+    if (matches.length < 2) {
+      throw new BadRequestError(
+        `Found ${matches.length} categor${matches.length === 1 ? 'y' : 'ies'} matching ${names.join(', ')} — ` +
+        `a merge needs at least two. Nothing was changed.`,
+      );
+    }
+
+    const ids = matches.map(c => c.id);
+    const grouped = await prisma.product.groupBy({
+      by: ['categoryId'], where: { categoryId: { in: ids } }, _count: { _all: true },
+    });
+    const productCount = new Map<string, number>(grouped.map(g => [g.categoryId as string, Number(g._count._all)] as [string, number]));
+
+    const keeper = pickKeeper(matches, productCount, target);
+    const absorbed = matches.filter(c => c.id !== keeper.id);
+    const absorbedIds = absorbed.map(c => c.id);
+
+    const children = await prisma.productCategory.findMany({
+      where: { parentId: { in: absorbedIds }, isDeleted: false }, select: { id: true, name: true },
+    });
+
+    // Price Watch keeps categories by name; see whether it mentions any merged name.
+    let priceWatchMentions = false;
+    try {
+      const rows = await prisma.$queryRawUnsafe<{ value: any }[]>(`SELECT value FROM price_watch_settings WHERE key='main'`);
+      const list: string[] = Array.isArray(rows[0]?.value?.autoSyncCategories) ? rows[0].value.autoSyncCategories : [];
+      priceWatchMentions = list.some(c => names.includes(String(c).trim().toLowerCase()));
+    } catch { /* price watch not set up */ }
+
+    const plan = {
+      keeping: { id: keeper.id, currentName: keeper.name, willBeNamed: target, products: productCount.get(keeper.id) ?? 0 },
+      mergingIn: absorbed.map(c => ({ id: c.id, name: c.name, products: productCount.get(c.id) ?? 0 })),
+      productsToMove: absorbed.reduce((n, c) => n + (productCount.get(c.id) ?? 0), 0),
+      subCategoriesToMove: children.map(c => c.name),
+      priceWatchWillBeUpdated: priceWatchMentions,
+    };
+    if (input.dryRun) return { dryRun: true, ...plan };
+
+    await prisma.$transaction(async (tx) => {
+      const moved = await tx.product.updateMany({ where: { categoryId: { in: absorbedIds } }, data: { categoryId: keeper.id } });
+      // A sub-category of a merged-away one now hangs off the survivor. If the
+      // survivor itself sat under one of them, it is lifted out so the tree
+      // cannot end up pointing at itself.
+      await tx.productCategory.updateMany({ where: { parentId: { in: absorbedIds } }, data: { parentId: keeper.id } });
+      if (keeper.parentId && absorbedIds.includes(keeper.parentId)) {
+        await tx.productCategory.update({ where: { id: keeper.id }, data: { parentId: null } });
+      }
+      await tx.productCategory.update({ where: { id: keeper.id }, data: { name: target, updatedBy: actor.id } });
+      await tx.productCategory.updateMany({
+        where: { id: { in: absorbedIds } },
+        data: { isDeleted: true, deletedAt: new Date(), deletedBy: actor.id },
+      });
+      await writeAudit(tx, {
+        userId: actor.id, action: 'UPDATE', entityName: 'product_categories', entityId: keeper.id,
+        oldValue: { merged: absorbed.map(c => ({ id: c.id, name: c.name })) },
+        newValue: { name: target, productsMoved: moved.count },
+        ipAddress: actor.ip,
+      });
+    }, { timeout: 60_000, maxWait: 10_000 });
+
+    // Everything else that referred to a merged category. Each is best-effort:
+    // the merge itself is already done, and one of these tables missing must
+    // not undo it.
+    const repointed = { priceWatch: false, savedViews: 0, specTemplate: false };
+    if (priceWatchMentions) {
+      try {
+        const rows = await prisma.$queryRawUnsafe<{ value: any }[]>(`SELECT value FROM price_watch_settings WHERE key='main'`);
+        const list: string[] = rows[0].value.autoSyncCategories;
+        const next = [...new Set(list.map(c => (names.includes(String(c).trim().toLowerCase()) ? target : c)))];
+        await prisma.$executeRawUnsafe(
+          `UPDATE price_watch_settings SET value = jsonb_set(value, '{autoSyncCategories}', $1::jsonb), "updatedAt"=now() WHERE key='main'`,
+          JSON.stringify(next));
+        repointed.priceWatch = true;
+      } catch { /* leave it; reported below */ }
+    }
+    try {
+      for (const id of absorbedIds) {
+        repointed.savedViews += Number(await prisma.$executeRawUnsafe(
+          `UPDATE saved_views SET filters = replace(filters::text, $1, $2)::jsonb WHERE filters::text LIKE '%' || $1 || '%'`,
+          id, keeper.id));
+      }
+    } catch { /* no saved views table */ }
+    try {
+      const n = await prisma.$executeRawUnsafe(
+        `INSERT INTO spec_templates("categoryName", fields)
+         SELECT $1, fields FROM spec_templates WHERE lower("categoryName") = ANY($2::text[])
+         ORDER BY "updatedAt" DESC LIMIT 1
+         ON CONFLICT ("categoryName") DO NOTHING`, target, names);
+      repointed.specTemplate = Number(n) > 0;
+    } catch { /* no spec templates table */ }
+
+    return { dryRun: false, ...plan, done: true, repointed };
   },
 
   async deleteCategory(id: string, actor: Actor) {
