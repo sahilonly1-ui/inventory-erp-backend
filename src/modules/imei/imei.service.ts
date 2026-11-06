@@ -1,4 +1,5 @@
 import { ImeiStatus, Prisma, TransactionType } from '@prisma/client';
+import { resolveScanned, normCode } from './imei.codes';
 import { prisma } from '../../config/prisma';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 import { writeAudit } from '../../common/audit.service';
@@ -35,14 +36,14 @@ function parseDispatchDate(d?: string | null): Date | null {
  */
 async function resolveCodes(tx: Prisma.TransactionClient, codes: string[]): Promise<string[]> {
   if (!codes.length) return codes;
-  const rows = await tx.imeiInventory.findMany({
-    where: { isDeleted: false, OR: [{ imei1: { in: codes } }, { serialNo: { in: codes } }] },
-    select: { imei1: true, serialNo: true },
-  });
-  const known = new Set(rows.map(r => r.imei1));
-  const bySerial = new Map<string, string>();
-  for (const r of rows) if (r.serialNo) bySerial.set(r.serialNo, r.imei1);
-  return [...new Set(codes.map(c => (known.has(c) ? c : (bySerial.get(c) ?? c))))];
+  // Compared in lower case on both sides: a serial saved in capitals must still
+  // be found when it is scanned with caps lock off (see imei.codes.ts).
+  const lower = [...new Set(codes.map(normCode))];
+  const rows = await tx.$queryRaw<{ imei1: string; serialNo: string | null }[]>`
+    SELECT imei1, "serialNo" FROM imei_inventory
+    WHERE "isDeleted" = false
+      AND (lower(imei1) IN (${Prisma.join(lower)}) OR lower("serialNo") IN (${Prisma.join(lower)}))`;
+  return resolveScanned(codes, rows);
 }
 
 export const imeiService = {
@@ -58,7 +59,8 @@ export const imeiService = {
     // DB throws a bare unique-constraint error that names no IMEI, leaving the
     // user with no idea which scan to fix.
     const incoming = input.imeis.map(i => i.imei1);
-    const dupesInPayload = incoming.filter((v, idx) => incoming.indexOf(v) !== idx);
+    const lowerIncoming = incoming.map(normCode);
+    const dupesInPayload = incoming.filter((v, idx) => lowerIncoming.indexOf(normCode(v)) !== idx);
     if (dupesInPayload.length) {
       const list = [...new Set(dupesInPayload)];
       throw new BadRequestError(
@@ -66,21 +68,19 @@ export const imeiService = {
       );
     }
     const incomingSerials = input.imeis.map(i => i.serialNo).filter((v): v is string => !!v);
-    const dupSerials = incomingSerials.filter((v, idx) => incomingSerials.indexOf(v) !== idx);
+    const lowerSerials = incomingSerials.map(normCode);
+    const dupSerials = incomingSerials.filter((v, idx) => lowerSerials.indexOf(normCode(v)) !== idx);
     if (dupSerials.length) {
       throw new BadRequestError(`Duplicate Sr. No. in this batch: ${[...new Set(dupSerials)].slice(0, 5).join(', ')}. Each serial can only be scanned once.`);
     }
-    const existing = await prisma.imeiInventory.findMany({
-      where: {
-        isDeleted: false,
-        OR: [
-          { imei1: { in: incoming } },
-          { serialNo: { in: incoming } },
-          ...(incomingSerials.length ? [{ serialNo: { in: incomingSerials } }, { imei1: { in: incomingSerials } }] : []),
-        ],
-      },
-      select: { imei1: true, serialNo: true, status: true, product: { select: { model: true } } },
-    });
+    // Case-insensitive, so "abc123" cannot be stocked in again beside a stored "ABC123".
+    const everyCode = [...new Set([...lowerIncoming, ...lowerSerials])];
+    const existing = await prisma.$queryRaw<{ imei1: string; serialNo: string | null; product: { model: string } | null }[]>`
+      SELECT u.imei1, u."serialNo", jsonb_build_object('model', p.model) AS product
+      FROM imei_inventory u
+      LEFT JOIN products p ON p.id = u."productId"
+      WHERE u."isDeleted" = false
+        AND (lower(u.imei1) IN (${Prisma.join(everyCode)}) OR lower(u."serialNo") IN (${Prisma.join(everyCode)}))`;
     if (existing.length) {
       const detail = existing.slice(0, 5)
         .map(e => `${e.imei1} (already in stock as ${e.product?.model ?? 'another product'})`)

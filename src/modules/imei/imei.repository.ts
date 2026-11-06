@@ -98,7 +98,11 @@ export const imeiRepository = {
   findByImei1(imei1: string) {
     // A unit is found by its IMEI or, for devices that have both, its serial.
     return prisma.imeiInventory.findFirst({
-      where: { isDeleted: false, OR: [{ imei1 }, { serialNo: imei1 }] },
+      // Case-insensitive: the serial may be scanned with caps lock on or off.
+      where: { isDeleted: false, OR: [
+        { imei1: { equals: imei1.trim(), mode: 'insensitive' } },
+        { serialNo: { equals: imei1.trim(), mode: 'insensitive' } },
+      ] },
       include: {
         product: { select: { id: true, ean: true, sku: true, model: true, brand: true } },
         warehouse: { select: { id: true, name: true, code: true } },

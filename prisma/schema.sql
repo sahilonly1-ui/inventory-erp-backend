@@ -112,6 +112,11 @@ CREATE INDEX IF NOT EXISTS idx_imei_events_imei ON imei_events("imeiId");
 ALTER TABLE imei_inventory ADD COLUMN IF NOT EXISTS "serialNo" TEXT;
 CREATE INDEX IF NOT EXISTS idx_imei_serial_no ON imei_inventory("serialNo");
 
+-- Lookups compare codes in lower case (a serial scanned with caps lock off must
+-- still find the unit saved in capitals); these keep that from scanning the table.
+CREATE INDEX IF NOT EXISTS idx_imei_lower_imei1 ON imei_inventory (lower(imei1)) WHERE "isDeleted" = false;
+CREATE INDEX IF NOT EXISTS idx_imei_lower_serial ON imei_inventory (lower("serialNo")) WHERE "isDeleted" = false;
+
 
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
