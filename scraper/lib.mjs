@@ -418,3 +418,64 @@ export function parseAmazonCards(text) {
   const seen = new Set();
   return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
 }
+
+// ── Reliability helpers ──────────────────────────────────────────────────────
+
+/**
+ * Why a search came up empty, and whether that is evidence the product is not
+ * sold there. `why` is the running note scrapeStore builds up, e.g.
+ * `google: no match; query "Moto G04": 12 links, best "…" (0.00);`.
+ *
+ * Everything that ends in no page used to be filed as "not_listed" — "this store
+ * does not sell it" — and the ERP then left that store alone for days. But a
+ * brand site whose sitemap would not load, or a store page that came back blank,
+ * is not evidence of anything. A miss now counts as "not listed" only when a
+ * page was really read and the product was not on it:
+ *   • a store search page that showed three or more product links, none matching, or
+ *   • a brand site's whole product list, with no match in it.
+ * Anything else is "not_found" (could not look properly — tried again next cycle),
+ * or "blocked" when the store said so.
+ */
+export function classifyMiss(why) {
+  const w = String(why || '');
+  const linkCounts = [...w.matchAll(/(\d+) links/g)].map(m => Number(m[1]));
+  const sawResults = linkCounts.some(n => n >= 3);
+  const readWholeSitemap = /sitemap: \d+ urls, no match/.test(w);
+  if (sawResults || readWholeSitemap) return 'not_listed';
+  if (/blocked/.test(w)) return 'blocked';
+  return 'not_found';
+}
+
+/** A time limit for a run, so it can stop cleanly before the CI job is killed. 0 = no limit. */
+export function makeBudget(minutes, now = Date.now) {
+  const start = now();
+  const limitMs = minutes > 0 ? minutes * 60_000 : Number.POSITIVE_INFINITY;
+  return {
+    expired: () => now() - start >= limitMs,
+    elapsedMin: () => Math.round((now() - start) / 60_000),
+  };
+}
+
+/**
+ * Stops hammering a store that is blocking this run. After `threshold` blocked
+ * results in a row the store is skipped for `coolMs`; then one attempt is let
+ * through, and if that is blocked too the store is skipped again. A store that
+ * answers normally (even "not found") resets the count. Errors say nothing
+ * either way.
+ */
+export function makeBreaker({ threshold = 8, coolMs = 15 * 60_000, now = Date.now } = {}) {
+  const state = new Map();
+  const get = store => { let s = state.get(store); if (!s) state.set(store, s = { streak: 0, openUntil: 0 }); return s; };
+  return {
+    isOpen: store => now() < get(store).openUntil,
+    record(store, status) {
+      const s = get(store);
+      if (status === 'blocked') {
+        s.streak++;
+        if (s.streak >= threshold) { s.openUntil = now() + coolMs; s.streak = threshold - 1; }
+      } else if (['ok', 'suspect', 'not_listed', 'not_found'].includes(status)) {
+        s.streak = 0;
+      }
+    },
+  };
+}

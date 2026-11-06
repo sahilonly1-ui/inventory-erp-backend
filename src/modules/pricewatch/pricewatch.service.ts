@@ -2,6 +2,8 @@ import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, searchUrl } from './stores';
+import { sellableStockSql } from '../../common/sellableStock';
+import { notListedRetryHours, leadingNotListed } from './notListed';
 
 const q = <T = any>(sql: string, ...p: unknown[]) => prisma.$queryRawUnsafe<T[]>(sql, ...p);
 const x = (sql: string, ...p: unknown[]) => prisma.$executeRawUnsafe(sql, ...p);
@@ -81,7 +83,9 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
   // A product is "in scope" when its brand and category are on the lists
   // (case-insensitive; an empty list means any) and, unless out-of-stock
   // products are included, it has stock.
-  const stockOf = `COALESCE((SELECT SUM(quantity) FROM stock_levels sl WHERE sl."productId"=p.id),0)`;
+  // Sellable stock, the same rule as the Stock Report: demo and open-box units
+  // do not count, so a product whose only stock is a demo phone drops out.
+  const stockOf = `COALESCE(${sellableStockSql('p')}, 0)`;
   const scope = `p."isDeleted"=false
       AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
       AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))
@@ -115,11 +119,12 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
 export async function listItems() {
   await maybeSync();
   const items = await q(`
-    SELECT i.*, p.ean, p."sellingPrice"::float AS "ourPrice", c.name AS category, COALESCE(st.q,0)::int AS stock
+    SELECT i.*, p.ean, p."sellingPrice"::float AS "ourPrice", sp.price::float AS "specPrice",
+           c.name AS category, COALESCE(${sellableStockSql('p')}, 0)::int AS stock
     FROM price_watch_items i
     LEFT JOIN products p ON p.id=i."productId"
     LEFT JOIN product_categories c ON c.id=p."categoryId"
-    LEFT JOIN (SELECT "productId", SUM(quantity)::int AS q FROM stock_levels GROUP BY "productId") st ON st."productId"=i."productId"
+    LEFT JOIN spec_prices sp ON sp."productId"=i."productId"
     WHERE i.dismissed=false
     ORDER BY i.priority DESC, i.active DESC, i.name`);
   const ids = items.map(i => i.id);
@@ -229,7 +234,7 @@ export async function setLink(itemId: string, store: StoreKey, url: string | nul
 // the jobs listed there, visits each store and posts what it saw back here.
 // No paid API or scraping service is involved.
 
-const NOT_LISTED_RETRY_DAYS = 3;   // re-check "not sold on this store" every few days
+// How long a store is left alone after "not listed" depends on how many checks in a row said so (notListed.ts).
 
 export async function requestRefresh(id: string, rediscover = false) {
   if (rediscover) await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND "lockedByUser"=false`, id);
@@ -327,10 +332,20 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
        WHERE i.active=true AND i.dismissed=false AND (
          i.requested OR i."lastRefreshedAt" IS NULL OR
          i."lastRefreshedAt" < now() - make_interval(mins => (CASE WHEN i.priority THEN $1::int ELSE $2::int END)))
-       ORDER BY i.requested DESC, i.priority DESC, i."lastRefreshedAt" NULLS FIRST LIMIT $3::int`,
+       ORDER BY i.requested DESC, i.priority DESC,
+                -- a product that has never produced a price is looked at before one that is merely due again
+                (NOT EXISTS (SELECT 1 FROM price_snapshots g WHERE g."itemId"=i.id AND g.status IN ('ok','suspect'))) DESC,
+                i."lastRefreshedAt" NULLS FIRST LIMIT $3::int`,
       s.priorityIntervalMins, s.defaultIntervalMins, limit);
   if (!items.length) return [];
   const links = await q(`SELECT * FROM price_watch_links WHERE "itemId" = ANY($1::text[])`, items.map(i => i.id));
+  // The latest few results per store, to tell a store that has said "not listed"
+  // once (maybe a bad search) from one that has said so repeatedly.
+  const recent = await q<{ itemId: string; store: string; recent: string[] }>(
+    `SELECT "itemId", store, (array_agg(status ORDER BY "fetchedAt" DESC))[1:3] AS recent
+     FROM price_snapshots WHERE "itemId" = ANY($1::text[]) AND "fetchedAt" > now() - interval '30 days'
+     GROUP BY "itemId", store`, items.map(i => i.id));
+  const recentBy = new Map<string, string[]>(recent.map(r => [`${r.itemId}|${r.store}`, r.recent ?? []] as [string, string[]]));
   return items.map(i => {
     const query = [i.name, i.variant].filter(Boolean).join(' ');
     const stores = STORES
@@ -342,7 +357,8 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
         // Searched recently and not sold there — skip for a few days instead of
         // searching again every run ("Re-find pages" clears this immediately).
         // A product refreshed by hand ("requested") is searched on every store again.
-        if (!i.requested && l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < NOT_LISTED_RETRY_DAYS * 86_400_000) return null;
+        const streak = leadingNotListed(recentBy.get(`${i.id}|${st.key}`) ?? []);
+        if (!i.requested && l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < notListedRetryHours(streak || 1) * 3_600_000) return null;
         return {
           store: st.key, label: st.label,
           url: l?.url ?? null,

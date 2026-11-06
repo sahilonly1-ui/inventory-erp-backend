@@ -19,3 +19,14 @@ Amazon, Flipkart, Croma, Reliance Digital and brand sites. No AI, no paid APIs.
 ## When a store fails
 Screenshots + HTML of failed pages are saved in `scraper/debug/` (on GitHub:
 the run's **scraper-debug** artifact). Send them over to fix that store's reader.
+
+## Keeping a run healthy
+* `DEADLINE_MIN` (set to 75 in the workflow): stop starting new products after that
+  many minutes so the run can finish and report before GitHub's 90-minute limit kills
+  it. Products left over go first next time. 0 / unset = no limit.
+* A store that blocks several products in a row (Croma does from GitHub's servers) is
+  skipped for 15 minutes, then tried once; a skipped store is shown as `skipped` in the
+  run summary and its old result is left alone.
+* "Not listed" is only reported when a page was really read and the product was not on
+  it. A blank page or a sitemap that would not load is reported as `not_found` (retried
+  next cycle), not as "not sold here".

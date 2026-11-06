@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { titleScore, pickBest, parseOffer, extractOffers, isProductUrl, urlKey } from './lib.mjs';
+import { titleScore, pickBest, parseOffer, extractOffers, isProductUrl, urlKey, classifyMiss, makeBudget, makeBreaker } from './lib.mjs';
 
 // matching
 assert.equal(titleScore('JBL Party Box 110 Portable Party Speaker (Black) 160W', 'JBL', 'JBL PartyBox 120 Portable Party Speaker'), 0);
@@ -153,3 +153,43 @@ assert.equal(cb.percent, 3); assert.equal(cb.mode, 'Full swipe'); assert.equal(c
 const pct = parseOffer('10% Instant Discount up to INR 3250 on SBI Credit Card Non EMI Txn. Minimum purchase value INR 5000');
 assert.equal(pct.percent, 10); assert.equal(pct.maxDiscount, 3250); assert.equal(pct.minTxn, 5000); assert.equal(pct.mode, 'Full swipe'); assert.equal(pct.cardType, 'Credit Card');
 console.log('amazon sopp texts ok');
+
+// ── classifying a miss: only a page that was really read can say "not listed" ──
+assert.equal(classifyMiss('google: no match;  query "Marshall Emberton 2": 39 links, best "Marshall Emberton III" (0.00);'), 'not_listed');
+assert.equal(classifyMiss('google: no match; sitemap: 8187 urls, no match; '), 'not_listed');
+// The reported cases: nothing was actually read, so nothing is known.
+assert.equal(classifyMiss('google: no match; sitemap: none; '), 'not_found');
+assert.equal(classifyMiss('google: paused (captcha);  query "Moto G04": 0 links;'), 'not_found');
+assert.equal(classifyMiss('google: no match;  query "Moto G04": 2 links, best "x" (0.00);'), 'not_found');
+assert.equal(classifyMiss(''), 'not_found');
+// A store that said it was blocking us is blocked, not "not listed" ...
+assert.equal(classifyMiss('google: no match;  store search blocked (empty page);'), 'blocked');
+// ... unless a search page was read in the same go.
+assert.equal(classifyMiss(' query "a": 12 links, best "x" (0.10); store search blocked (captcha);'), 'not_listed');
+
+// ── time budget ──
+{ let t = 0; const now = () => t;
+  const b = makeBudget(10, now);
+  assert.equal(b.expired(), false); t = 9 * 60_000; assert.equal(b.expired(), false);
+  t = 10 * 60_000; assert.equal(b.expired(), true); assert.equal(b.elapsedMin(), 10);
+  const none = makeBudget(0, now); t = 9e9; assert.equal(none.expired(), false); }
+
+// ── store circuit breaker ──
+{ let t = 0; const now = () => t;
+  const br = makeBreaker({ threshold: 3, coolMs: 1000, now });
+  br.record('croma', 'blocked'); br.record('croma', 'blocked');
+  assert.equal(br.isOpen('croma'), false, 'two blocks in a row is not yet a pattern');
+  br.record('croma', 'ok'); br.record('croma', 'blocked'); br.record('croma', 'blocked');
+  assert.equal(br.isOpen('croma'), false, 'a good result in between starts the count again');
+  br.record('croma', 'blocked');
+  assert.equal(br.isOpen('croma'), true, 'three in a row: skip the store');
+  assert.equal(br.isOpen('amazon'), false, 'another store is unaffected');
+  t = 1001; assert.equal(br.isOpen('croma'), false, 'after the cool-down one attempt is let through');
+  br.record('croma', 'blocked');
+  assert.equal(br.isOpen('croma'), true, 'still blocked: skipped again straight away');
+  t = 3000; br.record('croma', 'ok'); br.record('croma', 'blocked');
+  assert.equal(br.isOpen('croma'), false, 'it answered, so the count started over');
+  br.record('flipkart', 'error'); br.record('flipkart', 'error'); br.record('flipkart', 'error'); br.record('flipkart', 'error');
+  assert.equal(br.isOpen('flipkart'), false, 'errors are neither blocks nor successes'); }
+
+console.log('reliability helpers ok');

@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
+import { classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -127,6 +127,8 @@ async function pageSnippet(page) {
 // What happened on each store, written to the GitHub run page (public) so
 // failures can be diagnosed without logs.
 const diag = [];
+// Stores that are blocking this run are skipped for a while instead of being tried (and failing) for every product.
+const breaker = makeBreaker();
 
 // ── Politeness: at most N pages open per store at once ────────────────────
 // Bursts of parallel requests are what get a server blocked. Amazon is the
@@ -524,6 +526,7 @@ function readPage(store) {
 }
 
 async function scrapeStore(context, job, s) {
+  if (breaker.isOpen(s.store)) return { store: s.store, status: 'blocked', skipped: true, note: 'Skipped for now: this store has been blocking this run' };
   const page = await context.newPage();
   const tag = `${s.store}-${slug(job.name)}`;
   try {
@@ -584,9 +587,15 @@ async function scrapeStore(context, job, s) {
       if (url && s._bad && urlKey(s.store, url) === urlKey(s.store, s._bad)) url = null;
       if (!url) {
         await debugDump(page, tag + '-search');
-        const blockedAll = /blocked/.test(why) && !/links/.test(why);
-        diag.push({ store: s.store, product: job.name, what: blockedAll ? 'search blocked' : 'not found in search', detail: `${why} · ${await pageSnippet(page)}` });
-        return blockedAll ? { store: s.store, status: 'blocked', note: why.trim().slice(0, 200) } : { store: s.store, status: 'not_listed' };
+        // "Not listed" is only said when a page was really read and the product was
+        // not on it. A blank page or a sitemap that would not load proves nothing, and
+        // saying "not sold here" made the ERP stop checking the store for days.
+        const verdict = classifyMiss(why);
+        const what = verdict === 'blocked' ? 'search blocked' : verdict === 'not_listed' ? 'not found in search' : 'could not look properly';
+        diag.push({ store: s.store, product: job.name, what, detail: `${why} · ${await pageSnippet(page)}` });
+        return verdict === 'not_listed'
+          ? { store: s.store, status: 'not_listed' }
+          : { store: s.store, status: verdict, note: (verdict === 'blocked' ? why : `Not found yet (will retry): ${why}`).trim().slice(0, 200) };
       }
     }
     const load = () => withSlot(s.store, async () => {
@@ -676,29 +685,37 @@ function crossCheck(results) {
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
-async function runJobs(context, jobs, mode) {
-  const stats = { ok: 0, blocked: 0, not_listed: 0, not_found: 0, error: 0 };
+async function runJobs(context, jobs, mode, budget = null) {
+  const stats = { ok: 0, blocked: 0, not_listed: 0, not_found: 0, error: 0, skipped: 0 };
   const perStore = {};
   let next = 0;
   const worker = async () => {
-    while (next < jobs.length) {
+    // Past the time limit no new product is started; those in progress finish, and
+    // everything already saved stays saved. The products left go first next run.
+    while (next < jobs.length && !budget?.expired()) {
       const job = jobs[next++];
       const t = Date.now();
       const stores = job.stores.filter(s => !ONLY.length || ONLY.includes(s.store));
       const results = crossCheck(await Promise.all(stores.map(s => scrapeStore(context, job, s))));
       results.forEach(r => {
-        stats[r.status] = (stats[r.status] || 0) + 1;  // 'suspect' counts separately
+        const st = r.skipped ? 'skipped' : r.status;
+        if (!r.skipped) breaker.record(r.store, r.status);
+        stats[st] = (stats[st] || 0) + 1;  // 'suspect' counts separately
         const ps = (perStore[r.store] ||= {});
-        ps[r.status] = (ps[r.status] || 0) + 1;
+        ps[st] = (ps[st] || 0) + 1;
       });
       const line = results.map(r => `${r.store}:${r.status === 'ok' || r.status === 'suspect' ? (r.status === 'suspect' ? '⚠' : '') + '₹' + r.price + (r.offers?.length ? `+${r.offers.length}off` : '') : r.status}`).join('  ');
       console.log(`• ${job.name} (${Math.round((Date.now() - t) / 1000)}s)\n    ${line}`);
-      try { await api(`/price-watch/bot/results/${job.itemId}?worker=${mode}`, { method: 'POST', body: JSON.stringify({ results }) }); }
+      // A store that was skipped has no result to save; if every store was skipped the
+      // product is left as it was, so it is tried again at the next run.
+      const toSave = results.filter(r => !r.skipped);
+      if (!toSave.length) continue;
+      try { await api(`/price-watch/bot/results/${job.itemId}?worker=${mode}`, { method: 'POST', body: JSON.stringify({ results: toSave }) }); }
       catch (e) { console.log(`    ! could not save: ${e.message}`); }
     }
   };
   await Promise.all(Array.from({ length: Math.min(ITEM_CONCURRENCY, jobs.length) }, worker));
-  return { stats, perStore };
+  return { stats, perStore, left: Math.max(0, jobs.length - next) };
 }
 
 async function main() {
@@ -708,8 +725,15 @@ async function main() {
   console.log(`${jobs.length} product(s) to check`);
   if (!jobs.length) return;
   const { browser, context } = await launch();
-  const { stats, perStore } = await runJobs(context, jobs, 'cloud');
+  // DEADLINE_MIN stops the run cleanly before GitHub kills the job (a killed run
+  // reports nothing). 0 or unset = no limit.
+  const budget = makeBudget(Number(process.env.DEADLINE_MIN || 0));
+  const { stats, perStore, left } = await runJobs(context, jobs, 'cloud', budget);
   await browser.close();
+  if (left) {
+    console.log(`\nStopped at the time limit after ${budget.elapsedMin()} min: ${left} of ${jobs.length} product(s) are left for the next run.`);
+    console.log(`::notice title=time limit::stopped after ${budget.elapsedMin()} min, ${left} of ${jobs.length} products left for the next run`);
+  }
   console.log(`\nDone in ${Math.round((Date.now() - t0) / 1000)}s —`, stats);
   report(perStore);
 }
@@ -783,7 +807,7 @@ function report(perStore) {
   }
 }
 
-export { launch, scrapeStore, readPage, findViaSitemap, crossCheck };
+export { launch, scrapeStore, readPage, findViaSitemap, crossCheck, runJobs, breaker };
 // Run when started directly (`node index.mjs`), not when imported by tests.
 // fileURLToPath handles Windows paths ("C:\\…") and spaces correctly.
 const isMain = (() => {

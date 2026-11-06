@@ -48,6 +48,9 @@ jobs:
           QUEUED_ONLY: ${{ github.event.inputs.queued_only || '0' }}
           LIMIT: ${{ github.event.inputs.limit || '300' }}
           CONCURRENCY: '6'
+          # Stop starting new products at 75 min so the run can finish and report before
+          # the 90 min job limit kills it (a killed run reports nothing).
+          DEADLINE_MIN: '75'
       - name: Keep screenshots of pages that failed
         if: always()
         uses: actions/upload-artifact@v4
