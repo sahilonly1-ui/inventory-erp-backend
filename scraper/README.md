@@ -30,3 +30,16 @@ the run's **scraper-debug** artifact). Send them over to fix that store's reader
 * "Not listed" is only reported when a page was really read and the product was not on
   it. A blank page or a sitemap that would not load is reported as `not_found` (retried
   next cycle), not as "not sold here".
+
+## On the showroom PC (`WATCH=1`)
+It shares the laptop with whoever is using it, so it runs light:
+* one product at a time (`CONCURRENCY`, default 1) and at most one or two pages per store;
+* below-normal priority, so the person's own work always comes first (the browser it starts
+  inherits this);
+* no debug screenshots / HTML unless `DEBUG_DUMPS=1` — earlier versions saved them for every
+  failed page and never cleared them; old files are now removed when it starts.
+Images, video and fonts are skipped in every mode. The browser closes 2 minutes after the last
+refresh, so between refreshes only a small polling loop is left running.
+
+To update the PC: replace the files in its `scraper` folder with the ones from GitHub (or
+`git pull`), then close the scraper window and start it again.

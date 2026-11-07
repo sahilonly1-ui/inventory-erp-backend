@@ -14,9 +14,10 @@
 //      CHANNEL=chrome — use the Google Chrome already installed on the machine.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -25,7 +26,12 @@ const ONLY = (process.env.STORES || '').split(',').map(s => s.trim()).filter(Boo
 const DEBUG = process.env.DEBUG_DIR || path.resolve('debug');
 const WATCH = process.env.WATCH === '1';
 // On the showroom PC keep it light: 2 products (≈10 tabs) at a time.
-const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || (WATCH ? 2 : 6));
+// On the showroom PC the scraper shares a laptop with the person using it, so it is
+// run light: one product at a time, a few pages at most, no debug screenshots unless
+// asked for, and at below-normal priority. GitHub's runner has the machine to itself
+// and keeps the old settings. (Images, video and fonts are skipped in both — see launch.)
+const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || (WATCH ? 1 : 6));
+const DUMPS = !WATCH || process.env.DEBUG_DUMPS === '1';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 if (!KEY && !process.env.SCRAPER_TEST) { console.error('AGENT_KEY is not set'); process.exit(1); }
@@ -98,6 +104,7 @@ async function isBlocked(page) {
 }
 
 async function debugDump(page, name) {
+  if (!DUMPS) return;   // on the PC only when DEBUG_DUMPS=1 (see ITEM_CONCURRENCY)
   try {
     await page.screenshot({ path: path.join(DEBUG, `${name}.png`), fullPage: false });
     fs.writeFileSync(path.join(DEBUG, `${name}.html`), await page.content());
@@ -134,7 +141,7 @@ const breaker = makeBreaker();
 // Bursts of parallel requests are what get a server blocked. Amazon is the
 // strictest, so it gets one page at a time with a short gap.
 const STORE_SLOTS = WATCH
-  ? { amazon: 2, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2, google: 1 }   // home connection: Amazon is less strict
+  ? { amazon: 1, flipkart: 2, croma: 2, reliance: 2, official: 2, engine: 1, google: 1 }   // a laptop someone is using: at most a few pages at once
   : { amazon: 1, flipkart: 3, croma: 3, reliance: 3, official: 4, engine: 2, google: 1 };
 // Google is searched one query at a time with a human-ish pause, which is what
 // keeps it from showing its "unusual traffic" page.
@@ -740,8 +747,23 @@ async function main() {
 
 // Always-on mode for the showroom PC. Queued products ("Refresh" in the ERP) are
 // picked up within ~4 s; when idle it refreshes a few due products at a time.
+/** Clear out old debug files left on the PC by earlier versions (and by DEBUG_DUMPS=1). */
+function pruneDebugFolder() {
+  try {
+    const files = fs.readdirSync(DEBUG).filter(n => /\.(png|html)$/i.test(n))
+      .map(name => ({ name, mtimeMs: fs.statSync(path.join(DEBUG, name)).mtimeMs }));
+    const gone = debugFilesToDelete(files);
+    for (const n of gone) fs.rmSync(path.join(DEBUG, n), { force: true });
+    if (gone.length) console.log(`Cleared ${gone.length} old debug file(s) from ${DEBUG}`);
+  } catch { /* folder missing or locked: nothing to do */ }
+}
+
 async function watch() {
   console.log('Price scraper running in watch mode — keep this window open. Ctrl+C to stop.');
+  // Below-normal priority: whatever the person at the laptop is doing comes first. The
+  // browser it starts inherits this (Windows passes BELOW_NORMAL on to child processes).
+  try { os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* not permitted: carry on */ }
+  pruneDebugFolder();
   // Only one copy may run (the PC may start it twice): hold a local port as a lock.
   const net = await import('node:net');
   const locked = await new Promise(res => {
@@ -807,7 +829,7 @@ function report(perStore) {
   }
 }
 
-export { launch, scrapeStore, readPage, findViaSitemap, crossCheck, runJobs, breaker };
+export { launch, scrapeStore, readPage, findViaSitemap, crossCheck, runJobs, breaker, debugDump, pruneDebugFolder };
 // Run when started directly (`node index.mjs`), not when imported by tests.
 // fileURLToPath handles Windows paths ("C:\\…") and spaces correctly.
 const isMain = (() => {

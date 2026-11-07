@@ -502,3 +502,15 @@ export function makeBreaker({ threshold = 8, coolMs = 15 * 60_000, now = Date.no
     },
   };
 }
+
+/**
+ * Which saved debug files to delete on the showroom PC. Every failed page used to
+ * leave a screenshot and the page's full HTML behind with nothing ever clearing
+ * them, so the folder grew without limit on the PC (and each new file was scanned
+ * by the antivirus). Files older than `maxAgeMs` go, and beyond that only the
+ * newest `keep` are kept. `files` is [{ name, mtimeMs }].
+ */
+export function debugFilesToDelete(files, { maxAgeMs = 86_400_000, keep = 100, now = Date.now() } = {}) {
+  const newestFirst = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return newestFirst.filter((f, i) => i >= keep || now - f.mtimeMs > maxAgeMs).map(f => f.name);
+}

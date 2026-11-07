@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { titleScore, pickBest, parseOffer, extractOffers, isProductUrl, urlKey, classifyMiss, makeBudget, makeBreaker } from './lib.mjs';
+import { titleScore, pickBest, parseOffer, extractOffers, isProductUrl, urlKey, classifyMiss, makeBudget, makeBreaker, debugFilesToDelete } from './lib.mjs';
 
 // matching
 assert.equal(titleScore('JBL Party Box 110 Portable Party Speaker (Black) 160W', 'JBL', 'JBL PartyBox 120 Portable Party Speaker'), 0);
@@ -219,3 +219,11 @@ for (const [name, brand, title] of [
   ['Redmi 13C 8/256GB (Starshine Green)', 'Xiaomi', 'Redmi 13 (Starshine Green, 8GB RAM, 256GB Storage)'],
 ]) assert.equal(titleScore(name, brand, title), 0, `${name} must not match ${title}`);
 console.log('phone listings ok');
+
+// ── showroom PC: the debug folder must not grow forever ──
+{ const now = 10 * 86_400_000, f = (name, hoursAgo) => ({ name, mtimeMs: now - hoursAgo * 3_600_000 });
+  assert.deepEqual(debugFilesToDelete([f('new.png', 1), f('old.png', 30), f('older.html', 72)], { now }), ['old.png', 'older.html'], 'older than a day goes');
+  assert.deepEqual(debugFilesToDelete([f('a', 1), f('b', 2), f('c', 3)], { now, keep: 2 }), ['c'], 'beyond the newest few goes, oldest first');
+  assert.deepEqual(debugFilesToDelete([], { now }), [], 'an empty folder is fine');
+  assert.deepEqual(debugFilesToDelete([f('a', 5), f('b', 6)], { now }), [], 'recent files under the cap are kept'); }
+console.log('debug folder cleanup ok');
