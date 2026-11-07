@@ -53,7 +53,15 @@ const tokens = s => norm(s).split(' ').filter(Boolean);
 // ("256gb") do.
 const SPEC = /^\d+(w|watt|watts|mah|hz|mm|cm|inch|in|v|a|h|hr|hrs|hours|k)$/;
 
+// "128 GB" and "128GB" are the same thing. Stores write it both ways (Flipkart and
+// Amazon usually with a space), and with the space the storage token never matched —
+// worse, in the space-free fallback "128gb" ran straight into the next number ("…128gb4gb"
+// or "14128gb") and was rejected as a different model. Joined before anything else.
+const joinUnits = s => String(s || '').replace(/(\d)\s+(gb|tb|mb)\b/gi, '$1$2');
+
 export function titleScore(name, brand, candidate) {
+  name = joinUnits(name);
+  candidate = joinUnits(candidate);
   // Bracketed extras in ERP names — SKU codes "(JBLCLIP5SQUAD)", colours
   // "(Black)" — aren't in store titles, so they don't count. Storage/RAM in
   // brackets "(8GB/256GB)" does.
@@ -64,7 +72,14 @@ export function titleScore(name, brand, candidate) {
   const nameN = norm(name);
   if ((ACCESSORY_STRONG.test(cand) && !ACCESSORY_STRONG.test(nameN)) || (ACCESSORY.test(cand) && !ACCESSORY.test(nameN))) return 0;
   if (NOT_NEW.test(cand)) return 0;
-  if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) return 0;
+  // The brand must appear — or the line it is sold under, which is how many listings are
+  // titled: "Redmi 13C" for Xiaomi, "Moto g37" for Motorola, "POCO X7" for Xiaomi.
+  if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) {
+    const line = tokens(name)[0];
+    const lineOk = line && line !== norm(brand).replace(/ /g, '') && line.length >= 3 && /[a-z]/.test(line)
+      && !/\d/.test(line) && !isGenericWord(line) && squashed.includes(line);
+    if (!lineOk) return 0;
+  }
 
   // "2.1", "5.1", "3.1.2" (channels) are specs, not model numbers.
   const nameNoChannels = String(name).replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ');
@@ -98,6 +113,14 @@ export function titleScore(name, brand, candidate) {
   // all must be present (one may be missing/misspelt when the name has 3 or more).
   const brandN = norm(brand || '').replace(/ /g, '');
   const distinctive = [...new Set(all.filter(t => !/\d/.test(t) && !isGenericWord(t) && t.length > 2 && t !== brandN))];
+  // A model number the listing adds straight after one of our model words is a different
+  // model: "Nova 2" is not "Nova", "Clip 5" is not "Clip". (Numbers we have, like "iPhone 14",
+  // are fine; "5G" and "64GB" are not model numbers.)
+  // Channel counts ("Bar 2.1", "5.1 ch") are specs, not model numbers — left out here too.
+  const candToks = String(candidate).toLowerCase().replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ').match(/[a-z0-9]+/g) || [];
+  for (let i = 0; i + 1 < candToks.length; i++) {
+    if (distinctive.includes(candToks[i]) && /^\d{1,3}$/.test(candToks[i + 1]) && !modelNums.includes(candToks[i + 1])) return 0;
+  }
   const missing = distinctive.filter(w => !wordFound(w, candTokensAll, squashed)).length;
   if (missing > (distinctive.length >= 3 ? 1 : 0)) return 0;
   const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);

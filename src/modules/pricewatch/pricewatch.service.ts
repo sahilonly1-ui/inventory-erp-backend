@@ -21,13 +21,16 @@ export interface Settings {
   batchSize: number;             // products handed to the browser agent per run
 }
 // The brands and categories iTechArena tracks by default (editable in Settings).
-export const DEFAULT_BRANDS = ['Amazon', 'Apple', 'Boat', 'Carvaan', 'Google', 'JBL', 'Marshall', 'Motorola', 'Noise', 'Nothing', 'OnePlus', 'OPPO', 'Samsung'];
+// The brand list that used to ship as the default. Every brand not on it — Ai+, HMD, Tecno, Realme,
+// Vivo, Redmi … — was silently never watched, however much of it was in stock. The default is now
+// every brand; a saved list that is still exactly this old default is treated as never chosen.
+export const LEGACY_DEFAULT_BRANDS = ['Amazon', 'Apple', 'Boat', 'Carvaan', 'Google', 'JBL', 'Marshall', 'Motorola', 'Noise', 'Nothing', 'OnePlus', 'OPPO', 'Samsung'];
 export const DEFAULT_CATEGORIES = ['Amazon & TV Stick', 'EarBuds', 'Headphones', 'LED TV', 'Party Speaker', 'Smartphone', 'SmartWatch', 'Soundbars', 'Speaker', 'Tabs'];
 
 const DEFAULTS: Settings = {
   autoSyncInStock: true,
   autoSyncCategories: DEFAULT_CATEGORIES,
-  autoSyncBrands: DEFAULT_BRANDS,
+  autoSyncBrands: [],              // every brand
   includeOutOfStock: false,
   defaultIntervalMins: 360,
   priorityIntervalMins: 60,
@@ -35,11 +38,18 @@ const DEFAULTS: Settings = {
   batchSize: 5,
 };
 
+const sameNames = (a: string[], b: string[]) => {
+  const A = new Set(a.map(x => String(x).trim().toLowerCase())), B = new Set(b.map(x => x.toLowerCase()));
+  return A.size === B.size && [...A].every(x => B.has(x));
+};
+
 export async function getSettings(): Promise<Settings> {
   const rows = await q<{ value: any }>(`SELECT value FROM price_watch_settings WHERE key='main'`);
   const saved = { ...(rows[0]?.value ?? {}) };
   // Settings saved before brand filtering existed: start from the default lists.
   if (saved.autoSyncBrands === undefined) { delete saved.autoSyncCategories; }
+  // A list nobody chose — the old shipped default, saved unchanged — means "all brands".
+  if (Array.isArray(saved.autoSyncBrands) && sameNames(saved.autoSyncBrands, LEGACY_DEFAULT_BRANDS)) saved.autoSyncBrands = [];
   return { ...DEFAULTS, ...saved };
 }
 /** Every brand and category in the Product Master, for the Settings pickers. */
@@ -485,6 +495,25 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
   return { saved };
 }
 
+/**
+ * Brands with sellable stock, in the watched categories, that the brand list leaves out —
+ * so a brand missing from Market Prices is visible on the page instead of just absent.
+ */
+export async function notWatchedBrands(): Promise<{ brand: string; products: number }[]> {
+  const s = await getSettings();
+  if (!s.autoSyncInStock || !s.autoSyncBrands.length) return [];
+  const rows = await q<{ brand: string; products: number }>(
+    `SELECT p.brand AS brand, COUNT(*)::int AS products
+     FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
+     WHERE p."isDeleted"=false AND p.brand IS NOT NULL AND p.brand <> ''
+       AND NOT (lower(p.brand) = ANY($1::text[]))
+       AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))
+       AND ${sellableStockSql('p')} > 0
+     GROUP BY p.brand ORDER BY COUNT(*) DESC, p.brand`,
+    s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()));
+  return rows;
+}
+
 export async function status() {
   const [r] = await q(`SELECT
       (SELECT value->>'at' FROM price_watch_settings WHERE key='lastAgentRun') AS "lastAgentRun",
@@ -492,13 +521,33 @@ export async function status() {
       ${localWorkerOnline() ? 'true' : 'false'} AS "localOnline",
       ${localSeen ? `'${new Date(localSeen).toISOString()}'` : 'NULL'} AS "localSeen",
       (SELECT COUNT(*)::int FROM price_watch_items WHERE requested AND active AND NOT dismissed) AS requested`);
-  return r;
+  return { ...r, notWatchedBrands: await notWatchedBrands().catch(() => []) };
 }
 
 // ── Housekeeping (sync with stock, prune old snapshots) ─────────────────────
 
 let lastSync = 0, lastCleanup = 0;
+/**
+ * Once: forget the "not sold on this store" verdicts recorded before a verdict needed a page
+ * that was really read. Many of them were a blank page or an unloaded sitemap, repeated run
+ * after run — and a store that has said "not listed" three times running is now left alone for
+ * three days, so that old, wrong history would have kept those stores unchecked. Verdicts the
+ * admin set by hand are kept. A marker row makes sure this happens only once.
+ */
+let resetDone = false;
+async function resetOldNotListed() {
+  if (resetDone) return;
+  resetDone = true;
+  const marker = await q(`SELECT 1 FROM price_watch_settings WHERE key='notListedReset2026_11'`);
+  if (marker.length) return;
+  const n = await x(`UPDATE price_watch_links SET "notListed"=false WHERE "notListed"=true AND "lockedByUser"=false`);
+  await x(`INSERT INTO price_watch_settings(key,value,"updatedAt") VALUES('notListedReset2026_11',$1::jsonb,now()) ON CONFLICT(key) DO NOTHING`,
+    JSON.stringify({ cleared: Number(n), at: new Date().toISOString() }));
+  logger.info({ cleared: Number(n) }, 'price-watch: old not-listed verdicts cleared');
+}
+
 async function maybeSync() {
+  try { await resetOldNotListed(); } catch (e: any) { logger.error({ err: e?.message }, 'price-watch: not-listed reset failed'); }
   if (Date.now() - lastSync < 30 * 60_000) return;
   lastSync = Date.now();
   try { await syncFromInventory(); } catch (e: any) { logger.error({ err: e?.message }, 'price-watch: sync failed'); }

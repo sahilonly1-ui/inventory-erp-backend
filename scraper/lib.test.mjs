@@ -193,3 +193,29 @@ assert.equal(classifyMiss(' query "a": 12 links, best "x" (0.10); store search b
   assert.equal(br.isOpen('flipkart'), false, 'errors are neither blocks nor successes'); }
 
 console.log('reliability helpers ok');
+
+// ── phone listings as stores really title them ──
+// Real matches that used to score 0: "128 GB" written with a space, and a line name
+// (Redmi, Moto) standing in for the brand.
+for (const [name, brand, title] of [
+  ['Apple iPhone 14 (128GB, Midnight)', 'Apple', 'Apple iPhone 14 (128 GB) - Midnight'],
+  ['Moto G37 Power 4/128GB (Pantone Nautical Blue)', 'Motorola', 'Motorola g37 power 5G (Pantone Nautical Blue, 128 GB) (4 GB RAM)'],
+  ['Ai+ Pulse 4/64GB (Black)', 'Ai+', 'Ai+ Pulse (Black, 64 GB) (4 GB RAM)'],
+  ['Redmi 13C 8/256GB (Starshine Green)', 'Xiaomi', 'Redmi 13C (Starshine Green, 8GB RAM, 256GB Storage)'],
+  ['Samsung A07 5G 4/128GB (Black)', 'Samsung', 'Samsung Galaxy A07 5G (Black, 4GB RAM, 128GB Storage)'],
+  ['Nothing Phone 4A Pro 12/256GB (Black)', 'Nothing', 'Nothing Phone (4a) Pro 5G (Black, 12GB RAM, 256GB Storage)'],
+  ['HMD Fusion 5G 8/256GB (Gray)', 'HMD', 'HMD Fusion 5G (Gray, 8GB RAM, 256GB Storage)'],
+  ['HMD 105 4G (Black)', 'HMD', 'HMD 105 4G Keypad Phone with Dual SIM (Black)'],
+  ['Tecno Pova 7 5G 8/128GB (Geek Black)', 'Tecno', 'TECNO POVA 7 5G (Geek Black, 8GB+128GB)'],
+  ['Tecno Spark 40 Pro 8/256GB (Ink Black)', 'Tecno', 'TECNO SPARK 40 Pro (Ink Black, 8GB RAM, 256GB Storage)'],
+]) assert.ok(titleScore(name, brand, title) >= 0.55, `${name} should match ${title}`);
+// ... and sibling models that must still be told apart.
+for (const [name, brand, title] of [
+  ['Tecno Pova 7 5G 8/128GB (Geek Black)', 'Tecno', 'TECNO POVA 7 Pro 5G (Geek Black, 8GB+128GB)'],
+  ['Ai+ Nova 5G 6/128GB (Green)', 'Ai+', 'Ai+ Nova 2 5G (Green, 6GB RAM, 128GB Storage)'],
+  ['HMD 105 4G (Black)', 'HMD', 'HMD 110 4G Keypad Phone (Black)'],
+  ['Samsung A07 5G 4/128GB (Black)', 'Samsung', 'Samsung Galaxy A17 5G (Black, 4GB RAM, 128GB Storage)'],
+  ['Apple iPhone 14 (128GB, Midnight)', 'Apple', 'Apple iPhone 14 (256 GB) - Midnight'],
+  ['Redmi 13C 8/256GB (Starshine Green)', 'Xiaomi', 'Redmi 13 (Starshine Green, 8GB RAM, 256GB Storage)'],
+]) assert.equal(titleScore(name, brand, title), 0, `${name} must not match ${title}`);
+console.log('phone listings ok');
