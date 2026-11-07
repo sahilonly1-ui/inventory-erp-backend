@@ -21,6 +21,23 @@ const botAuth = (req: Request, _res: Response, next: NextFunction) => {
   if (got.length !== key.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(key))) return next(new UnauthorizedError('Bad agent key'));
   next();
 };
+// Self-update for the showroom PC scraper: it asks for the current version of its
+// files (served from this deploy's scraper folder) and replaces itself when they change.
+const SCRAPER_FILES = ['index.mjs', 'lib.mjs', 'package.json'];
+const scraperDir = () => require('path').join(process.cwd(), 'scraper');
+router.get('/bot/scraper-version', botAuth, asyncHandler(async (_req, res) => {
+  const fs = require('fs');
+  const h = crypto.createHash('sha256');
+  for (const f of SCRAPER_FILES) { try { h.update(f + '\0' + fs.readFileSync(require('path').join(scraperDir(), f))); } catch { /* missing */ } }
+  ok(res, { version: h.digest('hex').slice(0, 16), files: SCRAPER_FILES });
+}));
+router.get('/bot/scraper-file/:name', botAuth, asyncHandler(async (req, res) => {
+  const name = String(req.params.name);
+  if (!SCRAPER_FILES.includes(name)) throw new BadRequestError('Unknown file');
+  const fs = require('fs');
+  ok(res, { name, content: fs.readFileSync(require('path').join(scraperDir(), name), 'utf8') });
+}));
+
 router.get('/bot/jobs', botAuth, asyncHandler(async (req, res) => {
   if (req.query.worker === 'local') svc.markLocalWorker();
   ok(res, await svc.agentJobs({ limit: Number(req.query.limit) || 100, maxLimit: 300, requestedOnly: req.query.queued === '1' }));

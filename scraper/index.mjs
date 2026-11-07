@@ -437,34 +437,73 @@ function readPage(store) {
 
   if (store === 'amazon') {
     res.title = txt(document.querySelector('#productTitle')) || null;
-    // The first price block that actually holds a price (Amazon moves it around).
-    const box = [...document.querySelectorAll('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_desktop, #corePrice_desktop, #apex_offerDisplay_desktop, #buybox, #desktop_buybox')]
-      .find(b => b.querySelector('.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, .a-price .a-offscreen, .a-price-whole, #price_inside_buybox'));
-    const pay = box?.querySelector('.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, #price_inside_buybox, .a-price .a-offscreen');
-    const whole = box?.querySelector('.priceToPay .a-price-whole, .a-price-whole');
-    const pt = txt(pay) || (whole ? '₹' + txt(whole) : '');
-    if (pt) { res.price = num(pt); res.priceText = pt; }
+    const vis = el => (el?.innerText || '').replace(/\s+/g, ' ').trim();
+    const shown = el => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const why = [];
+
+    // 1. The price block in the centre column (Amazon moves and renames it often,
+    //    so several known places are tried; the first one holding a price wins).
+    const PRICE_BOXES = '#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_desktop, #corePrice_desktop, ' +
+      '#apex_offerDisplay_desktop, #apex_price_to_pay_value, #tp_price_block_total_price_ww, #buyBoxAccordion, ' +
+      '#newAccordionRow_0, #buybox, #desktop_buybox, #priceblock_ourprice, #priceblock_dealprice';
+    const PAY = '.priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, .reinventPricePriceToPayMargin .a-offscreen, ' +
+      '#price_inside_buybox, #priceblock_ourprice, #priceblock_dealprice, .a-price[data-a-color="price"] .a-offscreen, .a-price .a-offscreen';
+    const box = [...document.querySelectorAll(PRICE_BOXES)]
+      .find(b => b.querySelector(PAY + ', .a-price-whole') || /^#?priceblock/.test(b.id));
+    let pt = '';
+    if (box) {
+      const pay = box.matches('#priceblock_ourprice, #priceblock_dealprice') ? box : box.querySelector(PAY);
+      const whole = box.querySelector('.priceToPay .a-price-whole, .reinventPricePriceToPayMargin .a-price-whole, .a-price-whole');
+      pt = txt(pay) || (whole ? '₹' + txt(whole) : '');
+    }
+    // 2. Hidden fields Amazon fills with the selected variant's price.
+    if (!num(pt)) {
+      for (const sel of ['#twister-plus-price-data-price', '#attach-base-product-price', 'input[name="displayedPrice"]']) {
+        const v = document.querySelector(sel)?.value;
+        if (num(v)) { pt = '₹' + v; why.push('hidden field ' + sel); break; }
+      }
+    }
+    // 3. Last resort: "-21% ₹13,497" as shown at the top of the centre column.
+    if (!num(pt)) {
+      const cc = vis(document.querySelector('#centerCol, #ppd'));
+      const m = cc.match(/-\s?\d{1,2}%\s*₹\s?([\d,]+(?:\.\d{1,2})?)/) || cc.match(/(?:Deal Price|Price|Offer price):?\s*₹\s?([\d,]+)/i);
+      if (m) { pt = '₹' + m[1]; why.push('centre column text'); }
+    }
+    if (num(pt)) { res.price = num(pt); res.priceText = pt; }
+
     const mrpSel = '.basisPrice .a-offscreen, .a-price.a-text-price .a-offscreen, .apex-basisprice-offscreen-label, .apex-basisprice-value .a-offscreen';
     const mrpEl = [box?.querySelector(mrpSel), document.querySelector('#centerCol ' + mrpSel.split(', ').join(', #centerCol '))].find(e => e && num(txt(e)));
     if (mrpEl) res.mrp = num(txt(mrpEl).replace(/^[^\d₹]*/, ''));
-    // innerText = only what is visible. Amazon keeps hidden "Currently unavailable"
-    // templates in the page; textContent would read them.
-    const vis = el => (el?.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!res.mrp) {
+      const m = vis(document.querySelector('#centerCol, #ppd')).match(/M\.?R\.?P\.?:?\s*₹\s?([\d,]+)/i);
+      if (m) res.mrp = num(m[1]);
+    }
+
+    // Availability. innerText = only what is visible (Amazon keeps hidden
+    // "Currently unavailable" templates in the page; textContent would read them).
     const av = vis(document.querySelector('#availability')).toLowerCase();
     if (av) res.inStock = !/(currently unavailable|out of stock)/.test(av);
-    const shown = el => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-    const canBuy = shown(document.querySelector('#add-to-cart-button')) || shown(document.querySelector('#buy-now-button'));
-    if (canBuy) res.inStock = true;
-    // No buy box ("No featured offers available", "Currently unavailable", only
-    // "See All Buying Options"): Amazon isn't selling it right now. Any other ₹
-    // on the page belongs to variants, ads or "customers also viewed".
+    // The buy buttons may sit inside a collapsed "With / Without Exchange" accordion:
+    // present-but-hidden still means Amazon sells it.
     const buyBox = document.querySelector('#buybox, #desktop_buybox, #rightCol');
     const bbText = vis(buyBox).toLowerCase();
-    if (!res.price || (!canBuy && /no featured offers available|currently unavailable/.test(bbText))) {
-      if (/no featured offers available|currently unavailable|see all buying options/.test(bbText + ' ' + av)) res.inStock = false;
+    const saysUnavailable = /no featured offers available|currently unavailable/.test(bbText + ' ' + av);
+    const buyBtn = document.querySelector('#add-to-cart-button, #buy-now-button, input[name="submit.add-to-cart"], #add-to-cart-button-ubb');
+    const canBuy = shown(buyBtn) || (!saysUnavailable && (!!buyBtn || !!document.querySelector('#buyBoxAccordion')));
+    if (canBuy) res.inStock = true;
+
+    // Only an explicit "no featured offers" / "currently unavailable" with no way to
+    // buy means Amazon isn't selling it. Any other ₹ on such a page belongs to
+    // variants, ads or "customers also viewed".
+    const notSold = !canBuy && saysUnavailable;
+    if (notSold) {
+      res.inStock = false;
       res.price = null; res.priceText = null; res.mrp = null;
     }
-    res.amazonNoBuyBox = !res.price;
+    res.amazonNoBuyBox = notSold;                       // really not sold right now
+    res.amazonUnreadable = !res.price && !notSold;      // sold (or unclear) but the price couldn't be read
+    res.amazonWhy = why.join(', ');
+    res.amazonBuyBox = bbText.slice(0, 90);
   }
 
   // Generic: the biggest, un-struck rupee amount near the top of the page is
@@ -632,7 +671,15 @@ async function scrapeStore(context, job, s) {
       return { store: s.store, status: 'not_listed', note: `Closest page was a different product: ${r.title.slice(0, 80)}` };
     }
     if (!r.price && r.amazonNoBuyBox) {
-      return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: 'Not sold on Amazon right now (no featured offer / unavailable)' };
+      return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: `Not sold on Amazon right now (no featured offer / unavailable)${r.amazonBuyBox ? ` — page said: "${r.amazonBuyBox}"` : ''}` };
+    }
+    if (!r.price && r.amazonUnreadable) {
+      // Amazon showed the product but its price block wasn't where we look: say so
+      // (instead of "not sold"), keep a copy of the page, and let the next run retry.
+      const snippet = await pageSnippet(page);
+      await debugDump(page, tag + '-amazon-price');
+      diag.push({ store: s.store, product: job.name, what: 'amazon price not read', detail: `${page.url()} · ${snippet}` });
+      return { store: s.store, url: page.url(), status: 'not_found', title: r.title, note: 'Amazon page opened but the price could not be read — will retry' };
     }
     if (!r.price) {
       await debugDump(page, tag);
@@ -784,7 +831,17 @@ async function watch() {
   // Scheduled full refreshes are GitHub's job; the PC only handles ERP refresh
   // clicks unless DUE_EVERY_MIN is set.
   const DUE_EVERY = Number(process.env.DUE_EVERY_MIN || 0) * 60_000;
+  let lastUpdateCheck = 0;
   for (;;) {
+    // Every 10 minutes (and while idle), pick up a newer version of the scraper from the ERP.
+    if (Date.now() - lastUpdateCheck > 10 * 60_000) {
+      lastUpdateCheck = Date.now();
+      if (await selfUpdate()) {
+        if (b) await b.browser.close().catch(() => {});
+        restartSelf();
+        return;
+      }
+    }
     try {
       let jobs = await api('/price-watch/bot/jobs?queued=1&limit=12&worker=local', {}, 2);
       let kind = 'requested';
@@ -809,6 +866,39 @@ async function watch() {
       await sleep(15_000);
     }
   }
+}
+
+// ── Self-update (showroom PC) ───────────────────────────────────────────────
+// Compares this folder's files with the ones on the ERP server and, when they
+// differ, writes the new ones and restarts — no one has to copy files by hand.
+async function selfUpdate() {
+  if (process.env.NO_SELF_UPDATE === '1') return false;
+  try {
+    const { createHash } = await import('crypto');
+    const fs = await import('fs');
+    const path = await import('path');
+    const dir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+    const remote = await api('/price-watch/bot/scraper-version', {}, 1);
+    const h = createHash('sha256');
+    for (const f of remote.files) { try { h.update(f + '\0' + fs.readFileSync(path.join(dir, f))); } catch { /* missing */ } }
+    if (h.digest('hex').slice(0, 16) === remote.version) return false;
+    const files = [];
+    for (const f of remote.files) files.push(await api(`/price-watch/bot/scraper-file/${f}`, {}, 2));
+    for (const f of files) { if (f?.content && f.content.length > 50) fs.writeFileSync(path.join(dir, f.name), f.content); }
+    console.log(`\n↻ Scraper updated to version ${remote.version} — restarting…`);
+    return true;
+  } catch (e) {
+    console.log(`(update check skipped: ${String(e?.message || e).slice(0, 80)})`);
+    return false;
+  }
+}
+
+async function restartSelf() {
+  const { spawn } = await import('child_process');
+  // Start the new version in this same window and keep this (old) process as a thin
+  // parent that simply waits and passes the exit code on.
+  const child = spawn(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: process.env });
+  child.on('exit', code => process.exit(code ?? 0));
 }
 
 /** Per-store results + example failures, as GitHub annotations and a job summary (both public). */
