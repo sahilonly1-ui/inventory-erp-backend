@@ -81,6 +81,28 @@ export async function applyLedgerMovementTx(
   return { newQuantity, transactionId: txn.id };
 }
 
+/**
+ * Stock Out by plain quantity. Allowed for coded (IMEI / serial) products only for
+ * stock that was received WITHOUT codes (old stock added as a plain quantity): the
+ * stock count beyond the units the tracker holds. Units that carry a code must go
+ * out by that code, so serials and the stock count can't drift apart.
+ */
+async function ensureCanStockOutByQuantity(productId: string, warehouseId: string, quantity: number) {
+  const product = await repo.findActiveProduct(productId);
+  if (!product) throw new NotFoundError('Product not found');
+  const level = (await prisma.stockLevel.findFirst({ where: { productId, warehouseId }, select: { quantity: true } }))?.quantity ?? 0;
+  const coded = await prisma.imeiInventory.count({ where: { productId, warehouseId, isDeleted: false, status: 'IN_STOCK' as any } });
+  const uncoded = Math.max(0, level - coded);
+  if (quantity <= uncoded) return product;           // old stock with no codes — fine by quantity
+  if (product.imeiRequired || (product as any).serialRequired || coded > 0) {
+    const what = product.imeiRequired ? 'IMEI' : 'serial number';
+    throw new BadRequestError(uncoded > 0
+      ? `"${product.model}": only ${uncoded} unit(s) in stock have no ${what} and can go out by quantity. Scan the ${what} for the rest.`
+      : `"${product.model}" is tracked by ${what} — scan the ${what} of each unit.`);
+  }
+  return product;
+}
+
 async function ensureNonImeiProduct(productId: string) {
   const product = await repo.findActiveProduct(productId);
   if (!product) throw new NotFoundError('Product not found');
@@ -213,7 +235,7 @@ export const inventoryService = {
     productId: string; warehouseId: string; quantity: number; remarks?: string;
     vendorId?: string; txnDate?: string;
   }, actor: Actor): Promise<MovementResult> {
-    await ensureNonImeiProduct(input.productId);
+    await ensureCanStockOutByQuantity(input.productId, input.warehouseId, input.quantity);
     const result = await prisma.$transaction((tx) =>
       applyLedgerMovementTx(tx, {
         productId: input.productId,
@@ -385,6 +407,8 @@ export const inventoryService = {
     const imeiRequired = product.imeiRequired || (brandRecord?.imeiRequired ?? false);
     // Serial needed if the product says so, the brand says so, or its units already carry serials.
     const hasUnits = await prisma.imeiInventory.count({ where: { productId: product.id, isDeleted: false, status: 'IN_STOCK' as any } });
+    // Stock received without codes (plain quantity) — this much can go out without scanning.
+    const uncodedInStock = Math.max(0, levels.reduce((n, l) => n + l.quantity, 0) - hasUnits);
     const srnoRequired = !imeiRequired && (!!(product as any).serialRequired || (brandRecord?.srnoRequired ?? false) || hasUnits > 0);
 
     return {
@@ -395,6 +419,7 @@ export const inventoryService = {
         srnoRequired,      // brand level
         brandImeiRequired: brandRecord?.imeiRequired ?? false,
         brandSrnoRequired: brandRecord?.srnoRequired ?? false,
+        uncodedInStock,
       },
       total: levels.reduce((sum, l) => sum + l.quantity, 0),
       byWarehouse: levels.map((l) => ({

@@ -44,6 +44,11 @@ export interface EanLookupResult {
     model: string;
     brand: string;
     imeiRequired: boolean;
+    srnoRequired?: boolean;
+    brandImeiRequired?: boolean;
+    brandSrnoRequired?: boolean;
+    /** Stock received without IMEI / serial — this many can go out by quantity. */
+    uncodedInStock?: number;
   };
   total: number;
   byWarehouse: StockView[];
