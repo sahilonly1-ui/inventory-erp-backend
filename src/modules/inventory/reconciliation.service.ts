@@ -23,10 +23,23 @@ export type StockSnapshot = { ledger: number; level: number; imeiCount: number }
 
 /** The three numbers before a movement, so a check afterwards can tell what the movement itself changed. */
 export async function snapshotTx(tx: Prisma.TransactionClient, productId: string, warehouseId: string): Promise<StockSnapshot> {
-  const ledger = await inventoryRepository.ledgerSum(tx, productId, warehouseId);
-  const levelRow = await tx.stockLevel.findUnique({ where: { productId_warehouseId: { productId, warehouseId } } });
-  const imeiCount = await imeiRepository.countInStock(tx, productId, warehouseId);
-  return { ledger, level: levelRow?.quantity ?? 0, imeiCount: imeiCount ?? 0 };
+  return readStockNumbers(tx, productId, warehouseId);
+}
+
+/**
+ * Ledger sum, stock level and in-stock unit count in ONE database round trip.
+ * (The database is far from the server; three separate queries cost three trips,
+ * and every save runs this twice per product.)
+ */
+async function readStockNumbers(tx: Prisma.TransactionClient, productId: string, warehouseId: string): Promise<StockSnapshot> {
+  const rows: any[] = await (tx as any).$queryRawUnsafe(
+    `SELECT
+       (SELECT COALESCE(SUM(quantity), 0)::int FROM inventory_transactions WHERE "productId" = $1 AND "warehouseId" = $2) AS ledger,
+       (SELECT COALESCE(MAX(quantity), 0)::int FROM stock_levels WHERE "productId" = $1 AND "warehouseId" = $2) AS level,
+       (SELECT COUNT(*)::int FROM imei_inventory WHERE "productId" = $1 AND "warehouseId" = $2 AND status = 'IN_STOCK' AND "isDeleted" = false) AS units`,
+    productId, warehouseId);
+  const r = rows[0] ?? {};
+  return { ledger: Number(r.ledger ?? 0), level: Number(r.level ?? 0), imeiCount: Number(r.units ?? 0) };
 }
 
 export async function assertConsistentTx(
@@ -36,15 +49,12 @@ export async function assertConsistentTx(
   imeiRequired: boolean,
   opts: { strict: boolean; before?: StockSnapshot },
 ): Promise<ReconcileResult> {
-  const ledger = await inventoryRepository.ledgerSum(tx, productId, warehouseId);
-  const levelRow = await tx.stockLevel.findUnique({
-    where: { productId_warehouseId: { productId, warehouseId } },
-  });
-  const level = levelRow?.quantity ?? 0;
   // Always count the units that are actually on record — the imeiRequired flag
   // in Product Master is unreliable (phones often have it false), so gating
   // the count on it produces null and a null-pointer crash when units exist.
-  const imeiCount = await imeiRepository.countInStock(tx, productId, warehouseId);
+  const now = await readStockNumbers(tx, productId, warehouseId);
+  const ledger = now.ledger, level = now.level;
+  const imeiCount: number | null = now.imeiCount;
 
   // The ledger and the stock level must always agree exactly — a difference
   // there is a real accounting bug.
@@ -77,7 +87,11 @@ export async function assertConsistentTx(
     blocking = overflowNow > overflowBefore || ledgerGapNow > ledgerGapBefore;
   }
 
-  if (!consistent) {
+  // A gap that was already there before this movement and is unchanged by it was
+  // reported when it appeared; writing the same alert on every save only slows it down.
+  const unchangedGap = !!opts.before && opts.before.ledger - opts.before.level === ledger - level
+    && opts.before.imeiCount - opts.before.level === (imeiCount ?? 0) - level;
+  if (!consistent && !(unchangedGap && !(opts.strict && blocking))) {
     const detail = { productId, warehouseId, ledger, level, imeiCount };
     if (opts.strict && blocking) {
       const prod = await tx.product.findUnique({ where: { id: productId }, select: { model: true } }).catch(() => null);

@@ -1,3 +1,4 @@
+import { forgetUserAccess } from '../../middlewares/authenticate';
 import { Router, Request, Response } from 'express';
 import { prisma } from '../../config/prisma';
 import { asyncHandler } from '../../common/asyncHandler';
@@ -9,6 +10,8 @@ import { PERMISSIONS, ALL_PERMISSIONS, WILDCARD } from '../../constants/permissi
 import { writeAudit } from '../../common/audit.service';
 
 const router = Router();
+// Any change to users / roles drops the cached access so it applies at once.
+router.use((req, _res, next) => { if (req.method !== 'GET') forgetUserAccess(); next(); });
 router.use(authenticate);
 
 // Grouped for display: the UI shows permissions by area rather than as one

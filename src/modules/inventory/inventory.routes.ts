@@ -1199,7 +1199,17 @@ router.post('/transactions/bulk-delete', authorize(PERMISSIONS.INVENTORY_ADJUST)
 // The old entry is reversed and the new lines saved in ONE database transaction.
 // If any step fails (a unit no longer in stock, a bad code, a dropped
 // connection), everything rolls back and the original entry stays exactly as it was.
-router.post('/entries/replace', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {
+// New Stock In / Stock Out entry in ONE request and ONE transaction: every line
+// saves, or none does. (Each line used to be its own request — slow, and a
+// failure half-way left a half-saved entry.) Each line still needs its own permission.
+router.post('/entries/save', asyncHandler(async (req: Request, res: Response) => {
+  (req.body as any).deleteIds = [];
+  return replaceEntry(req, res);
+}));
+
+router.post('/entries/replace', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => replaceEntry(req, res)));
+
+async function replaceEntry(req: Request, res: Response) {
   const actor = { id: req.user!.id, ip: req.ip ?? null };
   const body = z.object({
     deleteIds: z.array(z.string().min(1)).max(2000),
@@ -1247,7 +1257,7 @@ router.post('/entries/replace', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHa
     return out;
   });
   ok(res, { replaced: body.deleteIds.length, saved: results.length, results });
-}));
+}
 
 // ── Reverse / delete a stock transaction ─────────────────────────────────────
 router.delete('/transactions/:id', authorize(PERMISSIONS.INVENTORY_ADJUST), asyncHandler(async (req: Request, res: Response) => {

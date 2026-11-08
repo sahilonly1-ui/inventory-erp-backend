@@ -1,3 +1,4 @@
+import { forgetUserAccess } from '../../middlewares/authenticate';
 import { Router } from 'express';
 import { userController } from './user.controller';
 import { authenticate } from '../../middlewares/authenticate';
@@ -13,6 +14,8 @@ import {
 } from './user.validator';
 
 const router = Router();
+// Any change to users / roles drops the cached access so it applies at once.
+router.use((req, _res, next) => { if (req.method !== 'GET') forgetUserAccess(); next(); });
 
 // Every route requires a valid session; each action is permission-gated.
 router.use(authenticate);
