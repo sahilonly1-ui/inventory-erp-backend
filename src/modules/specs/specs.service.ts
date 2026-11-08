@@ -438,15 +438,3 @@ setInterval(async () => {
     if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
   } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
 }, 60 * 60_000).unref();
-
-// Diagnostics (temporary): database round-trip time from this server.
-setTimeout(async () => {
-  try {
-    const t: number[] = [];
-    for (let i = 0; i < 12; i++) { const s = Date.now(); await (prisma as any).$queryRawUnsafe('SELECT 1'); t.push(Date.now() - s); }
-    const s2 = Date.now();
-    await prisma.$transaction(async (tx: any) => { for (let i = 0; i < 10; i++) await tx.$queryRawUnsafe('SELECT 1'); });
-    const txMs = Date.now() - s2;
-    logger.info({ region: process.env.RENDER_REGION || null, singleQueryMs: t, txWith10QueriesMs: txMs, dbHost: (process.env.DATABASE_URL || '').replace(/^.*@/, '').replace(/[:/].*$/, '') }, 'DB latency diag');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'DB latency diag failed'); }
-}, 20_000).unref();

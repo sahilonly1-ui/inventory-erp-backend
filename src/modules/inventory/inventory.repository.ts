@@ -16,25 +16,27 @@ export const inventoryRepository = {
     warehouseId: string,
     delta: number,
   ): Promise<number> {
-    await tx.$executeRaw`
-      INSERT INTO stock_levels ("id", "productId", "warehouseId", "quantity", "updatedAt")
-      VALUES (${randomUUID()}, ${productId}, ${warehouseId}, 0, now())
-      ON CONFLICT ("productId", "warehouseId") DO NOTHING`;
-
-    const rows = await tx.$queryRaw<{ id: string; quantity: number }[]>`
-      SELECT "id", "quantity" FROM stock_levels
-      WHERE "productId" = ${productId} AND "warehouseId" = ${warehouseId}
-      FOR UPDATE`;
-
-    const row = rows[0];
-    const next = row.quantity + delta;
-    if (next < 0) throw new InsufficientStockError(productId, warehouseId, row.quantity, delta);
-
-    await tx.$executeRaw`
-      UPDATE stock_levels SET "quantity" = ${next}, "updatedAt" = now()
-      WHERE "id" = ${row.id}`;
-
-    return next;
+    // One statement instead of three (the database is ~100 ms away per trip).
+    // Postgres locks the row while it updates it, so concurrent movements still
+    // queue up exactly as with SELECT ... FOR UPDATE.
+    if (delta >= 0) {
+      const rows = await tx.$queryRaw<{ quantity: number }[]>`
+        INSERT INTO stock_levels ("id", "productId", "warehouseId", "quantity", "updatedAt")
+        VALUES (${randomUUID()}, ${productId}, ${warehouseId}, ${delta}, now())
+        ON CONFLICT ("productId", "warehouseId")
+        DO UPDATE SET "quantity" = stock_levels."quantity" + EXCLUDED."quantity", "updatedAt" = now()
+        RETURNING "quantity"`;
+      return Number(rows[0].quantity);
+    }
+    const rows = await tx.$queryRaw<{ quantity: number }[]>`
+      UPDATE stock_levels SET "quantity" = "quantity" + ${delta}, "updatedAt" = now()
+      WHERE "productId" = ${productId} AND "warehouseId" = ${warehouseId} AND "quantity" + ${delta} >= 0
+      RETURNING "quantity"`;
+    if (rows.length) return Number(rows[0].quantity);
+    // Not enough stock (or no stock row at all): read what there is for the message.
+    const cur = await tx.$queryRaw<{ quantity: number }[]>`
+      SELECT "quantity" FROM stock_levels WHERE "productId" = ${productId} AND "warehouseId" = ${warehouseId}`;
+    throw new InsufficientStockError(productId, warehouseId, Number(cur[0]?.quantity ?? 0), delta);
   },
 
   recordTransaction(tx: Prisma.TransactionClient, params: LedgerMovementParams & { createdBy: string }) {
