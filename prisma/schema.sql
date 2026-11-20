@@ -660,3 +660,13 @@ CREATE TABLE IF NOT EXISTS spec_templates (
 UPDATE products p SET "serialRequired" = true
   WHERE p."isDeleted" = false AND p."imeiRequired" = false AND p."serialRequired" = false
     AND EXISTS (SELECT 1 FROM imei_inventory u WHERE u."productId" = p.id AND u."isDeleted" = false);
+
+
+-- ── Market Prices by variant (colours merged) ─────────────────────────────
+ALTER TABLE price_watch_items ADD COLUMN IF NOT EXISTS "groupKey" TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS price_watch_items_group_uq ON price_watch_items("groupKey") WHERE "groupKey" IS NOT NULL;
+CREATE TABLE IF NOT EXISTS price_watch_group_products (
+  "productId" TEXT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  "itemId" TEXT NOT NULL REFERENCES price_watch_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS price_watch_group_products_item ON price_watch_group_products("itemId");

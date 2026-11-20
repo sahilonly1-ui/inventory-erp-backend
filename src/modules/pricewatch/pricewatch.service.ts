@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../common/errors';
 import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, searchUrl } from './stores';
 import { sellableStockSql } from '../../common/sellableStock';
 import { notListedRetryHours, leadingNotListed } from './notListed';
+import { variantName, variantKey } from './variant';
 
 const q = <T = any>(sql: string, ...p: unknown[]) => prisma.$queryRawUnsafe<T[]>(sql, ...p);
 const x = (sql: string, ...p: unknown[]) => prisma.$executeRawUnsafe(sql, ...p);
@@ -83,45 +84,130 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
 // an auto item is paused (not deleted — its history stays), and it resumes when
 // stock comes back. Items the admin added by hand are never touched.
 
-export async function syncFromInventory(): Promise<{ added: number; paused: number; resumed: number }> {
+export async function syncFromInventory(): Promise<{ added: number; paused: number; resumed: number; merged: number }> {
   const s = await getSettings();
-  // Names and brands follow the Product Master.
-  await x(`UPDATE price_watch_items i SET name=p.model, brand=p.brand, "updatedAt"=now()
-           FROM products p WHERE p.id=i."productId" AND (i.name<>p.model OR i.brand IS DISTINCT FROM p.brand)`);
-  if (!s.autoSyncInStock) return { added: 0, paused: 0, resumed: 0 };
 
   // A product is "in scope" when its brand and category are on the lists
   // (case-insensitive; an empty list means any) and, unless out-of-stock
-  // products are included, it has stock.
-  // Sellable stock, the same rule as the Stock Report: demo and open-box units
-  // do not count, so a product whose only stock is a demo phone drops out.
+  // products are included, it has sellable stock (Stock Report rule).
   const stockOf = `COALESCE(${sellableStockSql('p')}, 0)`;
-  const scope = `p."isDeleted"=false
-      AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
-      AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))
-      AND ($3::boolean OR ${stockOf} > 0)`;
-  const params = [s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()), s.includeOutOfStock];
+  const params = [s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()), s.includeOutOfStock, !!s.autoSyncInStock];
+  // In-scope products, plus every product an item already points at (so a hand-added
+  // product is grouped with its other colours too). One query, everything in memory.
+  const prods = await q<{ id: string; model: string; brand: string | null; stock: number; inScope: boolean }>(`
+    WITH base AS (
+      SELECT p.id, p.model, p.brand, ${stockOf}::int AS stock,
+        ($4::boolean
+          AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
+          AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))) AS listed
+      FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
+      WHERE p."isDeleted"=false
+        AND (EXISTS (SELECT 1 FROM price_watch_items i WHERE i."productId"=p.id)
+          OR ($4::boolean
+            AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
+            AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))))
+    )
+    SELECT id, model, brand, stock, (listed AND ($3::boolean OR stock > 0)) AS "inScope" FROM base`, ...params);
+  const items = await q<{ id: string; productId: string | null; groupKey: string | null; name: string; brand: string | null; source: string; priority: boolean; active: boolean; dismissed: boolean }>(
+    `SELECT id, "productId", "groupKey", name, brand, source, priority, active, dismissed FROM price_watch_items`);
+  const mapRows = await q<{ itemId: string; productId: string }>(`SELECT "itemId", "productId" FROM price_watch_group_products`);
 
-  const added = await x(
-    `INSERT INTO price_watch_items("productId", name, brand, source)
-     SELECT p.id, p.model, p.brand, 'auto' FROM products p
-     LEFT JOIN product_categories c ON c.id=p."categoryId"
-     WHERE ${scope}
-     ON CONFLICT ("productId") WHERE "productId" IS NOT NULL DO NOTHING`, ...params);
+  // Group products by brand + colour-free name.
+  type G = { key: string; name: string; brand: string | null; products: typeof prods; inScope: boolean };
+  const groups = new Map<string, G>();
+  for (const p of prods) {
+    const key = variantKey(p.brand, p.model);
+    let g = groups.get(key);
+    if (!g) { g = { key, name: variantName(p.model), brand: p.brand, products: [], inScope: false }; groups.set(key, g); }
+    g.products.push(p);
+    if (p.inScope) g.inScope = true;
+  }
+  const itemByKey = new Map(items.filter(i => i.groupKey).map(i => [i.groupKey!, i]));
+  const itemsByProduct = new Map<string, typeof items>();
+  for (const i of items) if (i.productId) itemsByProduct.set(i.productId, [...(itemsByProduct.get(i.productId) ?? []), i]);
 
-  // Auto items move in and out of scope as stock, brand lists or categories change.
-  // Starred items and items the admin added by hand are left alone.
-  const paused = await x(
-    `UPDATE price_watch_items i SET active=false, requested=false, "updatedAt"=now()
-     WHERE i.source='auto' AND i.active=true AND i.priority=false AND NOT EXISTS (
-       SELECT 1 FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
-       WHERE p.id=i."productId" AND ${scope})`, ...params);
-  const resumed = await x(
-    `UPDATE price_watch_items i SET active=true, "updatedAt"=now()
-     WHERE i.source='auto' AND i.active=false AND i.dismissed=false AND EXISTS (
-       SELECT 1 FROM products p LEFT JOIN product_categories c ON c.id=p."categoryId"
-       WHERE p.id=i."productId" AND ${scope})`, ...params);
-  return { added: Number(added), paused: Number(paused), resumed: Number(resumed) };
+  const toInsert: { key: string; name: string; brand: string | null; rep: string }[] = [];
+  const toRename: { id: string; key: string; name: string; brand: string | null }[] = [];
+  const merges: { loser: string; keeper: string }[] = [];
+  const raise: { id: string; priority: boolean; manual: boolean }[] = [];
+  const keeperOf = new Map<string, string>();         // group key → item id (existing only)
+
+  for (const g of groups.values()) {
+    // Only groups that are in scope or already watched become / stay items.
+    const related = new Map<string, (typeof items)[number]>();
+    const byKey = itemByKey.get(g.key); if (byKey) related.set(byKey.id, byKey);
+    for (const p of g.products) for (const i of itemsByProduct.get(p.id) ?? []) related.set(i.id, i);
+    if (!related.size && !g.inScope) continue;
+    const rep = [...g.products].sort((a, b) => b.stock - a.stock)[0];
+    if (!related.size) { toInsert.push({ key: g.key, name: g.name, brand: g.brand, rep: rep.id }); continue; }
+    // Keeper: the item already holding this key, else a visible one, else a starred/hand-added one.
+    const cands = [...related.values()].sort((a, b) =>
+      Number(b.groupKey === g.key) - Number(a.groupKey === g.key) || Number(a.dismissed) - Number(b.dismissed)
+      || Number(b.priority) - Number(a.priority) || Number(b.source === 'manual') - Number(a.source === 'manual'));
+    const keeper = cands[0];
+    keeperOf.set(g.key, keeper.id);
+    if (keeper.groupKey !== g.key || keeper.name !== g.name || keeper.brand !== g.brand) toRename.push({ id: keeper.id, key: g.key, name: g.name, brand: g.brand });
+    const losers = cands.slice(1);
+    for (const l of losers) merges.push({ loser: l.id, keeper: keeper.id });
+    if (losers.some(l => l.priority && !keeper.priority) || losers.some(l => l.source === 'manual' && keeper.source !== 'manual') || (keeper.dismissed && losers.some(l => !l.dismissed))) {
+      raise.push({ id: keeper.id, priority: keeper.priority || losers.some(l => l.priority), manual: keeper.source === 'manual' || losers.some(l => l.source === 'manual') });
+    }
+  }
+
+  // 1. Merge items of the same variant into one: history and pages move to the keeper.
+  if (merges.length) {
+    const L = merges.map(m => m.loser), K = merges.map(m => m.keeper);
+    await x(`UPDATE price_snapshots s SET "itemId"=m.keeper FROM unnest($1::text[], $2::text[]) AS m(loser, keeper) WHERE s."itemId"=m.loser`, L, K);
+    // A page the admin set on any colour wins over one found automatically.
+    await x(`INSERT INTO price_watch_links("itemId",store,url,"lockedByUser","notListed","discoveredAt","updatedAt")
+             SELECT DISTINCT ON (m.keeper, l.store) m.keeper, l.store, l.url, l."lockedByUser", l."notListed", l."discoveredAt", now()
+             FROM price_watch_links l JOIN unnest($1::text[], $2::text[]) AS m(loser, keeper) ON l."itemId"=m.loser
+             ORDER BY m.keeper, l.store, l."lockedByUser" DESC, (l.url IS NOT NULL) DESC, l."updatedAt" DESC
+             ON CONFLICT("itemId",store) DO UPDATE SET url=EXCLUDED.url, "lockedByUser"=EXCLUDED."lockedByUser", "notListed"=EXCLUDED."notListed", "updatedAt"=now()
+             WHERE price_watch_links."lockedByUser"=false AND (EXCLUDED."lockedByUser" OR price_watch_links.url IS NULL)`, L, K);
+    await x(`DELETE FROM price_watch_items WHERE id = ANY($1::text[])`, L);
+  }
+  if (raise.length) {
+    await x(`UPDATE price_watch_items i SET priority=r.priority, source=CASE WHEN r.manual THEN 'manual' ELSE i.source END, dismissed=false, "updatedAt"=now()
+             FROM unnest($1::text[], $2::boolean[], $3::boolean[]) AS r(id, priority, manual) WHERE i.id=r.id`,
+      raise.map(r => r.id), raise.map(r => r.priority), raise.map(r => r.manual));
+  }
+  // 2. Keepers take the variant name (no colour).
+  if (toRename.length) {
+    await x(`UPDATE price_watch_items i SET "groupKey"=r.key, name=r.name, brand=r.brand, "updatedAt"=now()
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS r(id, key, name, brand) WHERE i.id=r.id`,
+      toRename.map(r => r.id), toRename.map(r => r.key), toRename.map(r => r.name), toRename.map(r => r.brand));
+  }
+  // 3. New variants in stock.
+  let added = 0;
+  if (toInsert.length) {
+    const rows = await q<{ id: string; groupKey: string }>(
+      `INSERT INTO price_watch_items("productId", "groupKey", name, brand, source)
+       SELECT r.rep, r.key, r.name, r.brand, 'auto' FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS r(key, name, brand, rep)
+       ON CONFLICT DO NOTHING RETURNING id, "groupKey"`,
+      toInsert.map(r => r.key), toInsert.map(r => r.name), toInsert.map(r => r.brand), toInsert.map(r => r.rep));
+    added = rows.length;
+    for (const r of rows) keeperOf.set(r.groupKey, r.id);
+  }
+  // 4. Which products (colours) belong to which item — rewritten only when it changed.
+  const want = new Map<string, string>();
+  for (const g of groups.values()) { const id = keeperOf.get(g.key); if (id) for (const p of g.products) want.set(p.id, id); }
+  const have = new Map(mapRows.map(r => [r.productId, r.itemId]));
+  const changed = [...want].filter(([pid, iid]) => have.get(pid) !== iid);
+  if (changed.length) {
+    await x(`INSERT INTO price_watch_group_products("productId","itemId") SELECT * FROM unnest($1::text[], $2::text[])
+             ON CONFLICT("productId") DO UPDATE SET "itemId"=EXCLUDED."itemId"`, changed.map(c => c[0]), changed.map(c => c[1]));
+  }
+  // 5. Auto items follow stock: paused when no colour of the variant is in scope, resumed when one is.
+  const inScopeIds = [...groups.values()].filter(g => g.inScope).map(g => keeperOf.get(g.key)).filter(Boolean) as string[];
+  const live = new Set(inScopeIds);
+  const after = items.filter(i => !merges.some(m => m.loser === i.id));
+  const pauseIds = after.filter(i => i.source === 'auto' && i.active && !i.priority && i.productId && !live.has(i.id)).map(i => i.id);
+  const resumeIds = after.filter(i => i.source === 'auto' && !i.active && !i.dismissed && live.has(i.id)).map(i => i.id);
+  if (pauseIds.length) await x(`UPDATE price_watch_items SET active=false, requested=false, "updatedAt"=now() WHERE id = ANY($1::text[])`, pauseIds);
+  if (resumeIds.length) await x(`UPDATE price_watch_items SET active=true, "updatedAt"=now() WHERE id = ANY($1::text[])`, resumeIds);
+  if (merges.length || added) logger.info({ merged: merges.length, added, paused: pauseIds.length, resumed: resumeIds.length }, 'price-watch: synced by variant');
+  return { added, paused: pauseIds.length, resumed: resumeIds.length, merged: merges.length };
 }
 
 // ── Reading ─────────────────────────────────────────────────────────────────
@@ -129,8 +215,12 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
 export async function listItems() {
   await maybeSync();
   const items = await q(`
-    SELECT i.*, p.ean, p."sellingPrice"::float AS "ourPrice", sp.price::float AS "specPrice",
-           c.name AS category, COALESCE(${sellableStockSql('p')}, 0)::int AS stock
+    SELECT i.*, p.ean, p."sellingPrice"::float AS "ourPrice",
+           COALESCE((SELECT MIN(sp2.price) FROM price_watch_group_products g2 JOIN spec_prices sp2 ON sp2."productId"=g2."productId" WHERE g2."itemId"=i.id), sp.price)::float AS "specPrice",
+           c.name AS category,
+           COALESCE((SELECT SUM(${sellableStockSql('p2')}) FROM price_watch_group_products g2 JOIN products p2 ON p2.id=g2."productId" WHERE g2."itemId"=i.id),
+                    ${sellableStockSql('p')}, 0)::int AS stock,
+           (SELECT COUNT(*)::int FROM price_watch_group_products g3 WHERE g3."itemId"=i.id) AS colours
     FROM price_watch_items i
     LEFT JOIN products p ON p.id=i."productId"
     LEFT JOIN product_categories c ON c.id=p."categoryId"
@@ -174,12 +264,22 @@ export async function addItem(body: { productId?: string; name?: string; brand?:
   if (body.productId) {
     const p = await prisma.product.findFirst({ where: { id: body.productId, isDeleted: false } });
     if (!p) throw new NotFoundError('Product not found');
+    // Another colour of this variant is already watched: that entry covers it.
+    const existing = (await q(`SELECT i.* FROM price_watch_items i WHERE i."groupKey"=$1`, variantKey(p.brand, p.model)))[0];
+    if (existing) {
+      await x(`UPDATE price_watch_items SET dismissed=false, active=true, priority=(priority OR $2), "updatedAt"=now() WHERE id=$1`, existing.id, !!body.priority);
+      await x(`INSERT INTO price_watch_group_products("productId","itemId") VALUES($1,$2) ON CONFLICT("productId") DO UPDATE SET "itemId"=EXCLUDED."itemId"`, p.id, existing.id);
+      await requestRefresh(existing.id);
+      return existing;
+    }
     const rows = await q(
       `INSERT INTO price_watch_items("productId",name,brand,variant,source,priority)
        VALUES($1,$2,$3,$4,'manual',$5)
        ON CONFLICT ("productId") WHERE "productId" IS NOT NULL
        DO UPDATE SET dismissed=false, active=true, variant=COALESCE(EXCLUDED.variant, price_watch_items.variant), "updatedAt"=now()
-       RETURNING *`, p.id, p.model, p.brand, body.variant || null, !!body.priority);
+       RETURNING *`, p.id, variantName(p.model), p.brand, body.variant || null, !!body.priority);
+    await x(`UPDATE price_watch_items SET "groupKey"=$2 WHERE id=$1`, rows[0].id, variantKey(p.brand, p.model));
+    await x(`INSERT INTO price_watch_group_products("productId","itemId") VALUES($1,$2) ON CONFLICT("productId") DO UPDATE SET "itemId"=EXCLUDED."itemId"`, p.id, rows[0].id);
     await requestRefresh(rows[0].id);
     return rows[0];
   }
@@ -559,3 +659,22 @@ export async function tick() {
     lastCleanup = Date.now();
   }
 }
+
+// Diagnostics (temporary, read-only): how well automatic fetching is doing.
+setTimeout(async () => {
+  try {
+    const byStore = await q(`SELECT store, method, status, COUNT(*)::int n FROM price_snapshots WHERE "fetchedAt" > now() - interval '3 days' GROUP BY 1,2,3 ORDER BY 1,2,4 DESC`);
+    const items = await q(`SELECT COUNT(*) FILTER (WHERE active AND NOT dismissed)::int active,
+        COUNT(*) FILTER (WHERE active AND NOT dismissed AND ("lastRefreshedAt" IS NULL OR "lastRefreshedAt" < now() - interval '12 hours'))::int stale12h,
+        COUNT(*) FILTER (WHERE active AND NOT dismissed AND requested)::int queued,
+        MAX("lastRefreshedAt") last FROM price_watch_items`);
+    const perHour = await q(`SELECT to_char(date_trunc('hour', "fetchedAt") AT TIME ZONE 'Asia/Kolkata', 'DD HH24') h, method, COUNT(DISTINCT "itemId")::int items
+        FROM price_snapshots WHERE "fetchedAt" > now() - interval '2 days' GROUP BY 1,2 ORDER BY 1`);
+    const notes = await q(`SELECT store, status, left(notes, 120) note, COUNT(*)::int n FROM price_snapshots
+        WHERE "fetchedAt" > now() - interval '3 days' AND status NOT IN ('ok','suspect') GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 30`);
+    const settings = await q(`SELECT key, value FROM price_watch_settings WHERE key <> 'main'`);
+    logger.info({ items, byStore }, 'PW diag 1');
+    logger.info({ perHour }, 'PW diag 2');
+    logger.info({ notes, settings, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag 3');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag failed'); }
+}, 30_000).unref();
