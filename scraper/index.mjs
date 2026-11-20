@@ -566,7 +566,8 @@ function readPage(store) {
     // text blocks too (not only <button>/<a>), skipping anything greyed out.
     const looksBuy = el => {
       const t = (el.innerText || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (!t || t.length > 40 || !BUY.test(t) || /emi/.test(t)) return false;
+      // Exactly a buy label (optionally "at ₹15,999") — not offer text like "Buy now, pay later".
+      if (!t || !/^(add to cart|buy now|add to bag|go to cart)( at ₹\s?[\d,]+(\.\d+)?)?$/.test(t)) return false;
       const r = el.getBoundingClientRect();
       if (!(r.width > 0 && r.height > 0)) return false;
       if (el.closest('[disabled],[aria-disabled="true"]')) return false;
@@ -577,8 +578,10 @@ function readPage(store) {
       for (let e = el; e && e !== document.body; e = e.parentElement) op *= Number(getComputedStyle(e).opacity);
       return op > 0.5;
     };
-    const buyable = btns.some(b => !b.off && BUY.test(b.t) && !/emi/.test(b.t))
-      || [...document.querySelectorAll('div, span, li')].some(el => el.childElementCount <= 3 && looksBuy(el));
+    const realBtn = btns.some(b => !b.off && BUY.test(b.t) && !/emi|pay later/.test(b.t));
+    const notifyFirst = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
+    // A div that merely reads "Buy now" counts only when the page isn't offering "Notify me".
+    const buyable = realBtn || (!notifyFirst && [...document.querySelectorAll('div, span, li')].some(el => el.childElementCount <= 3 && looksBuy(el)));
     const notifyBtn = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
     const unavailable = notifyBtn || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
     // A working Buy / Add-to-cart button for the open variant beats everything else:
