@@ -723,3 +723,16 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary, read-only).
+setTimeout(async () => {
+  try {
+    const rows = await q(`SELECT i.name, s.store, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,140) url, left(s.notes,160) notes
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE i.name ILIKE '%iphone 14%' AND s.store='reliance' ORDER BY s."fetchedAt" DESC LIMIT 8`);
+    const links = await q(`SELECT i.name, l.url, l."lockedByUser", l."notListed", l."updatedAt" FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId"
+      WHERE i.name ILIKE '%iphone 14%' AND l.store='reliance'`);
+    const recent = await q(`SELECT s.status, s."inStock", count(*)::int n, max(s."fetchedAt") last, min(s.method) method FROM price_snapshots s
+      WHERE s.store='reliance' AND s."fetchedAt" > now() - interval '24 hours' GROUP BY 1,2`);
+    logger.info({ rows, links, recent, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance failed'); }
+}, 30_000).unref();
