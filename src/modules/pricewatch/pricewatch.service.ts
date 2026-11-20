@@ -572,6 +572,13 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
     const expected = prevGood.find(p => p.store === r.store)?.price ?? null;
     const v: any = verify(r, expected, item.brand, item.ourPrice ?? null);
 
+    // Amazon often has one page per colour, and one colour can be "currently unavailable"
+    // while another sells. A page found automatically that says unavailable is forgotten,
+    // so the next run searches again and can land on a colour that is in stock.
+    if (r.store === 'amazon' && !link?.lockedByUser && v.status === 'not_found' && /not sold on amazon right now/i.test(String(r.note ?? ''))) {
+      await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND store='amazon' AND "lockedByUser"=false`, itemId);
+      v.url = null;
+    }
     // Remember the page for next time — never over a URL the admin set.
     if (!link?.lockedByUser && (v.url || v.status === 'not_listed')) {
       await x(
@@ -652,29 +659,33 @@ async function maybeSync() {
   lastSync = Date.now();
   try { await syncFromInventory(); } catch (e: any) { logger.error({ err: e?.message }, 'price-watch: sync failed'); }
 }
+// GitHub's own schedule for the cloud scraper is unreliable (runs are delayed or
+// skipped — only 2–3 a day actually happened, so most prices were 12+ hours old).
+// The ERP now starts a run itself whenever prices are due and the showroom PC
+// scraper is offline: at most one every 2 hours, never while one is running.
+let lastAutoDispatch = 0;
+async function autoDispatch() {
+  if (!process.env.GITHUB_DISPATCH_TOKEN || localWorkerOnline()) return;
+  if (Date.now() - lastAutoDispatch < 2 * 3600_000) return;
+  const s = await getSettings();
+  const [due] = await q<{ n: number }>(
+    `SELECT COUNT(*)::int n FROM price_watch_items WHERE active AND NOT dismissed AND (requested OR "lastRefreshedAt" IS NULL OR
+       "lastRefreshedAt" < now() - make_interval(mins => (CASE WHEN priority THEN $1::int ELSE $2::int END)))`,
+    s.priorityIntervalMins, s.defaultIntervalMins);
+  if (!due?.n) return;
+  const st: any = await runStatus();
+  if (st?.run && st.run.status !== 'completed') return;                       // one is already running
+  if (st?.run?.startedAt && Date.now() - new Date(st.run.startedAt).getTime() < 90 * 60_000) return;
+  lastAutoDispatch = Date.now();
+  const ok = await dispatchScraper(false);
+  logger.info({ due: due.n, started: ok }, 'price-watch: cloud scraper started by the ERP');
+}
+
 export async function tick() {
   await maybeSync();
+  try { await autoDispatch(); } catch (e: any) { logger.warn({ err: e?.message }, 'price-watch: auto dispatch failed'); }
   if (Date.now() - lastCleanup > 24 * 3600_000) {
     await x(`DELETE FROM price_snapshots WHERE "fetchedAt" < now() - interval '90 days'`);
     lastCleanup = Date.now();
   }
 }
-
-// Diagnostics (temporary, read-only): how well automatic fetching is doing.
-setTimeout(async () => {
-  try {
-    const byStore = await q(`SELECT store, method, status, COUNT(*)::int n FROM price_snapshots WHERE "fetchedAt" > now() - interval '3 days' GROUP BY 1,2,3 ORDER BY 1,2,4 DESC`);
-    const items = await q(`SELECT COUNT(*) FILTER (WHERE active AND NOT dismissed)::int active,
-        COUNT(*) FILTER (WHERE active AND NOT dismissed AND ("lastRefreshedAt" IS NULL OR "lastRefreshedAt" < now() - interval '12 hours'))::int stale12h,
-        COUNT(*) FILTER (WHERE active AND NOT dismissed AND requested)::int queued,
-        MAX("lastRefreshedAt") last FROM price_watch_items`);
-    const perHour = await q(`SELECT to_char(date_trunc('hour', "fetchedAt") AT TIME ZONE 'Asia/Kolkata', 'DD HH24') h, method, COUNT(DISTINCT "itemId")::int items
-        FROM price_snapshots WHERE "fetchedAt" > now() - interval '2 days' GROUP BY 1,2 ORDER BY 1`);
-    const notes = await q(`SELECT store, status, left(notes, 120) note, COUNT(*)::int n FROM price_snapshots
-        WHERE "fetchedAt" > now() - interval '3 days' AND status NOT IN ('ok','suspect') GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 30`);
-    const settings = await q(`SELECT key, value FROM price_watch_settings WHERE key <> 'main'`);
-    logger.info({ items, byStore }, 'PW diag 1');
-    logger.info({ perHour }, 'PW diag 2');
-    logger.info({ notes, settings, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag 3');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag failed'); }
-}, 30_000).unref();
