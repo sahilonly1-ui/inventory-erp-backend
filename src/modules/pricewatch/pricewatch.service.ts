@@ -724,15 +724,14 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
   return { itemId, price, products: ids.length };
 }
 
-// Diagnostics (temporary, read-only).
+// Diagnostics (temporary): re-check iPhone 14 on the stores, then log what decided Reliance stock.
 setTimeout(async () => {
+  try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE 'apple iphone 14 (%' AND active AND NOT dismissed`); } catch { /* ignore */ }
+}, 9 * 60_000).unref();
+for (const m of [12, 18, 25, 35]) setTimeout(async () => {
   try {
-    const rows = await q(`SELECT i.name, s.store, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,140) url, left(s.notes,160) notes
-      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE i.name ILIKE '%iphone 14%' AND s.store='reliance' ORDER BY s."fetchedAt" DESC LIMIT 8`);
-    const links = await q(`SELECT i.name, l.url, l."lockedByUser", l."notListed", l."updatedAt" FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId"
-      WHERE i.name ILIKE '%iphone 14%' AND l.store='reliance'`);
-    const recent = await q(`SELECT s.status, s."inStock", count(*)::int n, max(s."fetchedAt") last, min(s.method) method FROM price_snapshots s
-      WHERE s.store='reliance' AND s."fetchedAt" > now() - interval '24 hours' GROUP BY 1,2`);
-    logger.info({ rows, links, recent, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance failed'); }
-}, 30_000).unref();
+    const rows = await q(`SELECT i.name, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,90) url, left(s.notes,400) notes
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='reliance' AND s.notes ILIKE '%Stock from%' ORDER BY s."fetchedAt" DESC LIMIT 10`);
+    logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance2');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance2 failed'); }
+}, m * 60_000).unref();
