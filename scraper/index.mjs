@@ -560,11 +560,15 @@ function readPage(store) {
     const btns = [...document.querySelectorAll('button, a, input[type="submit"], [role="button"]')]
       .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top + window.scrollY < 2500; })
       .map(b => ({ t: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().toLowerCase(), off: b.disabled || b.getAttribute('aria-disabled') === 'true' }));
-    const buyable = btns.some(b => !b.off && /^(add to cart|buy now|add to bag|buy)$/.test(b.t));
+    // Flipkart writes "Buy now at ₹15,999" / "Add to cart" with extra words — match the start.
+    const buyable = btns.some(b => !b.off && /^(add to cart|buy now|add to bag|go to cart|buy)(\b|$)/.test(b.t) && !/emi/.test(b.t));
     const notifyBtn = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
     const unavailable = notifyBtn || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
-    if (unavailable && !buyable) res.inStock = false;
-    else if (res.inStock === null && buyable) res.inStock = true;
+    // A working Buy / Add-to-cart button for the open variant beats everything else:
+    // "Sold out" on another colour/variant swatch, or structured data describing a
+    // different variant (Flipkart), must not mark the product out of stock.
+    if (buyable) res.inStock = true;
+    else if (unavailable) res.inStock = false;
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
   res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
