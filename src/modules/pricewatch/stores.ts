@@ -88,6 +88,67 @@ export function officialDomains(brand?: string | null): string[] {
 const hostMatches = (host: string, domain: string) =>
   host === domain || host.endsWith('.' + domain);
 
+/** Which store a URL belongs to, by its host (marketplaces only). */
+export function storeOfUrl(raw: string): StoreKey | null {
+  try {
+    const host = new URL(raw.trim()).hostname.toLowerCase();
+    return (STORES.find(s => s.domains.some(d => hostMatches(host, d)))?.key) ?? null;
+  } catch { return null; }
+}
+
+// Share / short links the apps give out: they only redirect to the real page.
+const SHORT_HOSTS = /(^|\.)(amzn\.in|amzn\.to|amzn\.eu|a\.co|dl\.flipkart\.com|fkrt\.it|fkrt\.cc|fkrt\.co|fkrt\.to|bit\.ly|tinyurl\.com|t\.co|rdl\.ink|croma\.page\.link)$/i;
+export const isShortLink = (raw: string) => { try { return SHORT_HOSTS.test(new URL(raw.trim()).hostname); } catch { return false; } };
+
+/** Follows a share / short link to the page it points at (redirect headers only). */
+export async function resolveLink(raw: string): Promise<string> {
+  let url = raw.trim();
+  for (let hop = 0; hop < 8; hop++) {
+    let next: string | null = null;
+    try {
+      const r = await fetch(url, { method: 'GET', redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Mobile Safari/537.36', accept: 'text/html' } });
+      const loc = r.headers.get('location');
+      if (r.status >= 300 && r.status < 400 && loc) next = new URL(loc, url).toString();
+      else if (r.ok && isShortLink(url)) {
+        // Some short links answer with a page that redirects by script / meta tag.
+        const html = (await r.text()).slice(0, 20000);
+        const m = html.match(/(?:http-equiv=["']refresh["'][^>]*url=|window\.location(?:\.href)?\s*=\s*["'])([^"'>\s]+)/i)
+          || html.match(/https:\/\/(?:www\.)?(?:amazon\.in|flipkart\.com)\/[^"'\s<>]+/i);
+        if (m) next = new URL((m[1] ?? m[0]).replace(/&amp;/g, '&'), url).toString();
+      }
+    } catch { /* keep what we have */ }
+    if (!next || next === url) break;
+    url = next;
+    if (!isShortLink(url)) {
+      // Real store page reached (Amazon may redirect /d/... once more to /dp/...).
+      if (/amazon\.in\/(dp|gp\/product)\//i.test(url) || /flipkart\.com\/.+\/p\/itm/i.test(url) || !storeOfUrl(url)) break;
+    }
+  }
+  return url;
+}
+
+/**
+ * A URL the admin gave by hand: the host must be the store's, nothing more —
+ * the admin knows which page they mean. Canonicalised when the format is known.
+ */
+export function normaliseAdminUrl(store: StoreKey, raw: string, brand?: string | null): string | null {
+  const strict = normaliseStoreUrl(store, raw, brand);
+  if (strict) return strict;
+  let u: URL;
+  try { u = new URL(raw.trim()); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  const host = u.hostname.toLowerCase();
+  const def = storeDef(store);
+  if (!def) return null;
+  if (store === 'official') {
+    if (STORES.some(s => s.domains.some(d => hostMatches(host, d)))) return null;
+  } else if (!def.domains.some(d => hostMatches(host, d))) return null;
+  if (u.pathname.length <= 1) return null;          // a home page is not a product
+  u.hash = '';
+  for (const k of [...u.searchParams.keys()]) if (/^(utm_|gclid|fbclid|ref|srsltid|_refId|_appId|tag|linkCode|smid|psc)/i.test(k)) u.searchParams.delete(k);
+  return u.toString();
+}
+
 /** Validates a URL for a store and returns its canonical form, or null. */
 export function normaliseStoreUrl(store: StoreKey, raw: string, brand?: string | null): string | null {
   let u: URL;

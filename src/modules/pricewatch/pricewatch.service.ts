@@ -1,7 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { BadRequestError, NotFoundError } from '../../common/errors';
-import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, searchUrl } from './stores';
+import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, normaliseAdminUrl, searchUrl, resolveLink, isShortLink, storeOfUrl } from './stores';
 import { sellableStockSql } from '../../common/sellableStock';
 import { notListedRetryHours, leadingNotListed } from './notListed';
 import { variantName, variantKey } from './variant';
@@ -323,8 +323,19 @@ export async function setLink(itemId: string, store: StoreKey, url: string | nul
   if (!storeDef(store)) throw new BadRequestError('Unknown store');
   let clean: string | null = null;
   if (url) {
-    clean = normaliseStoreUrl(store, url, item.brand);
-    if (!clean) throw new BadRequestError(`That doesn't look like a ${storeDef(store)!.label} product page URL`);
+    let full = url.trim();
+    if (!/^https?:\/\//i.test(full)) full = 'https://' + full;
+    // Share links (amzn.in/d/…, dl.flipkart.com/s/…) are followed to the real page.
+    if (isShortLink(full)) full = await resolveLink(full);
+    // An Amazon link pasted under Flipkart (or similar) is saved under the store it belongs to.
+    const owner = storeOfUrl(full);
+    if (owner && owner !== store) store = owner;
+    clean = normaliseAdminUrl(store, full, item.brand);
+    if (!clean) {
+      throw new BadRequestError(isShortLink(full)
+        ? `Couldn't open that share link from the server. Open it in your browser and paste the full ${storeDef(store)!.label} page address instead.`
+        : `That link isn't a ${storeDef(store)!.label} page. Paste the product page link from ${storeDef(store)!.label}.`);
+    }
   }
   // url=null & notListed=false → forget it and let discovery search again.
   const locked = !!clean || notListed;
@@ -504,10 +515,10 @@ function offerValue(o: AgentOffer, price: number): number {
 }
 
 /** Checks one store result. Exported for tests. */
-export function verify(r: AgentResult, expected: number | null, brand: string | null, erpMrp: number | null = null) {
+export function verify(r: AgentResult, expected: number | null, brand: string | null, erpMrp: number | null = null, adminUrl = false) {
   const store = r.store as StoreKey;
   const notes: string[] = [];
-  const url = r.url ? normaliseStoreUrl(store, r.url, brand) : null;
+  const url = r.url ? (adminUrl ? normaliseAdminUrl(store, r.url, brand) : normaliseStoreUrl(store, r.url, brand)) : null;
   if (r.url && !url) notes.push('URL is not a product page on this store — ignored');
   const st = String(r.status ?? 'ok').toLowerCase();
   if (st === 'not_listed') return { status: 'not_listed', url: null, notes };
@@ -572,7 +583,7 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
     if (!storeDef(r.store)) continue;
     const link = links.find(l => l.store === r.store);
     const expected = prevGood.find(p => p.store === r.store)?.price ?? null;
-    const v: any = verify(r, expected, item.brand, item.ourPrice ?? null);
+    const v: any = verify(r, expected, item.brand, item.ourPrice ?? null, !!link?.lockedByUser);
 
     // Amazon often has one page per colour, and one colour can be "currently unavailable"
     // while another sells. A page found automatically that says unavailable is forgotten,
@@ -712,3 +723,12 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary, read-only).
+setTimeout(async () => {
+  try {
+    const rows = await q(`SELECT i.name, s.store, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.notes,120) notes
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE i.name ILIKE '%nova 2 neo%' ORDER BY s."fetchedAt" DESC LIMIT 6`);
+    logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag neo');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag neo failed'); }
+}, 30_000).unref();
