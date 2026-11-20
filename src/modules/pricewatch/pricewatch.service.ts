@@ -560,7 +560,7 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
     .sort((a, b) => b.value - a.value)[0];
   const effectivePrice = best && best.value > 0 ? price - best.value : null;
   const bestOffer = best && best.value > 0 ? [best.bank, best.cardType, best.mode].filter(Boolean).join(' · ') : null;
-  if (r.note) notes.push(String(r.note).slice(0, 300));
+  if (r.note) notes.push(String(r.note).slice(0, /^Stock from:/.test(String(r.note)) ? 1100 : 300));
   return {
     status, url, price, mrp, offers, effectivePrice, bestOffer, notes,
     inStock: typeof r.inStock === 'boolean' ? r.inStock : null,
@@ -728,9 +728,9 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
 setTimeout(async () => {
   try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE 'apple iphone 14 (%' AND active AND NOT dismissed`); } catch { /* ignore */ }
 }, 9 * 60_000).unref();
-for (const m of [12, 18, 25, 35]) setTimeout(async () => {
+for (const m of [14, 20, 28, 40]) setTimeout(async () => {
   try {
-    const rows = await q(`SELECT i.name, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,90) url, left(s.notes,400) notes
+    const rows = await q(`SELECT i.name, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,90) url, left(s.notes,1100) notes
       FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='reliance' AND s.notes ILIKE '%Stock from%' ORDER BY s."fetchedAt" DESC LIMIT 10`);
     logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance2');
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance2 failed'); }

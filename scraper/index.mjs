@@ -593,6 +593,10 @@ function readPage(store) {
     res.stockWhy = buyable ? (hitBtn ? `button "${hitBtn.t.slice(0, 40)}"` : 'buy bar')
       : notifyBtn ? 'notify-me button'
       : unavailable ? 'unavailable text' : (res.inStock == null ? 'nothing' : 'structured data');
+    const seen = btns.map(b => b.t).filter(t => t && t.length < 30);
+    const allBtns = [...document.querySelectorAll('button, [role="button"]')].map(b => (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()).filter(t => t && t.length < 30);
+    const near = (head.match(/.{0,40}(unavailable|out of stock|notify|sold out|add to cart|buy now).{0,30}/g) || []).slice(0, 4);
+    res.stockWhy += ` | visible btns: ${[...new Set(seen)].slice(0, 14).join(', ')} | all btns: ${[...new Set(allBtns)].filter(t => /cart|buy|notify|stock|unavail/.test(t)).slice(0, 6).join(', ')} | text: ${near.join(' ~ ')}`;
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
   res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
@@ -680,11 +684,13 @@ async function scrapeStore(context, job, s) {
       page.on('response', async resp => {
         try {
           const u = resp.url();
-          if (!/\/catalog\/|\/product/i.test(u) || !/json/i.test(resp.headers()['content-type'] || '')) return;
+          if (!/reliancedigital|fynd|jiox/i.test(u) || /\.(js|css|png|jpe?g|webp|svg|woff2?)(\?|$)/i.test(u)) return;
           const t = await resp.text();
-          if (!/"(sellable|is_available|is_serviceable)"\s*:/.test(t)) return;
+          if (!/"(sellable|is_available)"\s*:/.test(t)) return;
           const pick = k => [...t.matchAll(new RegExp(`"${k}"\\s*:\\s*(true|false)`, 'g'))].map(m => m[1] === 'true');
-          api.push({ full: u, u: u.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*/, '').slice(-90), sellable: pick('sellable'), avail: pick('is_available') });
+          const body = resp.request().postData() || '';
+          const op = (body.match(/"operationName"\s*:\s*"([^"]+)"/) || body.match(/query\s+(\w+)/) || [])[1] || '';
+          api.push({ full: u + ' ' + body.slice(0, 3000), u: (op ? 'gql:' + op : u.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*/, '').slice(-70)), sellable: pick('sellable'), avail: pick('is_available') });
         } catch { /* body gone */ }
       });
     }
@@ -701,13 +707,18 @@ async function scrapeStore(context, job, s) {
       return { store: s.store, url, status: 'blocked', note: blocked };
     }
     await expandOffers(page, s.store);
+    // Reliance draws its Add to cart / Notify me bar after the price, from a later API call.
+    if (s.store === 'reliance') {
+      await page.waitForFunction(() => /add to cart|notify me|buy now|out of stock|unavailable/i.test(document.body?.innerText || ''), null, { timeout: 12000 }).catch(() => {});
+      await sleep(800);
+    }
     const r = await page.evaluate(readPage, s.store);
     if (s.store === 'reliance') {
       await sleep(500);
       // Only this product's own answer — "similar products" lists carry "sellable" too.
       const slug = new URL(page.url()).pathname.split('/').filter(Boolean).pop() || '#';
       const mine = api.filter(a => a.sellable.length && a.full.includes(slug));
-      const any = mine.find(a => /\/sizes/.test(a.full)) || mine[0];
+      const any = mine.find(a => /\/sizes|size/i.test(a.u)) || mine[0];
       if (any) {
         const ok = any.sellable[0];
         r.inStock = ok;
@@ -765,7 +776,7 @@ async function scrapeStore(context, job, s) {
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers,
-      note: s.store === 'reliance' ? `Stock from: ${r.stockWhy}`.slice(0, 400)
+      note: s.store === 'reliance' ? `Stock from: ${r.stockWhy}`.slice(0, 1100)
         : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };
   } catch (e) {
