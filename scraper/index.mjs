@@ -589,6 +589,10 @@ function readPage(store) {
     // different variant (Flipkart), must not mark the product out of stock.
     if (buyable) res.inStock = true;
     else if (unavailable) res.inStock = false;
+    const hitBtn = btns.find(b => !b.off && BUY.test(b.t) && !/emi|pay later/.test(b.t));
+    res.stockWhy = buyable ? (hitBtn ? `button "${hitBtn.t.slice(0, 40)}"` : 'buy bar')
+      : notifyBtn ? 'notify-me button'
+      : unavailable ? 'unavailable text' : (res.inStock == null ? 'nothing' : 'structured data');
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
   res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
@@ -668,6 +672,22 @@ async function scrapeStore(context, job, s) {
           : { store: s.store, status: verdict, note: (verdict === 'blocked' ? why : `Not found yet (will retry): ${why}`).trim().slice(0, 200) };
       }
     }
+    // Reliance (Fynd) draws Add to cart / Notify me from its catalog API. Its answer
+    // ("sellable", per-size "is_available") is what the store itself goes by, so it
+    // beats reading buttons — those differ by layout and by pincode.
+    const api = [];
+    if (s.store === 'reliance') {
+      page.on('response', async resp => {
+        try {
+          const u = resp.url();
+          if (!/\/catalog\/|\/product/i.test(u) || !/json/i.test(resp.headers()['content-type'] || '')) return;
+          const t = await resp.text();
+          if (!/"(sellable|is_available|is_serviceable)"\s*:/.test(t)) return;
+          const pick = k => [...t.matchAll(new RegExp(`"${k}"\\s*:\\s*(true|false)`, 'g'))].map(m => m[1] === 'true');
+          api.push({ full: u, u: u.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*/, '').slice(-90), sellable: pick('sellable'), avail: pick('is_available') });
+        } catch { /* body gone */ }
+      });
+    }
     const load = () => withSlot(s.store, async () => {
       await open(page, url);
       if (s.store === 'amazon') await passInterstitial(page, url);
@@ -682,6 +702,19 @@ async function scrapeStore(context, job, s) {
     }
     await expandOffers(page, s.store);
     const r = await page.evaluate(readPage, s.store);
+    if (s.store === 'reliance') {
+      await sleep(500);
+      // Only this product's own answer — "similar products" lists carry "sellable" too.
+      const slug = new URL(page.url()).pathname.split('/').filter(Boolean).pop() || '#';
+      const mine = api.filter(a => a.sellable.length && a.full.includes(slug));
+      const any = mine.find(a => /\/sizes/.test(a.full)) || mine[0];
+      if (any) {
+        const ok = any.sellable[0];
+        r.inStock = ok;
+        r.stockWhy = `store api sellable=${ok} (${any.u})`;
+      }
+      r.stockWhy += api.length ? ` | api: ${api.map(a => `${a.u} s=${a.sellable.slice(0, 3)} a=${a.avail.slice(0, 3)}`).join('; ')}` : ' | api: none';
+    }
     // Is this page really our product? A link saved earlier (or picked from a
     // search) can point at a sibling model — SB550 for SB590, SB180 for Bar 2.1
     // Essential. A link the admin pasted is trusted as is.
@@ -732,7 +765,8 @@ async function scrapeStore(context, job, s) {
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers,
-      note: r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
+      note: s.store === 'reliance' ? `Stock from: ${r.stockWhy}`.slice(0, 400)
+        : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };
   } catch (e) {
     await debugDump(page, tag + '-error');
