@@ -835,13 +835,23 @@ async function watch() {
   // browser it starts inherits this (Windows passes BELOW_NORMAL on to child processes).
   try { os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* not permitted: carry on */ }
   pruneDebugFolder();
-  // Only one copy may run (the PC may start it twice): hold a local port as a lock.
+  // Only one copy may work at a time (the PC may start it twice): hold a local port as a lock.
+  // A second copy no longer exits — that used to stop the scraper for good after an
+  // update. It waits on standby and takes over the moment the working copy stops.
   const net = await import('node:net');
-  const locked = await new Promise(res => {
-    const srv = net.createServer().once('error', () => res(false)).listen(47231, '127.0.0.1', () => res(true));
-    srv.unref();
+  const tryLock = () => new Promise(res => {
+    const srv = net.createServer().once('error', () => res(null)).listen(47231, '127.0.0.1', () => { srv.unref(); res(srv); });
   });
-  if (!locked) { console.log('Another copy of the price scraper is already running — exiting.'); process.exit(0); }
+  lockServer = await tryLock();
+  if (!lockServer) {
+    // Older versions restarted themselves by starting this copy and then sitting on the
+    // lock while waiting for it — a deadlock. If the copy holding the lock is our own
+    // parent scraper, end it so this (newer) copy can work.
+    await endParentScraper();
+    console.log('Another copy of the price scraper is working — standing by to take over.');
+    while (!(lockServer = await tryLock())) await sleep(10_000);
+    console.log('Took over as the working copy.');
+  }
 
   let b = null, lastDue = 0, idleSince = Date.now();
   // A browser hiccup (e.g. Playwright's "Unexpected end of JSON input") must not
@@ -862,7 +872,7 @@ async function watch() {
       lastUpdateCheck = Date.now();
       if (await selfUpdate()) {
         if (b) await b.browser.close().catch(() => {});
-        restartSelf();
+        await restartSelf();
         return;
       }
     }
@@ -917,12 +927,42 @@ async function selfUpdate() {
   }
 }
 
+let lockServer = null;
+
+/**
+ * Restart into the new files. The lock is released first and this process exits; the
+ * background loop on the PC (RUN-BACKGROUND.bat / START-SCRAPER.bat) starts the new
+ * version a few seconds later. Run any other way, a fresh copy is started here.
+ */
 async function restartSelf() {
-  const { spawn } = await import('child_process');
-  // Start the new version in this same window and keep this (old) process as a thin
-  // parent that simply waits and passes the exit code on.
-  const child = spawn(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: process.env });
-  child.on('exit', code => process.exit(code ?? 0));
+  try { lockServer?.close(); } catch { /* already closed */ }
+  lockServer = null;
+  if (process.env.SCRAPER_LOOP === '0') {
+    const { spawn } = await import('child_process');
+    spawn(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: process.env, detached: true }).unref();
+  }
+  setTimeout(() => process.exit(0), 300);
+}
+
+/** If our parent process is an older scraper waiting on us, end it (Windows and Linux). */
+async function endParentScraper() {
+  const ppid = process.ppid;
+  if (!ppid || ppid <= 1) return;
+  try {
+    let cmd = '';
+    if (process.platform === 'win32') {
+      const { execFileSync } = await import('child_process');
+      cmd = execFileSync('powershell', ['-NoProfile', '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${ppid}").CommandLine`], { encoding: 'utf8', timeout: 15000 });
+    } else {
+      const fs = await import('fs');
+      cmd = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+    }
+    if (/node/i.test(cmd) && /index\.mjs/i.test(cmd)) {
+      console.log('Ending the older scraper copy that started this one…');
+      process.kill(ppid);
+    }
+  } catch { /* can't tell — just stand by */ }
 }
 
 /** Per-store results + example failures, as GitHub annotations and a job summary (both public). */
