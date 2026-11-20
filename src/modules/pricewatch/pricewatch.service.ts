@@ -468,7 +468,9 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
         // searching again every run ("Re-find pages" clears this immediately).
         // A product refreshed by hand ("requested") is searched on every store again.
         const streak = leadingNotListed(recentBy.get(`${i.id}|${st.key}`) ?? []);
-        if (!i.requested && l?.notListed && l.discoveredAt && Date.now() - new Date(l.discoveredAt).getTime() < notListedRetryHours(streak || 1) * 3_600_000) return null;
+        // (Searched again on every run now: a listing that wasn't found last time
+        // often turns up the next time. Only the admin's own "not sold here" is skipped.)
+        void streak; void notListedRetryHours;
         return {
           store: st.key, label: st.label,
           url: l?.url ?? null,
@@ -579,6 +581,13 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
       await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND store='amazon' AND "lockedByUser"=false`, itemId);
       v.url = null;
     }
+    if (!link?.lockedByUser && link?.url && v.status === 'not_found') {
+      const prev = (await q(`SELECT status FROM price_snapshots WHERE "itemId"=$1 AND store=$2 ORDER BY "fetchedAt" DESC LIMIT 1`, itemId, r.store))[0];
+      if (prev && prev.status !== 'ok' && prev.status !== 'suspect') {
+        await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND store=$2 AND "lockedByUser"=false`, itemId, r.store);
+        v.url = null;
+      }
+    }
     // Remember the page for next time — never over a URL the admin set.
     if (!link?.lockedByUser && (v.url || v.status === 'not_listed')) {
       await x(
@@ -688,4 +697,18 @@ export async function tick() {
     await x(`DELETE FROM price_snapshots WHERE "fetchedAt" < now() - interval '90 days'`);
     lastCleanup = Date.now();
   }
+}
+
+
+/** Our selling price for a variant — the same price the Specifications tab shows, for every colour. */
+export async function setOurPrice(itemId: string, price: number | null, userId: string) {
+  const item = (await q(`SELECT "productId" FROM price_watch_items WHERE id=$1`, itemId))[0];
+  if (!item) throw new NotFoundError('Item not found');
+  const ids = (await q<{ productId: string }>(`SELECT "productId" FROM price_watch_group_products WHERE "itemId"=$1`, itemId)).map(r => r.productId);
+  if (!ids.length && item.productId) ids.push(item.productId);
+  if (!ids.length) throw new BadRequestError('This entry is not linked to a product in the ERP');
+  if (price == null) await x(`DELETE FROM spec_prices WHERE "productId" = ANY($1::text[])`, ids);
+  else await x(`INSERT INTO spec_prices ("productId", price, "updatedBy") SELECT unnest($1::text[]), $2, $3
+                ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
+  return { itemId, price, products: ids.length };
 }

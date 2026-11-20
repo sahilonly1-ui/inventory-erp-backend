@@ -65,6 +65,12 @@ router.get('/items', asyncHandler(async (_req, res) => ok(res, { items: await sv
 router.post('/items', asyncHandler(async (req, res) => ok(res, await svc.addItem(req.body ?? {}), 201)));
 router.patch('/items/:id', asyncHandler(async (req, res) => { await svc.updateItem(req.params.id, req.body ?? {}); ok(res, { ok: true }); }));
 router.delete('/items/:id', asyncHandler(async (req, res) => { await svc.removeItem(req.params.id); ok(res, { ok: true }); }));
+router.put('/items/:id/our-price', asyncHandler(async (req: any, res) => {
+  const v = req.body?.price;
+  const price = v === null || v === '' || v === undefined ? null : Number(v);
+  if (price !== null && !(price > 0 && price < 10_000_000)) throw new BadRequestError('Enter a price above 0');
+  ok(res, await svc.setOurPrice(req.params.id, price, req.user?.id ?? null));
+}));
 router.post('/items/:id/request', asyncHandler(async (req, res) => { await svc.requestRefresh(req.params.id, !!req.body?.rediscover); ok(res, { ok: true }); }));
 router.get('/items/:id/history', asyncHandler(async (req, res) => ok(res, await svc.history(req.params.id, Number(req.query.days) || 30))));
 router.put('/items/:id/links/:store', asyncHandler(async (req, res) => {
