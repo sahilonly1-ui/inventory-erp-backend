@@ -561,7 +561,24 @@ function readPage(store) {
       .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top + window.scrollY < 2500; })
       .map(b => ({ t: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().toLowerCase(), off: b.disabled || b.getAttribute('aria-disabled') === 'true' }));
     // Flipkart writes "Buy now at ₹15,999" / "Add to cart" with extra words — match the start.
-    const buyable = btns.some(b => !b.off && /^(add to cart|buy now|add to bag|go to cart|buy)(\b|$)/.test(b.t) && !/emi/.test(b.t));
+    const BUY = /^(add to cart|buy now|add to bag|go to cart|buy)(\b|$)/;
+    // Flipkart's buy bar is made of plain <div>s, not buttons — look at short visible
+    // text blocks too (not only <button>/<a>), skipping anything greyed out.
+    const looksBuy = el => {
+      const t = (el.innerText || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!t || t.length > 40 || !BUY.test(t) || /emi/.test(t)) return false;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) return false;
+      if (el.closest('[disabled],[aria-disabled="true"]')) return false;
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.pointerEvents === 'none') return false;
+      // Greyed-out buttons are usually faded on a parent; opacity multiplies down the tree.
+      let op = 1;
+      for (let e = el; e && e !== document.body; e = e.parentElement) op *= Number(getComputedStyle(e).opacity);
+      return op > 0.5;
+    };
+    const buyable = btns.some(b => !b.off && BUY.test(b.t) && !/emi/.test(b.t))
+      || [...document.querySelectorAll('div, span, li')].some(el => el.childElementCount <= 3 && looksBuy(el));
     const notifyBtn = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
     const unavailable = notifyBtn || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
     // A working Buy / Add-to-cart button for the open variant beats everything else:

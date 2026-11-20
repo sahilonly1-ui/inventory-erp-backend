@@ -723,12 +723,3 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
-
-// Diagnostics (temporary, read-only).
-setTimeout(async () => {
-  try {
-    const rows = await q(`SELECT i.name, s.store, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.notes,120) notes
-      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE i.name ILIKE '%nova 2 neo%' ORDER BY s."fetchedAt" DESC LIMIT 6`);
-    logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag neo');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag neo failed'); }
-}, 30_000).unref();
