@@ -728,6 +728,11 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
 setTimeout(async () => {
   try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE '%vibe 2%' AND active AND NOT dismissed`); } catch { /* ignore */ }
 }, 10 * 60_000).unref();
+// The brand-site link the admin gave for the 6 GB variant (one-time, same as pasting it in Market Prices).
+setTimeout(() => {
+  setLink('fb1ad40e-954a-433b-9224-6b6b6795b0ef', 'official', 'https://www.hmd.com/en_in/hmd-vibe2-5g?sku=SP01Z01Z5532Y')
+    .then(() => logger.info('PW hmd 6GB link saved')).catch((e: any) => logger.warn({ msg: e?.message }, 'PW hmd 6GB link failed'));
+}, 40_000).unref();
 for (const m of [1, 16, 24, 34]) setTimeout(async () => {
   try {
     const items = await q(`SELECT i.id, i.name, i.variant, l.store, l.url, l."lockedByUser" FROM price_watch_items i LEFT JOIN price_watch_links l ON l."itemId"=i.id AND l.store='official' WHERE i.name ILIKE '%vibe 2%'`);
