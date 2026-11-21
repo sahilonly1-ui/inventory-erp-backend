@@ -673,7 +673,7 @@ export function brandScore(name, brand, candText) {
   const lead = stripMem(candClean).toLowerCase().replace(/\b(in|en|products?|smartphones?|tablets?|audio|buy|p)\b/g, ' ').match(/[a-z0-9]+/g) || [];
   for (const t of lead.slice(0, 7)) {
     if (/\d{5,}/.test(t)) continue;   // a page id (OPPO ".P.P1110156"), not a model
-    if (/^[b-hj-oq-z]$/.test(t) && !nameToks.has(t)) return 0;   // "ALT Buds S" is not "ALT Buds"
+    if (/^[b-hj-oq-z]$/.test(t) && !nameToks.has(t) && !lead.some(o => o.length > 1 && o.startsWith(t) && /\d/.test(o))) return 0;   // "ALT Buds S" is not "ALT Buds"
     if (/\d/.test(t) && t.length >= 3 && !/^[45]g$/.test(t) && !SPEC.test(t) && !nameToks.has(t) && ![...nameToks].some(n => n.length >= 3 && t.includes(n))) return 0;
   }
   const bracket = String(candText).match(/\(\s*([a-z0-9]{1,2})\s*\)/i);
