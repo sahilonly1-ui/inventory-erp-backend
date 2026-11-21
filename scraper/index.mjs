@@ -383,7 +383,7 @@ async function findOnBrandSite(context, job, domain, bad = []) {
   if (await isShopify(context, domain)) {
     const seen = new Map();
     for (const q of searchQueries(job.name.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?|\b\d{1,4}\s*(gb|tb)\b/gi, ' '), job.brand, job.variant)) {
-      const j = await brandJson(context, `${base}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=10`);
+      const j = await brandJson(context, `${rule.shopifyApi || base}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=10`);
       const list = j?.resources?.results?.products;
       if (!Array.isArray(list)) { why += `shopify search: no answer; `; continue; }
       for (const p of list) {
@@ -463,7 +463,7 @@ async function brandProductData(context, job, url, s) {
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   const handle = u.pathname.match(/\/products\/([^/?#]+)/)?.[1];
   if (handle && (await isShopify(context, domain) || /\/products\//.test(u.pathname))) {
-    const prod = await brandJson(context, `${u.origin}/products/${handle}.js`);
+    const prod = await brandJson(context, `${brandSiteRule(domain)?.shopifyApi || u.origin}/products/${handle}.js`);
     const v = prod ? shopifyPick(prod, name, u.searchParams.get('variant')) : null;
     if (v?.price) return { ...v, url: `${u.origin}/products/${handle}?variant=${v.variantId}`, how: 'store data (Shopify)' };
   }

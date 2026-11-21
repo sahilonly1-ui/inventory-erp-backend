@@ -573,7 +573,9 @@ export const BRAND_SITE_RULES = {
   'zebronics.com': { shopify: true },
   'gizmore.in': { shopify: true },
   'motorola.in': { vtex: true },
-  'in.nothing.tech': { sitemaps: ['https://in.nothing.tech/sitemap/products/1.xml'], include: /\/products\/[a-z0-9-]+$/i,
+  // Nothing's store is a Shopify headless site: its search and product data answer on
+  // the shop's own Shopify address.
+  'in.nothing.tech': { shopify: true, shopifyApi: 'https://nothingtech-in.myshopify.com', sitemaps: ['https://in.nothing.tech/sitemap/products/1.xml'], include: /\/products\/[a-z0-9-]+$/i,
     exclude: /(cable|charger|case|tips|adapter|strap|lanyard|-charging-case)$/i },
   'samsung.com': {
     sitemaps: ['https://www.samsung.com/in/im-sitemap.xml', 'https://www.samsung.com/in/vd-sitemap.xml', 'https://www.samsung.com/in/da-sitemap.xml', 'https://www.samsung.com/in/assorted-sitemap.xml'],
