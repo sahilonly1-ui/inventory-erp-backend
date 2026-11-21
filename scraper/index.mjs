@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -599,6 +599,44 @@ function readPage(store) {
   return res;
 }
 
+/** Select the product's RAM / storage option on a variant picker, if it isn't selected. */
+async function pickMemoryVariant(page, job) {
+  const want = wantedMemory([job.name, job.variant].filter(Boolean).join(' '));
+  if (want.ram == null && want.rom == null) return null;
+  const opts = await page.evaluate(() => {
+    const norm = e => (e.innerText || '').replace(/\s+/g, ' ').trim();
+    const els = [...document.querySelectorAll('label, button, [role="radio"], [role="option"], [role="button"], li, a, span, div, p')].filter(e => {
+      const t = norm(e);
+      if (!t || t.length > 40 || !/\d\s*(gb|tb)\b/i.test(t)) return false;
+      // Only option-like text ("6 GB, 128 GB", "8GB | 256GB RAM") — not titles or specs.
+      if (t.replace(/\d+\s*(gb|tb)|ram|rom|storage|memory|internal|[\s,+/|&-]/gi, '').length > 2) return false;
+      if ((t.match(/\d+\s*(gb|tb)/gi) || []).length > 2) return false;  // a whole row of options, not one
+      const r = e.getBoundingClientRect();
+      if (!r.width || !r.height || r.top + window.scrollY > 2500) return false;
+      return ![...e.children].some(c => norm(c) === t);                // innermost with this text
+    });
+    window.__pwOpts = els;
+    return els.map(e => {
+      const inp = e.tagName === 'LABEL' ? (e.control || document.getElementById(e.htmlFor)) : e.querySelector('input[type="radio"]');
+      const aria = ['aria-checked', 'aria-pressed', 'aria-selected'].map(k => (e.closest(`[${k}]`) || e).getAttribute(k)).includes('true');
+      const cls = /\b(active|selected|is-selected|checked|current)\b/i.test(String(e.className || '') + ' ' + String(e.parentElement?.className || ''));
+      const href = e.closest('a')?.getAttribute('href') || '';
+      return { t: norm(e), sel: !!inp?.checked || aria || cls, nav: !!href && !href.startsWith('#') && !href.includes('?') };
+    });
+  });
+  const verdicts = opts.map(o => memoryOptionMatches(o.t, want));
+  const ours = verdicts.map((v, i) => v === true ? i : -1).filter(i => i >= 0);
+  if (!ours.length || !verdicts.includes(false)) return null;          // no picker with our variant
+  if (ours.some(i => opts[i].sel)) return 'already selected';
+  const i = ours.find(i => !opts[i].nav) ?? ours[0];
+  const before = await page.evaluate(() => document.body.innerText.length);
+  await page.evaluate(i => window.__pwOpts[i].click(), i);
+  await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => {});
+  await sleep(1500);
+  if (opts[i].nav) await page.waitForLoadState('domcontentloaded').catch(() => {});
+  return `picked "${opts[i].t}" (${before})`;
+}
+
 async function scrapeStore(context, job, s) {
   if (breaker.isOpen(s.store)) return { store: s.store, status: 'blocked', skipped: true, note: 'Skipped for now: this store has been blocking this run' };
   const page = await context.newPage();
@@ -703,6 +741,9 @@ async function scrapeStore(context, job, s) {
       return { store: s.store, url, status: 'blocked', note: blocked };
     }
     await expandOffers(page, s.store);
+    // Brand sites often open on their default variant whatever the link says (HMD
+    // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
+    if (s.store === 'official') await pickMemoryVariant(page, job).catch(() => null);
     // Reliance draws its Add to cart / Notify me bar after the price, from a later API call.
     if (s.store === 'reliance') {
       await page.waitForFunction(() => /add to cart|notify me|buy now|out of stock|unavailable/i.test(document.body?.innerText || ''), null, { timeout: 12000 }).catch(() => {});

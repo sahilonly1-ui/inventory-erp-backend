@@ -514,3 +514,38 @@ export function debugFilesToDelete(files, { maxAgeMs = 86_400_000, keep = 100, n
   const newestFirst = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs);
   return newestFirst.filter((f, i) => i >= keep || now - f.mtimeMs > maxAgeMs).map(f => f.name);
 }
+
+/**
+ * RAM / storage a product name asks for: "6/128GB", "6GB 128GB", "8GB+256GB",
+ * "(12 GB RAM, 256 GB)", "1TB". Returns { ram, rom } in GB (either may be null).
+ */
+export function wantedMemory(text) {
+  const t = String(text || '').toLowerCase().replace(/(\d)\s*tb\b/g, (_, d) => `${d * 1024}gb`);
+  let m = t.match(/\b(\d{1,2})\s*(?:gb)?\s*(?:ram)?\s*[/+,|&-]\s*(\d{2,4})\s*gb\b/);
+  if (m && +m[1] <= 24 && +m[2] >= 16) return { ram: +m[1], rom: +m[2] };
+  const all = [...t.matchAll(/\b(\d{1,4})\s*gb\b(\s*ram)?/g)].map(x => ({ n: +x[1], ram: !!x[2] }));
+  if (!all.length) return { ram: null, rom: null };
+  const ram = all.find(x => x.ram)?.n ?? (all.length > 1 && all[0].n <= 24 ? all[0].n : null);
+  const rom = all.filter(x => !x.ram && x.n >= 16).map(x => x.n).pop() ?? null;
+  return { ram, rom };
+}
+
+/**
+ * Does a variant-picker option ("6 GB, 128 GB", "8GB | 256GB", "256 GB") match what
+ * we want? true = it is our variant, false = another one, null = can't tell.
+ */
+export function memoryOptionMatches(optionText, want) {
+  if (!want || (want.ram == null && want.rom == null)) return null;
+  const got = wantedMemory(optionText);
+  const nums = [...String(optionText).toLowerCase().replace(/(\d)\s*tb\b/g, (_, d) => `${d * 1024}gb`).matchAll(/(\d{1,4})\s*gb/g)].map(x => +x[1]);
+  if (!nums.length) return null;
+  if (nums.length === 1) {
+    // A single figure: storage if large, RAM if small.
+    const n = nums[0];
+    if (n >= 16) return want.rom == null ? null : n === want.rom;
+    return want.ram == null ? null : n === want.ram;
+  }
+  if (want.ram != null && got.ram != null && got.ram !== want.ram) return false;
+  if (want.rom != null && got.rom != null && got.rom !== want.rom) return false;
+  return true;
+}

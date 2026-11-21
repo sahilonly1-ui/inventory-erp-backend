@@ -227,3 +227,21 @@ console.log('phone listings ok');
   assert.deepEqual(debugFilesToDelete([], { now }), [], 'an empty folder is fine');
   assert.deepEqual(debugFilesToDelete([f('a', 5), f('b', 6)], { now }), [], 'recent files under the cap are kept'); }
 console.log('debug folder cleanup ok');
+
+{
+  const { wantedMemory, memoryOptionMatches } = await import('./lib.mjs');
+  const eq = (a, b, m) => { if (JSON.stringify(a) !== JSON.stringify(b)) { console.error('FAIL', m, a, b); process.exit(1); } };
+  eq(wantedMemory('HMD Vibe 2 5G 6/128GB'), { ram: 6, rom: 128 }, 'slash');
+  eq(wantedMemory('Galaxy S25 (12GB RAM, 256GB)'), { ram: 12, rom: 256 }, 'ram word');
+  eq(wantedMemory('Apple iPhone 14 (128GB)'), { ram: null, rom: 128 }, 'storage only');
+  eq(wantedMemory('OnePlus 13 16GB 1TB'), { ram: 16, rom: 1024 }, 'tb');
+  eq(wantedMemory('Redmi 8GB+256GB'), { ram: 8, rom: 256 }, 'plus');
+  const w = wantedMemory('HMD Vibe 2 5G 6/128GB');
+  eq(memoryOptionMatches('6 GB, 128 GB', w), true, 'opt 6');
+  eq(memoryOptionMatches('4 GB, 128 GB', w), false, 'opt 4');
+  eq(memoryOptionMatches('128 GB', w), true, 'opt storage');
+  eq(memoryOptionMatches('256 GB', w), false, 'opt other storage');
+  eq(memoryOptionMatches('Nordic Blue', w), null, 'colour');
+  eq(memoryOptionMatches('256 GB', wantedMemory('Apple iPhone 14 (128GB)')), false, 'iphone');
+  console.log('variant memory ok');
+}
