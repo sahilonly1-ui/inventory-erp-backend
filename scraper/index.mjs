@@ -195,7 +195,7 @@ async function engineSearch(page, store, job, domain) {
         const prev = byKey.get(k);
         if (!prev || text.length > prev.text.length) byKey.set(k, { href, text });
       }
-      const hit = pickBest(name, job.brand, [...byKey.values()]);
+      const hit = store === 'official' ? pickBrandPageAll(name, job.brand, [...byKey.values()]) : pickBest(name, job.brand, [...byKey.values()]);
       if (hit) return { hit };
       const host = new URL(url).hostname.replace(/^(www|html|in)\./, '');
       why += `${host}: ${byKey.size} links` + (byKey.size ? '' : ` ("${(await page.title().catch(() => '')).slice(0, 40)}")`) + '; ';
@@ -245,7 +245,7 @@ async function googleDiscover(context, job, stores) {
         }
         // An EAN hit is exact even when the title is worded differently; still
         // require the model number + brand check so a wrong page is never used.
-        const hit = pickBest(name, job.brand, cands, isEanQuery ? 0.5 : 0.55);
+        const hit = s.store === 'official' ? pickBrandPageAll(name, job.brand, cands, isEanQuery ? 0.5 : 0.55) : pickBest(name, job.brand, cands, isEanQuery ? 0.5 : 0.55);
         if (hit) found[s.store] = hit.href;
       }
     }
@@ -299,7 +299,7 @@ async function findViaSitemap(context, job, domain) {
   if (!urls.length) return { hit: null, why: 'sitemap: none; ' };
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   const cands = urls.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` }));
-  const hit = pickBest(name, job.brand, cands);
+  const hit = pickBrandPageAll(name, job.brand, cands);
   return hit ? { hit } : { hit: null, why: `sitemap: ${urls.length} urls, no match; ` };
 }
 
@@ -533,7 +533,7 @@ async function findOnSearch(page, store, job, officialSite) {
   }
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   const cands = [...byKey.values()];
-  const hit = pickBest(name, job.brand, cands);
+  const hit = store === 'official' ? pickBrandPageAll(name, job.brand, cands) : pickBest(name, job.brand, cands);
   const top = cands.map(c => ({ text: c.text, score: titleScore(name, job.brand, c.text) })).sort((a, b) => b.score - a.score)[0];
   return { hit, count: cands.length, top };
 }
