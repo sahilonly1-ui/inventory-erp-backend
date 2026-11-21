@@ -340,3 +340,14 @@ console.log('debug folder cleanup ok');
   ok(titleScore('Boat Airdopes 141 (Black)', 'Boat', 'boAt Airdopes 141 TWS Earbuds') > 0.55, 'colour bracket ignored');
   console.log('bracket models ok');
 }
+{
+  const { brandScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Boat Aavante Bar Maven', 'Boat', 'Boat boAt Aavante Bar 4100DA') === 0, 'aavante model code');
+  ok(brandScore('Noise ALT Buds Wireless Bluetooth Earbuds', 'Noise', 'Noise ALT Buds (S) Truly Wireless') === 0, 'alt buds (s)');
+  ok(brandScore('Noise ALT Buds S Wireless Bluetooth Earbuds', 'Noise', 'Noise ALT Buds (S) Truly Wireless') > 0.55, 'alt buds s');
+  ok(brandScore('boAt Stone 1200F', 'Boat', 'Boat boAt Stone 1200F') > 0.55, 'stone 1200f');
+  ok(brandScore('Samsung Galaxy A17 5G 8/128GB', 'Samsung', 'Samsung in smartphones galaxy a galaxy a17 5g blue 128gb sm a176bzbmins') > 0.55, 'samsung sku still ok');
+  ok(brandScore('Moto Pad 60 Neo 6/128GB', 'Motorola', 'Motorola moto pad 60 neo') > 0.55, 'pad 60 neo');
+  console.log('model codes ok');
+}

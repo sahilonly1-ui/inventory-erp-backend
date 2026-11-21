@@ -667,6 +667,15 @@ export function brandScore(name, brand, candText) {
   for (const v of nv) if (!cv.has(v)) return 0;
   // A line word the page adds right after our model number is another model: "S25" → "S25 Ultra".
   const nums = new Set((stripMem(name).toLowerCase().match(/[a-z0-9]*\d[a-z0-9]*/g) || []).filter(t => !/^[45]g$/.test(t)));
+  // A model code the page leads with that our name doesn't have is another product:
+  // "Aavante Bar 4100DA" is not "Aavante Bar Maven"; "ALT Buds (S)" is not "ALT Buds".
+  const nameToks = new Set(String(name).toLowerCase().match(/[a-z0-9]+/g) || []);
+  const lead = stripMem(candClean).toLowerCase().replace(/\b(in|en|products?|smartphones?|tablets?|audio|buy|p)\b/g, ' ').match(/[a-z0-9]+/g) || [];
+  for (const t of lead.slice(0, 7)) {
+    if (/\d/.test(t) && t.length >= 3 && !/^[45]g$/.test(t) && !SPEC.test(t) && !nameToks.has(t) && ![...nameToks].some(n => n.length >= 3 && t.includes(n))) return 0;
+  }
+  const bracket = String(candText).match(/\(\s*([a-z0-9]{1,2})\s*\)/i);
+  if (bracket && !nameToks.has(bracket[1].toLowerCase())) return 0;
   const ct = candClean.toLowerCase().match(/[a-z0-9]+/g) || [];
   for (let i = 0; i < ct.length; i++) {
     if (!nums.has(ct[i])) continue;
