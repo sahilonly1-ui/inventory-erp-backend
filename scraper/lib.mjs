@@ -549,3 +549,155 @@ export function memoryOptionMatches(optionText, want) {
   if (want.rom != null && got.rom != null && got.rom !== want.rom) return false;
   return true;
 }
+
+// ── Brand sites ─────────────────────────────────────────────────────────────
+// How each brand's Indian store can be searched without a person. Found by probing
+// the live sites (scraper/research): Shopify stores answer /search/suggest.json,
+// Motorola runs VTEX (catalog API), the rest publish their Indian products in a
+// sitemap or on a product-list page. `include` keeps only product pages of the
+// Indian store; `exclude` drops specs / support / accessory pages.
+export const BRAND_SITE_RULES = {
+  'boat-lifestyle.com': { shopify: true },
+  'shopatsc.com': { shopify: true },
+  'gonoise.com': { shopify: true },
+  'portronics.com': { shopify: true },
+  'pebblecart.com': { shopify: true },
+  'aiplusstore.com': { shopify: true },
+  'infinixmobiles.in': { shopify: true },
+  'fireboltt.com': { shopify: true },
+  'zebronics.com': { shopify: true },
+  'gizmore.in': { shopify: true },
+  'motorola.in': { vtex: true },
+  'in.nothing.tech': { sitemaps: ['https://in.nothing.tech/sitemap/products/1.xml'], include: /\/products\/[a-z0-9-]+$/i,
+    exclude: /(cable|charger|case|tips|adapter|strap|lanyard|-charging-case)$/i },
+  'samsung.com': {
+    sitemaps: ['https://www.samsung.com/in/im-sitemap.xml', 'https://www.samsung.com/in/vd-sitemap.xml', 'https://www.samsung.com/in/da-sitemap.xml', 'https://www.samsung.com/in/assorted-sitemap.xml'],
+    include: /samsung\.com\/in\/(smartphones|tablets|watches|audio-sound|galaxy-buds|tvs|audio-video|monitors|computers)\/[a-z0-9-]+\/[a-z0-9-]+/i,
+    exclude: /\/(mobile-accessories|explore|support|business|multistore|ai-products|offer|compare)\b/i,
+  },
+  'mi.com': { lists: ['https://www.mi.com/in/product-list/'], include: /mi\.com\/in\/product\/[a-z0-9-]+\/?$/i },
+  'realme.com': { sitemaps: ['https://www.realme.com/sitemap-in.xml'], include: /realme\.com\/in\/(realme|narzo|gt|c\d)[a-z0-9-]*$/i, exclude: /\/specs$/i },
+  'oppo.com': { sitemaps: ['https://www.oppo.com/in/sitemap.xml'], include: /oppo\.com\/in\/(smartphones|accessories|audio|wearables|tablets)\/(series-[a-z0-9-]+\/)?[a-z0-9-]+\/?$/i,
+    exclude: /\/specs\/?$|\/(smartphones|accessories|audio|wearables|tablets)\/(series-[a-z0-9-]+\/)?$/i },
+  'vivo.com': { sitemaps: ['https://www.vivo.com/in/sitemap.xml'], include: /vivo\.com\/in\/products\/[a-z0-9-]+$/i, exclude: /\/(param|360|compare)\b/i },
+  'oneplus.in': { sitemaps: ['https://www.oneplus.in/sitemap.xml'], include: /oneplus\.in\/(oneplus-[a-z0-9-]+|product\/[a-z0-9-]+)$/i, exclude: /specs|terms|offer/i },
+  'marshall.com': { sitemaps: ['https://www.marshall.com/sitemap_0_in.xml'], include: /marshall\.com\/in\/en\/product\//i, exclude: /cabinet|amp|pedal|head|combo|1959|1960/i },
+  'hmd.com': { sitemaps: ['https://www.hmd.com/en_in/sitemap-dtc.xml'], include: /hmd\.com\/en_in\/(hmd|nokia)-[a-z0-9-]+$/i, exclude: /terms|contest|specs|support|-free-/i },
+  'store.google.com': { sitemaps: ['https://store.google.com/sitemap/sitemap_in.xml'], include: /store\.google\.com\/in\/product\/[a-z0-9_]+/i, exclude: /_specs|case|band|charger|cable/i },
+  'itel-india.com': { sitemaps: ['https://www.itel-india.com/sitemap.xml'], include: /itel-india\.com\/product\/[a-z0-9-]+$/i },
+  'tecno-mobile.in': { sitemaps: ['https://www.tecno-mobile.in/sitemap.xml'], include: /tecno-mobile\.in\/phones\/product-detail\//i },
+  'apple.com': { lists: ['https://www.apple.com/in/shop/buy-iphone', 'https://www.apple.com/in/shop/buy-airpods', 'https://www.apple.com/in/shop/buy-watch', 'https://www.apple.com/in/shop/buy-ipad'],
+    include: /apple\.com\/in\/shop\/buy-(iphone|airpods|watch|ipad)\/[a-z0-9-]+$/i },
+  'saregama.com': { sitemaps: ['https://www.saregama.com/sitemap/carvaan.xml'], include: /saregama\.com\/carvaan[a-z0-9.]*\/[a-z0-9.-]+/i, exclude: /gifting|all-products/i },
+};
+export function brandSiteRule(domain) {
+  const d = String(domain || '').toLowerCase().replace(/^www\./, '');
+  return BRAND_SITE_RULES[d] || null;
+}
+/** Is this URL a product page of that brand's Indian store (by the site's own rules)? */
+export function brandUrlOk(domain, href) {
+  const r = brandSiteRule(domain);
+  try {
+    const u = new URL(href);
+    const h = u.hostname.toLowerCase().replace(/^www\./, '');
+    const d = String(domain).toLowerCase().replace(/^www\./, '');
+    if (!(h === d || h.endsWith('.' + d))) return false;
+    if (/\.(jpg|jpeg|png|webp|gif|pdf|xml)(\?|$)/i.test(u.pathname)) return false;
+    if (!r) return u.pathname.length > 3;
+    const full = h + u.pathname.replace(/\/+$/, '');
+    if (r.include && !r.include.test(href) && !r.include.test(full)) return false;
+    if (r.exclude && (r.exclude.test(href) || r.exclude.test(u.pathname))) return false;
+    return true;
+  } catch { return false; }
+}
+
+/** RAM / storage in any of the ways stores write it — also Shopify's bare "8 | 256". */
+export function memOf(text) {
+  const m = wantedMemory(text);
+  if (m.ram != null || m.rom != null) return m;
+  const b = String(text || '').match(/(?:^|[^\d])(\d{1,2})\s*(?:gb)?\s*[|+/x]\s*(\d{2,4})(?!\d)/i);
+  if (b && +b[1] <= 24 && +b[2] >= 32) return { ram: +b[1], rom: +b[2] };
+  return m;
+}
+/** true = same RAM/storage, false = a different one, null = can't tell. */
+export function memMatch(text, want) {
+  if (!want || (want.ram == null && want.rom == null)) return null;
+  const got = memOf(text);
+  if (got.ram == null && got.rom == null) return null;
+  if (want.ram != null && got.ram != null && got.ram !== want.ram) return false;
+  if (want.rom != null && got.rom != null && got.rom !== want.rom) return false;
+  return true;
+}
+const MEM_RE = /\(?\b\d{1,2}\s*(?:gb)?\s*(?:ram)?\s*[/+|]\s*\d{2,4}\s*(?:gb|tb)?\b\)?|\b\d{1,4}\s*(?:gb|tb)\b(\s*(?:ram|rom|storage))?/gi;
+const stripMem = s => String(s || '').replace(MEM_RE, ' ').replace(/\(\s*[,/+]*\s*\)/g, ' ').replace(/\s+/g, ' ').trim();
+/**
+ * Match score for a brand-site page (0 = not it). Brand sites have one page per
+ * model with RAM / storage chosen on the page, and leave "5G" out of URLs — so the
+ * model decides, memory only rules a page out when it names a different one.
+ */
+export function brandScore(name, brand, candText) {
+  const want = memOf(name);
+  if (memMatch(candText, want) === false) return 0;
+  const n5 = /\b5g\b/i.test(name), n4 = /\b4g\b/i.test(name);
+  const c5 = /\b5g\b/i.test(candText), c4 = /\b4g\b/i.test(candText);
+  if ((n5 && c4 && !c5) || (n4 && c5 && !c4)) return 0;
+  const clean = s => stripMem(s).replace(/\b[45]g\b/gi, ' ');
+  const s = titleScore(clean(name), brand, clean(candText));
+  return s ? Math.min(1, s + (memMatch(candText, want) === true ? 0.05 : 0)) : 0;
+}
+export function pickBrandPage(name, brand, cands, min = 0.55) {
+  let best = null;
+  for (const c of cands) {
+    const s = brandScore(name, brand, c.text);
+    if (s >= min && (!best || s > best.score || (s === best.score && c.text.length < best.text.length))) best = { ...c, score: s };
+  }
+  return best;
+}
+
+/**
+ * Shopify product JSON (/products/<handle>.js) → the variant for our RAM / storage:
+ * matching memory first, in stock before sold out, then the lowest price.
+ * `variantId` (from a pasted ?variant= link) wins when given.
+ */
+export function shopifyPick(product, name, variantId = null) {
+  const vs = Array.isArray(product?.variants) ? product.variants : [];
+  if (!vs.length) return null;
+  const want = memOf(name);
+  let v = variantId ? vs.find(x => String(x.id) === String(variantId)) : null;
+  if (!v) {
+    const scored = vs.map(x => ({ x, m: memMatch([x.title, x.public_title, ...(x.options || [])].filter(Boolean).join(' / '), want) }))
+      .filter(o => o.m !== false);
+    if (!scored.length) return null;
+    scored.sort((a, b) => (b.m === true) - (a.m === true) || (b.x.available === true) - (a.x.available === true) || a.x.price - b.x.price);
+    v = scored[0].x;
+  }
+  const cents = n => (n == null ? null : Number(n) / 100);
+  const price = cents(v.price);
+  const mrp = cents(v.compare_at_price);
+  return { variantId: v.id, title: [product.title, v.public_title || v.title].filter(Boolean).join(' — '), price, mrp: mrp && mrp > price ? mrp : null, inStock: !!v.available };
+}
+
+/** VTEX catalog search result → our product and SKU (RAM / storage) with its offer. */
+export function vtexPick(products, name, brand, skuId = null, trust = false) {
+  const want = memOf(name);
+  let best = null;
+  for (const p of Array.isArray(products) ? products : []) {
+    const s = brandScore(name, brand, `${brand || ''} ${p.productName || ''}`);
+    if (s >= 0.55 && (!best || s > best.s)) best = { p, s };
+  }
+  if (!best && trust && products?.length) best = { p: products[0], s: 1 };   // the admin's own link
+  if (!best) return null;
+  const items = best.p.items || [];
+  const offer = it => it?.sellers?.find(x => x.sellerDefault)?.commertialOffer || it?.sellers?.[0]?.commertialOffer || {};
+  let it = skuId ? items.find(x => String(x.itemId) === String(skuId)) : null;
+  if (!it) {
+    const scored = items.map(x => ({ x, m: memMatch(`${x.name || ''} ${x.nameComplete || ''}`, want), o: offer(x) })).filter(o => o.m !== false);
+    if (!scored.length) return null;
+    scored.sort((a, b) => (b.m === true) - (a.m === true) || (b.o.AvailableQuantity > 0) - (a.o.AvailableQuantity > 0) || (a.o.Price || 9e9) - (b.o.Price || 9e9));
+    it = scored[0].x;
+  }
+  const o = offer(it);
+  const price = Number(o.Price) || null;
+  const mrp = Number(o.ListPrice) || null;
+  return { url: `${best.p.link}?skuId=${it.itemId}`, title: it.nameComplete || it.name || best.p.productName, price, mrp: mrp && price && mrp > price ? mrp : null, inStock: (o.AvailableQuantity || 0) > 0 };
+}

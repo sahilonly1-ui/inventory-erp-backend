@@ -245,3 +245,39 @@ console.log('debug folder cleanup ok');
   eq(memoryOptionMatches('256 GB', wantedMemory('Apple iPhone 14 (128GB)')), false, 'iphone');
   console.log('variant memory ok');
 }
+
+{
+  const { brandScore, pickBrandPage, shopifyPick, vtexPick, brandUrlOk, memOf } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Moto G37 Power 5G 4/64GB', 'Motorola', 'Motorola smartphones moto g37 power p') > 0.55, 'moto power');
+  ok(brandScore('Moto G37 Power 5G 4/64GB', 'Motorola', 'Motorola smartphones moto g37 p') === 0, 'moto not power');
+  ok(brandScore('Samsung Galaxy A17 5G 8/128GB', 'Samsung', 'Samsung in smartphones galaxy a galaxy a17 5g black 128gb sm a176bzklins') > 0.55, 'samsung sku');
+  ok(brandScore('Samsung Galaxy A17 5G 8/128GB', 'Samsung', 'Samsung in smartphones galaxy a galaxy a17 5g black 256gb sm a176bzknins') === 0, 'samsung other storage');
+  ok(brandScore('Ai+ Nova 2 5G 4/64GB', 'Ai+', 'Ai+ Nova 2 Pro 5G') === 0, 'ai pro');
+  ok(brandScore('Ai+ Nova 2 5G 4/64GB', 'Ai+', 'Ai+ Nova 2 5G') > 0.55, 'ai nova');
+  ok(brandScore('Redmi 13 5G 6/128GB', 'Xiaomi', 'Xiaomi in product redmi 13 4g') === 0, '4g vs 5g');
+  const best = pickBrandPage('Realme 15 Pro 5G 8/256GB', 'Realme', [
+    { href: 'a', text: 'Realme in realme 15 pro got 5g' }, { href: 'b', text: 'Realme in realme 15 pro 5g' }, { href: 'c', text: 'Realme in realme 15 5g' }]);
+  ok(best?.href === 'b', 'realme exact ' + JSON.stringify(best));
+  ok(JSON.stringify(memOf('Pink / 4 | 64')) === '{"ram":4,"rom":64}', 'shopify bar');
+  const prod = { title: 'Ai+ Nova 2 5G', variants: [
+    { id: 1, title: 'Pink / 4 | 64', options: ['Pink', '4 | 64'], price: 1399900, available: false },
+    { id: 2, title: 'Black / 4 | 64', options: ['Black', '4 | 64'], price: 1399900, compare_at_price: 1499900, available: true },
+    { id: 3, title: 'Black / 6 | 128', options: ['Black', '6 | 128'], price: 1499900, available: true }] };
+  const p1 = shopifyPick(prod, 'Ai+ Nova 2 5G 4/64GB');
+  ok(p1.variantId === 2 && p1.price === 13999 && p1.mrp === 14999 && p1.inStock, 'shopify 4/64 ' + JSON.stringify(p1));
+  ok(shopifyPick(prod, 'Ai+ Nova 2 5G 6/128GB').price === 14999, 'shopify 6/128');
+  ok(shopifyPick(prod, 'x', 1).variantId === 1, 'shopify pasted variant');
+  const vt = [{ productName: 'moto g37 power', link: 'https://www.motorola.in/smartphones-moto-g37-power/p', items: [
+    { itemId: '666', name: 'moto g37 power 8GB+128GB Pantone A', sellers: [{ sellerDefault: true, commertialOffer: { Price: 18999, ListPrice: 21999, AvailableQuantity: 5 } }] },
+    { itemId: '705', name: 'moto g37 power 4GB+64GB Pantone A', sellers: [{ sellerDefault: true, commertialOffer: { Price: 14999, ListPrice: 17999, AvailableQuantity: 0 } }] }] },
+    { productName: 'moto g37', link: 'https://www.motorola.in/smartphones-moto-g37/p', items: [] }];
+  const v1 = vtexPick(vt, 'Moto G37 Power 5G 4/64GB', 'Motorola');
+  ok(v1?.url.endsWith('skuId=705') && v1.price === 14999 && v1.inStock === false, 'vtex ' + JSON.stringify(v1));
+  ok(brandUrlOk('samsung.com', 'https://www.samsung.com/in/smartphones/galaxy-a/galaxy-a17-5g-black-128gb-sm-a176bzklins/'), 'samsung url ok');
+  ok(!brandUrlOk('samsung.com', 'https://www.samsung.com/in/mobile-accessories/galaxy-a17-5g-card-slot-case-black-ef-oa176tbegin/'), 'samsung accessory');
+  ok(!brandUrlOk('samsung.com', 'https://www.samsung.com/uk/smartphones/galaxy-a/galaxy-a17/'), 'samsung uk');
+  ok(brandUrlOk('oppo.com', 'https://www.oppo.com/in/smartphones/series-a/a3-5g/') && !brandUrlOk('oppo.com', 'https://www.oppo.com/in/smartphones/series-a/a3-5g/specs/'), 'oppo');
+  ok(brandUrlOk('in.nothing.tech', 'https://in.nothing.tech/products/phone-3a') && !brandUrlOk('in.nothing.tech', 'https://in.nothing.tech/products/cable'), 'nothing');
+  console.log('brand sites ok');
+}

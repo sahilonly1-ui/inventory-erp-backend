@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, brandSiteRule, brandUrlOk, brandScore, pickBrandPage, shopifyPick, vtexPick } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -301,6 +301,123 @@ async function findViaSitemap(context, job, domain) {
   const cands = urls.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` }));
   const hit = pickBest(name, job.brand, cands);
   return hit ? { hit } : { hit: null, why: `sitemap: ${urls.length} urls, no match; ` };
+}
+
+// ── Brand sites: the store's own catalogue ────────────────────────────────
+// Each brand's Indian store is searched the way the site itself works (see
+// BRAND_SITE_RULES): Shopify's search API, VTEX's catalogue API, or the list of
+// Indian product pages in its sitemap / product-list page. Plain HTTP — no page
+// rendering, no bot checks — so it is fast and works from the PC and the cloud.
+const brandHost = d => (String(d).split('.').length > 2 ? d : `www.${d}`);
+async function brandGet(context, url, accept = 'application/json,text/html,application/xml,*/*') {
+  try {
+    const r = await context.request.get(url, { timeout: 25_000, headers: { 'User-Agent': UA, Accept: accept, 'Accept-Language': 'en-IN,en;q=0.9' } });
+    return r.ok() ? await r.text() : null;
+  } catch { return null; }
+}
+const brandJson = async (context, url) => { const t = await brandGet(context, url, 'application/json'); try { return t ? JSON.parse(t) : null; } catch { return null; } };
+
+const shopifyCache = new Map();
+/** Does this brand site run on Shopify (answers its search API)? Asked once per site. */
+function isShopify(context, domain) {
+  const rule = brandSiteRule(domain);
+  if (rule?.shopify) return Promise.resolve(true);
+  if (rule) return Promise.resolve(false);
+  if (!shopifyCache.has(domain)) shopifyCache.set(domain, brandJson(context, `https://${brandHost(domain)}/search/suggest.json?q=a&resources[type]=product&resources[limit]=1`)
+    .then(j => !!j?.resources?.results));
+  return shopifyCache.get(domain);
+}
+
+const brandListCache = new Map();
+/** Every Indian product page a brand site lists (sitemaps / product-list pages in its rule). */
+function brandPages(context, domain) {
+  const rule = brandSiteRule(domain);
+  if (!rule || (!rule.sitemaps && !rule.lists)) return Promise.resolve(null);
+  if (!brandListCache.has(domain)) brandListCache.set(domain, (async () => {
+    const urls = new Set();
+    for (const sm of rule.sitemaps || []) {
+      const xml = await brandGet(context, sm, 'application/xml,text/xml,*/*');
+      if (!xml) continue;
+      let locs = sitemapLocs(xml);
+      if (/<sitemapindex/i.test(xml)) {
+        const kids = productSitemaps(locs);
+        locs = [];
+        for (const k of kids) locs.push(...sitemapLocs(await brandGet(context, k, 'application/xml,*/*') || ''));
+      }
+      locs.filter(u => brandUrlOk(domain, u)).forEach(u => urls.add(u));
+    }
+    for (const lp of rule.lists || []) {
+      const html = await brandGet(context, lp, 'text/html');
+      if (!html) continue;
+      for (const m of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
+        try { const u = new URL(m[1].replace(/&amp;/g, '&'), lp); u.search = ''; if (brandUrlOk(domain, u.href)) urls.add(u.href.replace(/\/+$/, '')); } catch { /* bad link */ }
+      }
+    }
+    return [...urls];
+  })());
+  return brandListCache.get(domain);
+}
+
+async function findOnBrandSite(context, job, domain) {
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  const rule = brandSiteRule(domain) || {};
+  const base = `https://${brandHost(domain)}`;
+  let why = '';
+  if (await isShopify(context, domain)) {
+    const seen = new Map();
+    for (const q of searchQueries(job.name.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?|\b\d{1,4}\s*(gb|tb)\b/gi, ' '), job.brand, job.variant)) {
+      const j = await brandJson(context, `${base}/search/suggest.json?q=${encodeURIComponent(q)}&resources[type]=product&resources[limit]=10`);
+      const list = j?.resources?.results?.products;
+      if (!Array.isArray(list)) { why += `shopify search: no answer; `; continue; }
+      for (const p of list) {
+        const href = new URL(String(p.url || '').split('?')[0], base).href;
+        if (!seen.has(href)) seen.set(href, { href, text: `${job.brand || ''} ${p.title || ''}` });
+      }
+      const hit = pickBrandPage(name, job.brand, [...seen.values()]);
+      if (hit) return { hit };
+    }
+    why += `shopify search: ${seen.size} products, none ours; `;
+  }
+  if (rule.vtex) {
+    for (const q of searchQueries(job.name, job.brand, job.variant).reverse()) {
+      const j = await brandJson(context, `${base}/api/catalog_system/pub/products/search?ft=${encodeURIComponent(q.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?/gi, ' ').replace(/\s+/g, ' ').trim())}&_from=0&_to=19`);
+      const v = Array.isArray(j) ? vtexPick(j, name, job.brand) : null;
+      if (v) return { hit: { href: v.url, text: v.title }, data: v };
+      why += `catalogue: ${Array.isArray(j) ? j.length : 'no answer'} for "${q}"; `;
+    }
+  }
+  const pages = await brandPages(context, domain);
+  if (pages) {
+    const hit = pickBrandPage(name, job.brand, pages.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` })));
+    if (hit) return { hit };
+    why += `site list: ${pages.length} pages, none ours; `;
+  }
+  return { hit: null, why };
+}
+
+/**
+ * Price / stock straight from the brand store's own product data (Shopify product
+ * JSON, VTEX catalogue), for the product's RAM / storage. null when the site has none.
+ */
+async function brandProductData(context, job, url, s) {
+  let u; try { u = new URL(url); } catch { return null; }
+  const domain = s.officialSite || u.hostname;
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  const handle = u.pathname.match(/\/products\/([^/?#]+)/)?.[1];
+  if (handle && (await isShopify(context, domain) || /\/products\//.test(u.pathname))) {
+    const prod = await brandJson(context, `${u.origin}/products/${handle}.js`);
+    const v = prod ? shopifyPick(prod, name, u.searchParams.get('variant')) : null;
+    if (v?.price) return { ...v, url: `${u.origin}/products/${handle}?variant=${v.variantId}`, how: 'store data (Shopify)' };
+  }
+  if (brandSiteRule(domain)?.vtex || /\/p$/.test(u.pathname)) {
+    const linkText = u.pathname.match(/^\/([^/]+)\/p\/?$/)?.[1];
+    if (linkText) {
+      const j = await brandJson(context, `${u.origin}/api/catalog_system/pub/products/search/${linkText}/p`);
+      const v = Array.isArray(j) && j.length ? (vtexPick(j, name, job.brand, u.searchParams.get('skuId')) || vtexPick(j, name, job.brand, u.searchParams.get('skuId'), true)) : null;
+      if (v?.price) return { ...v, how: 'store data (catalogue)' };
+    }
+  }
+  return null;
 }
 
 // ── Finding the product on a search page ───────────────────────────────────
@@ -694,17 +811,25 @@ async function scrapeStore(context, job, s) {
       }
       const domain = s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store];
       let why = '';
+      // 0. Brand sites: the store's own catalogue first (search API / sitemap) — exact and quick.
+      if (s.store === 'official') {
+        const b = await findOnBrandSite(context, job, domain).catch(e => ({ hit: null, why: `brand site: ${String(e.message).slice(0, 60)}; ` }));
+        if (b.hit && !(s._bad && urlKey('official', b.hit.href) === urlKey('official', s._bad))) { url = b.hit.href; s._data = b.data || null; }
+        else why += b.why || '';
+      }
       // 1. Google (shared by all stores of this product — one search, not five).
       // A retry after a wrong saved page searches Google again just for this store.
-      const g = s._retried ? await googleDiscover(context, job, [s]) : await (job._google ||= googleDiscover(context, job, job.stores));
-      if (g[s.store]) url = g[s.store];
-      else if (Date.now() < googleBlockedUntil) why += 'google: paused (captcha); ';
-      else why += 'google: no match; ';
+      if (!url) {
+        const g = s._retried ? await googleDiscover(context, job, [s]) : await (job._google ||= googleDiscover(context, job, job.stores));
+        if (g[s.store]) url = g[s.store];
+        else if (Date.now() < googleBlockedUntil) why += 'google: paused (captcha); ';
+        else why += 'google: no match; ';
+      }
       // When Google answered properly and still didn't show this store, the
       // product is most likely not sold there: one quick store search, no more.
       const quick = job._googleOk && !url;
       // 2. Brand sites: the sitemap — no search page, no bot checks.
-      if (!url && s.store === 'official') {
+      if (!url && s.store === 'official' && !brandSiteRule(domain)) {
         const m = await findViaSitemap(context, job, domain);
         if (m.hit) url = m.hit.href; else why += m.why;
       }
@@ -772,6 +897,10 @@ async function scrapeStore(context, job, s) {
         } catch { /* body gone */ }
       });
     }
+    // Brand stores with their own product data (Shopify / VTEX): price and stock for our
+    // RAM / storage come from it — the page is still opened for offers.
+    const sd = s.store === 'official' ? (s._data?.price ? s._data : await brandProductData(context, job, url, s).catch(() => null)) : null;
+    if (sd?.url) url = sd.url;
     const load = () => withSlot(s.store, async () => {
       await open(page, url);
       if (s.store === 'amazon') await passInterstitial(page, url);
@@ -779,6 +908,9 @@ async function scrapeStore(context, job, s) {
     });
     let blocked = await load();
     if (blocked) { await sleep(4000 + Math.random() * 3000); blocked = await load(); } // one polite retry
+    if (blocked && sd?.price) {
+      return { store: s.store, url, status: 'ok', price: sd.price, mrp: sd.mrp, inStock: sd.inStock, title: sd.title, priceText: '₹' + sd.price, offers: [], note: `Price from the brand's ${sd.how}` };
+    }
     if (blocked) {
       await debugDump(page, tag);
       diag.push({ store: s.store, product: job.name, what: `product page blocked (${blocked})`, detail: await pageSnippet(page) });
@@ -787,13 +919,17 @@ async function scrapeStore(context, job, s) {
     await expandOffers(page, s.store);
     // Brand sites often open on their default variant whatever the link says (HMD
     // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
-    if (s.store === 'official') await pickMemoryVariant(page, job).catch(() => null);
+    if (s.store === 'official' && !sd) await pickMemoryVariant(page, job).catch(() => null);
     // Reliance draws its Add to cart / Notify me bar after the price, from a later API call.
     if (s.store === 'reliance') {
       await page.waitForFunction(() => /add to cart|notify me|buy now|out of stock|unavailable/i.test(document.body?.innerText || ''), null, { timeout: 12000 }).catch(() => {});
       await sleep(800);
     }
     const r = await page.evaluate(readPage, s.store);
+    if (sd?.price) {
+      Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock, ldPrice: null });
+      if (!r.title || brandScore([job.name, job.variant].filter(Boolean).join(' '), job.brand, r.title) < 0.55) r.title = sd.title || r.title;
+    }
     if (s.store === 'reliance') {
       await sleep(500);
       // Only this product's own answer — "similar products" lists carry "sellable" too.
@@ -810,7 +946,9 @@ async function scrapeStore(context, job, s) {
     // search) can point at a sibling model — SB550 for SB590, SB180 for Bar 2.1
     // Essential. A link the admin pasted is trusted as is.
     const wanted = [job.name, job.variant].filter(Boolean).join(' ');
-    if (!s.locked && r.title && titleScore(wanted, job.brand, r.title) < 0.55) {
+    const fits = s.store === 'official' ? brandScore(wanted, job.brand, `${job.brand || ''} ${r.title}`) >= 0.55 || brandScore(wanted, job.brand, `${job.brand || ''} ${slugText(page.url())}`) >= 0.55
+      : titleScore(wanted, job.brand, r.title) >= 0.55;
+    if (!s.locked && r.title && !fits) {
       diag.push({ store: s.store, product: job.name, what: 'page is a different product', detail: `${r.title.slice(0, 80)} · ${page.url()}` });
       if (s.url && !s._retried) {
         await page.close().catch(() => {});
@@ -891,7 +1029,7 @@ async function scrapeStore(context, job, s) {
       }
     } else offers = extractOffers(r.text);
     return {
-      store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
+      store: s.store, url: sd?.url || page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers,
       note: s.store === 'reliance' && !/store api/.test(r.stockWhy || '') ? `Stock read from the page (${r.stockWhy}) — Reliance's own stock data didn't load`
         : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
