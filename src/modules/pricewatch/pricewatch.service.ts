@@ -723,3 +723,19 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary, read-only): brand-site results after the new brand-site search.
+for (const m of [2, 75, 95]) setTimeout(async () => {
+  try {
+    const brands = await q(`SELECT lower(i.brand) brand, count(*)::int items,
+        count(l.url) FILTER (WHERE l."lockedByUser")::int manual, count(l.url) FILTER (WHERE NOT l."lockedByUser")::int auto
+      FROM price_watch_items i LEFT JOIN price_watch_links l ON l."itemId"=i.id AND l.store='official'
+      WHERE i.active AND NOT i.dismissed GROUP BY 1 ORDER BY 2 DESC LIMIT 30`);
+    const recent = await q(`SELECT lower(i.brand) brand, s.status, count(*)::int n FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
+      WHERE s.store='official' AND s."fetchedAt" > now() - interval '100 minutes' GROUP BY 1,2 ORDER BY 1,3 DESC`);
+    const fails = await q(`SELECT i.name, s.status, left(s.notes,150) notes FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
+      WHERE s.store='official' AND s."fetchedAt" > now() - interval '100 minutes' AND s.status NOT IN ('ok') ORDER BY s."fetchedAt" DESC LIMIT 40`);
+    logger.info({ brands, recent }, 'PW diag brand2');
+    logger.info({ fails }, 'PW diag brand2 fails');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag brand2 failed'); }
+}, m * 60_000).unref();
