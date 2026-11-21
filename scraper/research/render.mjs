@@ -23,7 +23,8 @@ for (const it of LIST) {
       .map(e => (e.textContent || '').replace(/\s+/g, ' ').trim()).slice(0, 12);
     const links = g ? [...new Set([...document.querySelectorAll('a[href]')].map(a => a.href).filter(h => new RegExp(g, 'i').test(h)))].slice(0, 20) : [];
     const btn = [...document.querySelectorAll('button,a')].filter(b => /buy|cart|notify|sold out|out of stock/i.test((b.innerText || '').trim()) && (b.innerText || '').trim().length < 30).map(b => (b.innerText || '').trim() + ' -> ' + (b.href || b.closest('a')?.href || '')).slice(0, 8);
-    return { title: document.title.slice(0, 80), rs, links, btn, ld: [...document.querySelectorAll('script[type="application/ld+json"]')].map(s => s.textContent.slice(0, 300)).filter(t => /price/i.test(t)).slice(0, 2) };
+    const opts = [...document.querySelectorAll('button,label,li,span,div,a')].filter(e => { const t = (e.innerText || '').trim(); return t && t.length < 30 && /\d\s*(gb|tb)/i.test(t) && ![...e.children].some(c => (c.innerText || '').trim() === t); }).map(e => e.tagName + ':' + (e.innerText || '').trim().replace(/\s+/g, ' ') + (e.className ? ' .' + String(e.className).slice(0, 40) : '')).slice(0, 14);
+    return { title: document.title.slice(0, 80), rs, links, btn, opts, ld: [...document.querySelectorAll('script[type="application/ld+json"]')].map(s => s.textContent.slice(0, 300)).filter(t => /price/i.test(t)).slice(0, 2) };
   }, it.grep || '').catch(e => ({ e: e.message }));
   console.log('PROBE ' + JSON.stringify({ url: it.url, final: page.url(), err, ...info, nets: nets.slice(0, 8) }));
   await page.close();
