@@ -723,3 +723,22 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary, read-only): brand-site coverage per brand.
+setTimeout(async () => {
+  try {
+    const brands = await q(`SELECT lower(i.brand) brand, count(*)::int items,
+        count(l.url) FILTER (WHERE l."lockedByUser")::int manual, count(l.url) FILTER (WHERE NOT l."lockedByUser")::int auto,
+        count(*) FILTER (WHERE l."notListed")::int notlisted
+      FROM price_watch_items i LEFT JOIN price_watch_links l ON l."itemId"=i.id AND l.store='official'
+      WHERE i.active AND NOT i.dismissed GROUP BY 1 ORDER BY 2 DESC`);
+    const manual = await q(`SELECT lower(i.brand) brand, i.name, left(l.url,110) url FROM price_watch_items i JOIN price_watch_links l ON l."itemId"=i.id AND l.store='official'
+      WHERE l."lockedByUser" AND l.url IS NOT NULL ORDER BY 1 LIMIT 60`);
+    const why = await q(`SELECT lower(i.brand) brand, s.status, left(regexp_replace(coalesce(s.notes,''), '\\d+', '#', 'g'), 140) why, count(*)::int n
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='official' AND s."fetchedAt" > now() - interval '2 days' AND s.status <> 'ok'
+      GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 40`);
+    logger.info({ brands }, 'PW diag brands');
+    logger.info({ manual }, 'PW diag manual');
+    logger.info({ why }, 'PW diag why');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag brands failed'); }
+}, 45_000).unref();
