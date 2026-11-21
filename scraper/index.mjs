@@ -1024,6 +1024,15 @@ async function scrapeStore(context, job, s) {
     await expandOffers(page, s.store);
     // Brand sites often open on their default variant whatever the link says (HMD
     // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
+    // Cookie banners on brand sites (Nothing) hold back the page until answered:
+    // decline the optional cookies, as a careful visitor would.
+    if (s.store === 'official') {
+      await page.evaluate(() => {
+        const b = [...document.querySelectorAll('button, a[role="button"], [role="button"]')]
+          .find(x => /^(reject all|reject|decline|decline all|only necessary|necessary only|use necessary cookies only|reject non-essential)$/i.test((x.innerText || '').trim()));
+        if (b) b.click();
+      }).catch(() => {});
+    }
     // Brand pages draw the price block late (a "₹5000 off" banner shows long before it).
     if (s.store === 'official') {
       await page.waitForFunction(() => [...document.querySelectorAll('body *')].some(e => e.children.length <= 2 && /^\s*(₹|rs\.?)\s?[\d,]{3,}(\.\d{1,2})?\s*\*?\s*(\/-)?\s*$/i.test(e.textContent || '') && e.getBoundingClientRect().height > 0),
