@@ -311,3 +311,13 @@ console.log('debug folder cleanup ok');
   ok(brandScore('Realme P4s Lite 4/128GB', 'Realme', 'Realme Newrealme P4s Lite Power Through Everything₹13,999₹29,999') > 0.55, 'tagline power');
   console.log('long titles ok');
 }
+{
+  const { brandScore, titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Realme Narzo 90 5G 6/128GB', 'Realme', 'Realme Buy realme NARZO 90x 5G') === 0, '90 vs 90x');
+  ok(brandScore('Noise Pro 6 Smart Watch', 'Noise', 'Noise Pro 6R Smartwatch') === 0, '6 vs 6r');
+  ok(titleScore('Redmi 13 5G', 'Xiaomi', 'Redmi 13C 5G (Starfrost White, 128 GB)') === 0, '13 vs 13c');
+  ok(titleScore('Redmi 13C 5G', 'Xiaomi', 'Redmi 13C 5G (Starfrost White, 128 GB)') > 0.55, '13c ok');
+  ok(titleScore('Apple iPhone 16 128GB', 'Apple', 'Apple iPhone 16 (128 GB) - Black') > 0.55, 'iphone 16');
+  console.log('model suffix ok');
+}

@@ -92,6 +92,8 @@ export function titleScore(name, brand, candidate) {
     const t = all[i];
     if (!/\d/.test(t) || SPEC.test(t)) continue;
     if (!has(t)) return 0;                       // model number must match exactly
+    // …and not as the start of another model: "90" is not "90x", "6" is not "6R", "13" is not "13C".
+    if (/^\d+$/.test(t) && !candTokensAll.includes(t) && candTokensAll.some(c => new RegExp(`^${t}[a-z]$`).test(c))) return 0;
     // …and so must the word naming the line right before it: "Club 120" is not
     // "PartyBox 120", "Encore 2" is not "Flip 2". Generic words are skipped.
     const prev = all[i - 1];
