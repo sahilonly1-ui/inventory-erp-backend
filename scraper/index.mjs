@@ -599,6 +599,22 @@ function readPage(store) {
   return res;
 }
 
+/** Price of the first seller in Amazon's "See all buying options" panel, or null. */
+async function amazonOfferListPrice(page) {
+  const btn = await page.$('#buybox-see-all-buying-choices a, #buybox-see-all-buying-choices input, a[title="See All Buying Options"], #aod-ingress-link, a[href*="aod=1"]');
+  if (!btn) return null;
+  await btn.click().catch(() => {});
+  await page.waitForSelector('#aod-pinned-offer .a-price .a-offscreen, #aod-offer .a-price .a-offscreen, #aod-offer-list .a-price .a-offscreen', { timeout: 10000 }).catch(() => {});
+  return page.evaluate(() => {
+    for (const el of document.querySelectorAll('#aod-pinned-offer .a-price .a-offscreen, #aod-offer .a-price .a-offscreen, #aod-offer-list .a-price .a-offscreen')) {
+      const t = (el.textContent || '').trim();
+      const n = Number(t.replace(/[^\d.]/g, ''));
+      if (n > 0) return { price: n, text: t };
+    }
+    return null;
+  });
+}
+
 /** Select the product's RAM / storage option on a variant picker, if it isn't selected. */
 async function pickMemoryVariant(page, job) {
   const want = wantedMemory([job.name, job.variant].filter(Boolean).join(' '));
@@ -778,12 +794,22 @@ async function scrapeStore(context, job, s) {
       return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: `Not sold on Amazon right now (no featured offer / unavailable)${r.amazonBuyBox ? ` — page said: "${r.amazonBuyBox}"` : ''}` };
     }
     if (!r.price && r.amazonUnreadable) {
+      // No buy box for us, but sellers do sell it ("See All Buying Options"): the
+      // offers panel lists their prices — take the first (featured / lowest) one.
+      const aod = await amazonOfferListPrice(page).catch(() => null);
+      if (aod) {
+        return {
+          store: s.store, url: page.url(), status: 'ok', price: aod.price, mrp: r.mrp, inStock: true,
+          title: r.title, priceText: aod.text, offers: [],
+          note: 'Price from Amazon\'s "See all buying options" list (no buy box shown)',
+        };
+      }
       // Amazon showed the product but its price block wasn't where we look: say so
       // (instead of "not sold"), keep a copy of the page, and let the next run retry.
       const snippet = await pageSnippet(page);
       await debugDump(page, tag + '-amazon-price');
       diag.push({ store: s.store, product: job.name, what: 'amazon price not read', detail: `${page.url()} · ${snippet}` });
-      return { store: s.store, url: page.url(), status: 'not_found', title: r.title, note: 'Amazon page opened but the price could not be read — will retry' };
+      return { store: s.store, url: page.url(), status: 'not_found', title: r.title, note: `Amazon page opened but the price could not be read — will retry. Page showed: "${(r.amazonBuyBox || snippet || '').slice(0, 120)}"` };
     }
     if (!r.price) {
       await debugDump(page, tag);
