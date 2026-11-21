@@ -321,3 +321,14 @@ console.log('debug folder cleanup ok');
   ok(titleScore('Apple iPhone 16 128GB', 'Apple', 'Apple iPhone 16 (128 GB) - Black') > 0.55, 'iphone 16');
   console.log('model suffix ok');
 }
+{
+  const { titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(titleScore('Samsung Galaxy A17 5G 8/128GB', 'Samsung', 'Samsung Galaxy A17 5G (Blue, 128 GB) (8 GB RAM)') > 0.55, 'flipkart samsung');
+  ok(titleScore('JBL Flip 6', 'JBL', 'JBL Flip 6 Portable Waterproof Speaker with 2-Way Speaker System') > 0.55, 'amazon jbl');
+  ok(titleScore('Apple iPhone 16 128GB', 'Apple', 'Apple iPhone 16e (128 GB) - Black') === 0, '16 vs 16e');
+  ok(titleScore('Realme Narzo 90 5G 6/128GB', 'Realme', 'realme NARZO 90 5G (Carbon Black, 128 GB) (6 GB RAM)') > 0.55, 'narzo 90');
+  ok(titleScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing Phone (3a) 5G (White, 128 GB) (8 GB RAM)') > 0.55, 'phone 3a flipkart');
+  ok(titleScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing Phone (3a) Pro 5G (Grey, 256 GB) (12 GB RAM)') === 0, 'phone 3a vs pro');
+  console.log('marketplace titles ok');
+}
