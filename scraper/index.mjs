@@ -748,7 +748,7 @@ function readPage(store) {
     if (m && num(m[1]) > 99) { res.price = num(m[1]); res.priceText = '₹' + m[1]; }
   }
   if (store !== 'amazon' && res.ldPrice && (!res.price || res.price < res.ldPrice * 0.5)) {
-    res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice;   // the store's own structured price
+    res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice; res.fromLd = true;   // the store's own structured price
   }
 
   if (!res.title) res.title = txt(document.querySelector('h1')) || document.title || null;
@@ -1024,6 +1024,11 @@ async function scrapeStore(context, job, s) {
     await expandOffers(page, s.store);
     // Brand sites often open on their default variant whatever the link says (HMD
     // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
+    // Brand pages draw the price block late (a "₹5000 off" banner shows long before it).
+    if (s.store === 'official') {
+      await page.waitForFunction(() => [...document.querySelectorAll('body *')].some(e => e.children.length <= 2 && /^\s*(₹|rs\.?)\s?[\d,]{3,}(\.\d{1,2})?\s*\*?\s*(\/-)?\s*$/i.test(e.textContent || '') && e.getBoundingClientRect().height > 0),
+        null, { timeout: 12_000 }).catch(() => {});
+    }
     if (s.store === 'official' && !sd) await pickMemoryVariant(page, job).catch(() => null);
     if (process.env.OPPO_API === '1' && oppo.names.size) {
       await sleep(1500);
@@ -1052,6 +1057,12 @@ async function scrapeStore(context, job, s) {
         if (!sd) await pickMemoryVariant(page, job).catch(() => null);
         r = await page.evaluate(readPage, s.store);
       }
+    }
+    // The structured price describes the page's default variant — not ours when the
+    // product has a RAM / storage choice.
+    if (s.store === 'official' && r.fromLd && !sd) {
+      const w = memOf([job.name, job.variant].filter(Boolean).join(' '));
+      if (w.ram != null || w.rom != null) { r.price = null; r.priceText = null; }
     }
     if (sd?.price) {
       Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock ?? r.inStock, ldPrice: null });

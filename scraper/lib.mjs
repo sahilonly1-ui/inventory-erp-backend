@@ -547,18 +547,12 @@ export function wantedMemory(text) {
  */
 export function memoryOptionMatches(optionText, want) {
   if (!want || (want.ram == null && want.rom == null)) return null;
-  const got = wantedMemory(optionText);
-  const nums = [...String(optionText).toLowerCase().replace(/(\d)\s*tb\b/g, (_, d) => `${d * 1024}gb`).matchAll(/(\d{1,4})\s*gb/g)].map(x => +x[1]);
-  if (!nums.length) return null;
-  if (nums.length === 1) {
-    // A single figure: storage if large, RAM if small.
-    const n = nums[0];
-    if (n >= 16) return want.rom == null ? null : n === want.rom;
-    return want.ram == null ? null : n === want.ram;
-  }
-  if (want.ram != null && got.ram != null && got.ram !== want.ram) return false;
-  if (want.rom != null && got.rom != null && got.rom !== want.rom) return false;
-  return true;
+  const m = memMatch(optionText, want);
+  if (m !== null) return m;
+  // A RAM-only picker ("8 GB"): one small figure.
+  const nums = [...String(optionText).toLowerCase().matchAll(/(\d{1,4})\s*gb/g)].map(x => +x[1]);
+  if (nums.length === 1 && nums[0] <= 24 && want.ram != null) return nums[0] === want.ram;
+  return null;
 }
 
 // ── Brand sites ─────────────────────────────────────────────────────────────
