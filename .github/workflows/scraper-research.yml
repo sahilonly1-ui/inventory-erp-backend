@@ -1,0 +1,31 @@
+name: Scraper research
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: 'Script under scraper/research to run'
+        default: 'probe.mjs'
+      sites:
+        description: 'JSON input for the script'
+        default: '[]'
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scraper
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scraper
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      - run: node research/${{ github.event.inputs.script }}
+        env:
+          SITES: ${{ github.event.inputs.sites }}
+          CHANNEL: chrome
