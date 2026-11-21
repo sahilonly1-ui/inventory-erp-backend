@@ -611,7 +611,12 @@ export function brandUrlOk(domain, href) {
     const h = u.hostname.toLowerCase().replace(/^www\./, '');
     const d = String(domain).toLowerCase().replace(/^www\./, '');
     if (!(h === d || h.endsWith('.' + d))) return false;
-    if (/\.(jpg|jpeg|png|webp|gif|pdf|xml)(\?|$)/i.test(u.pathname)) return false;
+    if (/\.(jpg|jpeg|png|webp|gif|pdf|xml|json|js|oembed|atom)(\?|$)/i.test(u.pathname)) return false;
+    // Another country's store (us.gonoise.com, marshall.com/us/en, mi.com/hk) or a support page.
+    const sub = h.slice(0, Math.max(0, h.length - d.length)).replace(/\.$/, '');
+    if (sub && sub !== 'www' && !d.startsWith(sub + '.') && /^(us|uk|gb|au|ca|sg|hk|ae|eu|de|fr|my|id|ph|th|vn|bd|pk|np|lk|global|support|help|community|blog|investors?)$/.test(sub)) return false;
+    if (/^\/(us|uk|gb|au|ca|sg|hk|ae|eu|de|fr|es|it|my|id|ph|th|vn|bd|pk|np|lk|global|int|en_int|en-us|en-gb)(\/|$|_)/i.test(u.pathname)) return false;
+    if (/\/(support|help|faq|manuals?|downloads?|blog|news|press|careers?|terms|privacy)(\/|-|$)/i.test(u.pathname) && !/\/products?\//i.test(u.pathname)) return false;
     if (!r) return u.pathname.length > 3;
     const full = h + u.pathname.replace(/\/+$/, '');
     if (r.include && !r.include.test(href) && !r.include.test(full)) return false;

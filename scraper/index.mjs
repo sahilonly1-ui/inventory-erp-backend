@@ -190,6 +190,7 @@ async function engineSearch(page, store, job, domain) {
         const href = unwrapSearchLink(l.href);
         if (!isProductUrl(store, href)) continue;
         try { const h = new URL(href).hostname.replace(/^www\./, ''); if (!(h === domain || h.endsWith('.' + domain))) continue; } catch { continue; }
+        if (store === 'official' && !brandUrlOk(domain, href)) continue;
         const k = urlKey(store, href);
         const text = l.text.replace(/\s*[-|:]\s*(amazon\.in|flipkart|croma|reliance digital)[\s\S]*$/i, '');
         const prev = byKey.get(k);
@@ -241,6 +242,7 @@ async function googleDiscover(context, job, stores) {
           const href = unwrapSearchLink(l.href);
           if (!isProductUrl(s.store, href)) continue;
           try { const h = new URL(href).hostname.replace(/^www\./, ''); if (!(h === domain || h.endsWith('.' + domain))) continue; } catch { continue; }
+          if (s.store === 'official' && !brandUrlOk(domain, href)) continue;
           cands.push({ href, text: l.text.replace(/\s*[-|:]\s*(amazon\.in|flipkart|croma|reliance digital)[\s\S]*$/i, '') });
         }
         // An EAN hit is exact even when the title is worded differently; still
@@ -298,7 +300,7 @@ async function findViaSitemap(context, job, domain) {
   const urls = await loadSitemap(context, domain);
   if (!urls.length) return { hit: null, why: 'sitemap: none; ' };
   const name = [job.name, job.variant].filter(Boolean).join(' ');
-  const cands = urls.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` }));
+  const cands = urls.filter(href => brandUrlOk(domain, href)).map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` }));
   const hit = pickBrandPageAll(name, job.brand, cands);
   return hit ? { hit } : { hit: null, why: `sitemap: ${urls.length} urls, no match; ` };
 }
@@ -526,6 +528,7 @@ async function findOnSearch(page, store, job, officialSite) {
     if (!isProductUrl(store, l.href)) continue;
     if (store === 'official') {
       try { const h = new URL(l.href).hostname; if (!(h === officialSite || h.endsWith('.' + officialSite) || officialSite.endsWith(h.replace(/^www\./, '')))) continue; } catch { continue; }
+      if (!brandUrlOk(officialSite, l.href)) continue;
     }
     const k = urlKey(store, l.href);
     const prev = byKey.get(k);
