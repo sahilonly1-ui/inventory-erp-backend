@@ -724,14 +724,12 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
   return { itemId, price, products: ids.length };
 }
 
-// Diagnostics (temporary): re-check iPhone 14 on the stores, then log what decided Reliance stock.
+// Diagnostics (temporary, read-only).
 setTimeout(async () => {
-  try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE 'apple iphone 14 (%' AND active AND NOT dismissed`); } catch { /* ignore */ }
-}, 9 * 60_000).unref();
-for (const m of [14, 20, 28, 40]) setTimeout(async () => {
   try {
-    const rows = await q(`SELECT i.name, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,90) url, left(s.notes,1100) notes
-      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='reliance' AND s.notes ILIKE '%Stock from%' ORDER BY s."fetchedAt" DESC LIMIT 10`);
-    logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance2');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance2 failed'); }
-}, m * 60_000).unref();
+    const rows = await q(`SELECT i.name, s.status, s."inStock", s.price::float, s.method, s."fetchedAt", left(s.url,90) url, left(s.notes,500) notes
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='reliance' AND i.name ILIKE 'apple iphone 14 (%' ORDER BY s."fetchedAt" DESC LIMIT 4`);
+    const tally = await q(`SELECT s.method, s."inStock", count(*)::int n FROM price_snapshots s WHERE s.store='reliance' AND s.notes ILIKE 'Stock from: store api%' GROUP BY 1,2`);
+    logger.info({ rows, tally, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag reliance3');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag reliance3 failed'); }
+}, 5 * 60_000).unref();
