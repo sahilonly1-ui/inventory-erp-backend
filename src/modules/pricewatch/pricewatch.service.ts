@@ -723,15 +723,3 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
-
-// Diagnostics (temporary): re-check Infinix Note Edge and log its Amazon result.
-setTimeout(async () => {
-  try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE '%note edge%' AND active AND NOT dismissed`); } catch { /* ignore */ }
-}, 10 * 60_000).unref();
-for (const m of [1, 18, 26, 36]) setTimeout(async () => {
-  try {
-    const rows = await q(`SELECT i.name, s.status, s.price::float, s."inStock", s.method, s."fetchedAt", left(s.url,70) url, left(s.notes,300) notes
-      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='amazon' AND i.name ILIKE '%note edge%' ORDER BY s."fetchedAt" DESC LIMIT 6`);
-    logger.info({ rows, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag edge');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag edge failed'); }
-}, m * 60_000).unref();
