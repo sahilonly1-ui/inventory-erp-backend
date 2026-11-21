@@ -294,3 +294,11 @@ console.log('debug folder cleanup ok');
   ok(titleScore('Samsung Galaxy S25 Ultra', 'Samsung', 'Galaxy S25 Ultra Certified Re-Newed') === 0, 'renewed');
   console.log('brand matching ok');
 }
+{
+  const { brandScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Samsung Galaxy S25 Ultra 12/256GB', 'Samsung', 'Samsung in smartphones galaxy s galaxy s25 mint 256gb sm s931blgcins') === 0, 's25 vs ultra');
+  ok(brandScore('Samsung Galaxy S25 Ultra 12/256GB', 'Samsung', 'Samsung in smartphones galaxy s galaxy s25 ultra titanium gray 256gb sm s938bztbins') > 0.55, 's25 ultra');
+  ok(brandScore('Moto G37 5G 4/64GB', 'Motorola', 'Motorola moto g37 power') === 0, 'g37 vs power');
+  console.log('variant words ok');
+}

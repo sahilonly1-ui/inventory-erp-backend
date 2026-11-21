@@ -654,6 +654,21 @@ export function brandScore(name, brand, candText) {
   if (BRAND_ACCESSORY.test(head) && !BRAND_ACCESSORY.test(name)) return 0;
   const want = memOf(name);
   if (memMatch(candText, want) === false) return 0;
+  // Line words that make a different phone ("S25" vs "S25 Ultra", "G37" vs "G37 Power")
+  // must be on both sides. (They are generic words for marketplaces, so checked here.)
+  const VARIANT = /\b(pro|ultra|max|plus|lite|mini|fe|neo|prime|power|edge|fold|flip|turbo|slim|go)\b/gi;
+  const VARIANT_ONE = /^(pro|ultra|max|plus|lite|mini|fe|neo|prime|power|edge|fold|flip|turbo|slim|go)$/;
+  const nv = new Set((String(name).match(VARIANT) || []).map(x => x.toLowerCase()));
+  const candClean = String(candText).replace(/\b(ultra|max|pro|power|slim)(?=[\s-]+(portable|bass|sound|audio|volume|battery|bank|button|backup|thin|compact|light)\b)/gi, ' ');
+  const cv = new Set((candClean.match(VARIANT) || []).map(x => x.toLowerCase()));
+  for (const v of nv) if (!cv.has(v)) return 0;
+  // A line word the page adds right after our model number is another model: "S25" → "S25 Ultra".
+  const nums = new Set((stripMem(name).toLowerCase().match(/[a-z0-9]*\d[a-z0-9]*/g) || []).filter(t => !/^[45]g$/.test(t)));
+  const ct = candClean.toLowerCase().match(/[a-z0-9]+/g) || [];
+  for (let i = 0; i < ct.length; i++) {
+    if (!nums.has(ct[i])) continue;
+    for (const w of ct.slice(i + 1, i + 3)) if (VARIANT_ONE.test(w) && !nv.has(w)) return 0;
+  }
   const n5 = /\b5g\b/i.test(name), n4 = /\b4g\b/i.test(name);
   const c5 = /\b5g\b/i.test(candText), c4 = /\b4g\b/i.test(candText);
   if ((n5 && c4 && !c5) || (n4 && c5 && !c4)) return 0;

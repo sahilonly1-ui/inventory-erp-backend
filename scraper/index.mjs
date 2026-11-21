@@ -415,6 +415,20 @@ async function findOnBrandSite(context, job, domain, bad = []) {
     }
     why += `site search: ${seen.size} pages, none ours; `;
   }
+  // Xiaomi's list page shows only current models; its item API answers any model's
+  // page name ("redmi-15c-5g") directly, so try the names the product would have.
+  if (/^mi\.com$/.test(domain)) {
+    const core = job.name.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?|\b\d{1,4}\s*(gb|tb)\b/gi, ' ').replace(/\bxiaomi\b(?=\s+(redmi|poco))/i, ' ');
+    const slug = core.toLowerCase().replace(/[^a-z0-9+]+/g, '-').replace(/\+/g, '-plus').replace(/^-+|-+$/g, '');
+    for (const tag of [...new Set([slug, slug.replace(/-5g$/, ''), slug.endsWith('-5g') ? slug : `${slug}-5g`])]) {
+      const j = await brandJson(context, `https://in-go.buy.mi.com/in/v2/item/productdetail?tag=${tag}`);
+      const spu = j?.data?.item_detail?.spu_list?.[0];
+      if (spu && brandScore(name, job.brand, `${job.brand || ''} ${spu.spu_name || tag}`) >= 0.55 && !badKeys.has(urlKey('official', `https://www.mi.com/in/product/${tag}`))) {
+        return { hit: { href: `https://www.mi.com/in/product/${tag}`, text: spu.spu_name || tag } };
+      }
+    }
+    why += 'mi item lookup: no page; ';
+  }
   const pages = await brandPages(context, domain);
   if (pages) {
     const hit = pickBrandPage(name, job.brand, pages.map(p => ({ href: p.href, text: `${job.brand || ''} ${p.text}` })));
