@@ -359,3 +359,9 @@ console.log('debug folder cleanup ok');
   ok(brandScore('Pebble Cosmos Air', 'Pebble', 'Pebble Cosmos Air') > 0.55, 'no-number exact');
   console.log('no-number names ok');
 }
+{
+  const { brandScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Noise ALT Buds Wireless Bluetooth Earbuds Chosen Grey', 'Noise', 'Noise Noise ALT Buds S Truly Wireless') === 0, 'buds s');
+  console.log('single letters ok');
+}
