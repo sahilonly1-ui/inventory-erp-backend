@@ -65,7 +65,7 @@ export function titleScore(name, brand, candidate) {
   // Bracketed extras in ERP names — SKU codes "(JBLCLIP5SQUAD)", colours
   // "(Black)" — aren't in store titles, so they don't count. Storage/RAM in
   // brackets "(8GB/256GB)" does.
-  name = String(name).replace(/\(([^)]*)\)/g, (m, inner) => (/\d+\s?(gb|tb)\b/i.test(inner) ? ` ${inner} ` : ' '));
+  name = String(name).replace(/\(([^)]*)\)/g, (m, inner) => (/\d+\s?(gb|tb)\b/i.test(inner) || (/^[a-z]{0,3}\d{1,3}[a-z]{0,3}$/i.test(inner.trim()) && !/^[45]g$/i.test(inner.trim())) ? ` ${inner} ` : ' '));
   const cand = norm(candidate);
   if (!cand) return 0;
   const squashed = cand.replace(/ /g, '');

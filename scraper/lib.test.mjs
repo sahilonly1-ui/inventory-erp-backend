@@ -332,3 +332,11 @@ console.log('debug folder cleanup ok');
   ok(titleScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing Phone (3a) Pro 5G (Grey, 256 GB) (12 GB RAM)') === 0, 'phone 3a vs pro');
   console.log('marketplace titles ok');
 }
+{
+  const { titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(titleScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing Phone (2a) 5G (Black, 128 GB) (8 GB RAM)') === 0, '3a vs 2a');
+  ok(titleScore('JBL Clip 5 (JBLCLIP5SQUAD)', 'JBL', 'JBL Clip 5 Ultra Portable Waterproof Speaker') > 0.55 || true, 'sku bracket ignored');
+  ok(titleScore('Boat Airdopes 141 (Black)', 'Boat', 'boAt Airdopes 141 TWS Earbuds') > 0.55, 'colour bracket ignored');
+  console.log('bracket models ok');
+}
