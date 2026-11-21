@@ -593,10 +593,6 @@ function readPage(store) {
     res.stockWhy = buyable ? (hitBtn ? `button "${hitBtn.t.slice(0, 40)}"` : 'buy bar')
       : notifyBtn ? 'notify-me button'
       : unavailable ? 'unavailable text' : (res.inStock == null ? 'nothing' : 'structured data');
-    const seen = btns.map(b => b.t).filter(t => t && t.length < 30);
-    const allBtns = [...document.querySelectorAll('button, [role="button"]')].map(b => (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()).filter(t => t && t.length < 30);
-    const near = (head.match(/.{0,40}(unavailable|out of stock|notify|sold out|add to cart|buy now).{0,30}/g) || []).slice(0, 4);
-    res.stockWhy += ` | visible btns: ${[...new Set(seen)].slice(0, 14).join(', ')} | all btns: ${[...new Set(allBtns)].filter(t => /cart|buy|notify|stock|unavail/.test(t)).slice(0, 6).join(', ')} | text: ${near.join(' ~ ')}`;
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
   res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
@@ -724,7 +720,6 @@ async function scrapeStore(context, job, s) {
         r.inStock = ok;
         r.stockWhy = `store api sellable=${ok} (${any.u})`;
       }
-      r.stockWhy += api.length ? ` | api: ${api.map(a => `${a.u} s=${a.sellable.slice(0, 3)} a=${a.avail.slice(0, 3)}`).join('; ')}` : ' | api: none';
     }
     // Is this page really our product? A link saved earlier (or picked from a
     // search) can point at a sibling model — SB550 for SB590, SB180 for Bar 2.1
@@ -776,7 +771,7 @@ async function scrapeStore(context, job, s) {
     return {
       store: s.store, url: page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers,
-      note: s.store === 'reliance' ? `Stock from: ${r.stockWhy}`.slice(0, 1100)
+      note: s.store === 'reliance' && !/store api/.test(r.stockWhy || '') ? `Stock read from the page (${r.stockWhy}) — Reliance's own stock data didn't load`
         : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };
   } catch (e) {
