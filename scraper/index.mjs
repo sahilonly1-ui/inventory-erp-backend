@@ -609,6 +609,24 @@ function readPage(store) {
   return res;
 }
 
+/** Amazon's price for this page read from a fresh copy of its HTML (no scripts run). */
+async function amazonPriceFromHtml(page) {
+  return page.evaluate(async () => {
+    const html = await (await fetch(location.href, { credentials: 'include' })).text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : null; };
+    const t = sel => (doc.querySelector(sel)?.textContent || '').replace(/\s+/g, ' ').trim();
+    const avail = t('#availability').replace(/\{.*$/, '').toLowerCase();
+    const said = (avail || t('#outOfStock')).slice(0, 90);
+    let price = num(doc.querySelector('#twister-plus-price-data-price')?.value)
+      || num(t('#corePriceDisplay_desktop_feature_div .priceToPay .a-price-whole') || t('#corePriceDisplay_desktop_feature_div .a-price-whole'))
+      || num(t('#corePrice_feature_div .a-offscreen')) || num(t('#apex_desktop .a-price-whole'));
+    const notSold = !price && /currently unavailable|no featured offers/.test(said + ' ' + t('#outOfStock').toLowerCase());
+    const mrp = num(t('#corePriceDisplay_desktop_feature_div .a-text-price .a-offscreen') || t('.basisPrice .a-offscreen'));
+    return { price: price || null, mrp: mrp && price && mrp > price ? mrp : null, inStock: avail ? !/currently unavailable|out of stock/.test(avail) : null, notSold, said };
+  });
+}
+
 /** Price of the first seller in Amazon's "See all buying options" panel, or null. */
 async function amazonOfferListPrice(page) {
   const btn = await page.$('#buybox-see-all-buying-choices a, #buybox-see-all-buying-choices input, a[title="See All Buying Options"], #aod-ingress-link, a[href*="aod=1"]');
@@ -821,6 +839,18 @@ async function scrapeStore(context, job, s) {
     if (!r.price && r.amazonUnreadable) {
       // No buy box for us, but sellers do sell it ("See All Buying Options"): the
       // offers panel lists their prices — take the first (featured / lowest) one.
+      // The page in the browser is missing its price block: read Amazon's own HTML
+      // for this page directly (same as the server sent it) before giving up.
+      const raw = await amazonPriceFromHtml(page).catch(() => null);
+      if (raw?.price) {
+        return {
+          store: s.store, url: page.url(), status: 'ok', price: raw.price, mrp: raw.mrp || r.mrp, inStock: raw.inStock ?? true,
+          title: r.title, priceText: '₹' + raw.price, offers: parseAmazonCards(r.text), note: null,
+        };
+      }
+      if (raw?.notSold) {
+        return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: `Not sold on Amazon right now — page said: "${raw.said}"` };
+      }
       const aod = await amazonOfferListPrice(page).catch(() => null);
       if (aod) {
         return {
