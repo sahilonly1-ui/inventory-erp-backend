@@ -723,3 +723,17 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary): re-check Moto G37 Power and log Amazon results.
+setTimeout(async () => {
+  try { await x(`UPDATE price_watch_items SET requested=true WHERE name ILIKE '%g37 power%' AND active AND NOT dismissed`); } catch { /* ignore */ }
+}, 10 * 60_000).unref();
+for (const m of [1, 20, 30, 40]) setTimeout(async () => {
+  try {
+    const rows = await q(`SELECT i.name, s.status, s.price::float, s."inStock", s.method, s."fetchedAt", left(s.url,70) url, left(s.notes,300) notes
+      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='amazon' AND i.name ILIKE '%g37 power%' ORDER BY s."fetchedAt" DESC LIMIT 6`);
+    const tally = await q(`SELECT s.status, s.method, count(*)::int n FROM price_snapshots s WHERE s.store='amazon' AND s."fetchedAt" > now() - interval '6 hours' GROUP BY 1,2 ORDER BY 3 DESC`);
+    const link = await q(`SELECT l.url, l."lockedByUser" FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId" WHERE l.store='amazon' AND i.name ILIKE '%g37 power%'`);
+    logger.info({ rows, tally, link, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag g37');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag g37 failed'); }
+}, m * 60_000).unref();

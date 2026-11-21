@@ -88,7 +88,17 @@ async function open(page, url, { waitPrice = true } = {}) {
   await page.keyboard.press('Escape').catch(() => {}); // Flipkart's login popup
   // Wait for a rupee amount to render (Croma / Reliance draw prices with JS).
   await page.waitForFunction(() => /₹\s?\d/.test(document.body?.innerText || ''), null, { timeout: 5_000 }).catch(() => {});
+  // Amazon streams its 1–2 MB page: a ₹ in the header shows up long before the
+  // price block and buy box. On a slow PC the price was read too early.
+  if (/amazon\./.test(url)) await amazonSettle(page);
   await sleep(300);
+}
+
+const AMAZON_READY = '#corePriceDisplay_desktop_feature_div .a-price-whole, #corePrice_feature_div .a-offscreen, #apex_desktop .a-price-whole, ' +
+  '#twister-plus-price-data-price, #outOfStock, #buybox-see-all-buying-choices, #add-to-cart-button, #availability';
+async function amazonSettle(page, ms = 20_000) {
+  await page.waitForSelector(AMAZON_READY, { state: 'attached', timeout: ms }).catch(() => {});
+  await page.waitForLoadState('load', { timeout: ms }).catch(() => {});
 }
 
 async function isBlocked(page) {
@@ -789,6 +799,21 @@ async function scrapeStore(context, job, s) {
         return scrapeStore(context, job, { ...s, url: null, _retried: true, _bad: page.url() });
       }
       return { store: s.store, status: 'not_listed', note: `Closest page was a different product: ${r.title.slice(0, 80)}` };
+    }
+    if (!r.price && r.amazonNoBuyBox) {
+      return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: `Not sold on Amazon right now (no featured offer / unavailable)${r.amazonBuyBox ? ` — page said: "${r.amazonBuyBox}"` : ''}` };
+    }
+    if (!r.price && r.amazonUnreadable) {
+      // Usually the page simply wasn't finished: let it settle and read again, then
+      // reload once.
+      for (const step of ['settle', 'reload']) {
+        if (step === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
+        await amazonSettle(page, 25_000);
+        await sleep(1500);
+        const again = await page.evaluate(readPage, s.store).catch(() => null);
+        if (again?.price) { Object.assign(r, again); break; }
+        if (again?.amazonNoBuyBox) { Object.assign(r, again); break; }
+      }
     }
     if (!r.price && r.amazonNoBuyBox) {
       return { store: s.store, url: page.url(), status: 'not_found', inStock: false, title: r.title, note: `Not sold on Amazon right now (no featured offer / unavailable)${r.amazonBuyBox ? ` — page said: "${r.amazonBuyBox}"` : ''}` };
