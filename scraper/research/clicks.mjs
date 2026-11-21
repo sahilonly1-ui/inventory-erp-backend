@@ -1,12 +1,13 @@
 // Click variant options on a page and show price texts after each click.
 process.env.SCRAPER_TEST = '1';
-const { launch, readPage } = await import('../index.mjs');
+const { launch, readPage, pickMemoryVariant } = await import('../index.mjs');
 const LIST = JSON.parse(process.env.SITES || '[]');
 const { browser, context } = await launch();
 for (const it of LIST) {
   const page = await context.newPage();
   await page.goto(it.url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
   await page.waitForTimeout(8000);
+  if (it.pick) { const v = await pickMemoryVariant(page, { name: it.pick, variant: null }).catch(e => 'ERR ' + e.message); console.log('PICK', it.pick, v); }
   for (const label of [null, ...(it.clicks || [])]) {
     if (label) {
       const n = await page.evaluate(l => { const e = [...document.querySelectorAll('div,span,label,button,li')].filter(x => (x.innerText || '').trim() === l).pop(); if (!e) return 'missing'; e.click(); return e.tagName + '.' + e.className; }, label);
