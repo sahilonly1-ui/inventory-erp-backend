@@ -672,6 +672,7 @@ export function brandScore(name, brand, candText) {
   const nameToks = new Set(String(name).toLowerCase().match(/[a-z0-9]+/g) || []);
   const lead = stripMem(candClean).toLowerCase().replace(/\b(in|en|products?|smartphones?|tablets?|audio|buy|p)\b/g, ' ').match(/[a-z0-9]+/g) || [];
   for (const t of lead.slice(0, 7)) {
+    if (/\d{5,}/.test(t)) continue;   // a page id (OPPO ".P.P1110156"), not a model
     if (/\d/.test(t) && t.length >= 3 && !/^[45]g$/.test(t) && !SPEC.test(t) && !nameToks.has(t) && ![...nameToks].some(n => n.length >= 3 && t.includes(n))) return 0;
   }
   const bracket = String(candText).match(/\(\s*([a-z0-9]{1,2})\s*\)/i);
@@ -686,6 +687,15 @@ export function brandScore(name, brand, candText) {
   const c5 = /\b5g\b/i.test(candText), c4 = /\b4g\b/i.test(candText);
   if ((n5 && c4 && !c5) || (n4 && c5 && !c4)) return 0;
   const clean = s => stripMem(s).replace(/\b[45]g\b/gi, ' ');
+  // No model number in our name ("Aavante Bar Maven"): then every naming word must be on
+  // the page — "Aavante Bar Joy" is another product.
+  if (!nums.size) {
+    const brandN = String(brand || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const words = (clean(name).toLowerCase().match(/[a-z]+/g) || []).filter(w => w.length > 2 && w !== brandN && !isGenericWord(w));
+    const ct2 = clean(candText).toLowerCase().match(/[a-z0-9]+/g) || [];
+    const sq = ct2.join('');
+    if (words.some(w => !wordFound(w, ct2, sq))) return 0;
+  }
   const s = titleScore(clean(name), brand, clean(candText));
   return s ? Math.min(1, s + (memMatch(candText, want) === true ? 0.05 : 0)) : 0;
 }

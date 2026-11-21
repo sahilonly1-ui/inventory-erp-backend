@@ -351,3 +351,11 @@ console.log('debug folder cleanup ok');
   ok(brandScore('Moto Pad 60 Neo 6/128GB', 'Motorola', 'Motorola moto pad 60 neo') > 0.55, 'pad 60 neo');
   console.log('model codes ok');
 }
+{
+  const { brandScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(brandScore('Boat Aavante Bar Maven', 'Boat', 'Boat boAt Aavante Bar Joy') === 0, 'maven vs joy');
+  ok(brandScore('OPPO Reno16 5G 8/128GB', 'OPPO', 'OPPO in product reno16 5g P P1110156') > 0.55, 'oppo id');
+  ok(brandScore('Pebble Cosmos Air', 'Pebble', 'Pebble Cosmos Air') > 0.55, 'no-number exact');
+  console.log('no-number names ok');
+}
