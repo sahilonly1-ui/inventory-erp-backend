@@ -533,7 +533,10 @@ export function wantedMemory(text) {
   if (m && +m[1] <= 24 && +m[2] >= 16) return { ram: +m[1], rom: +m[2] };
   const all = [...t.matchAll(/\b(\d{1,4})\s*gb\b(\s*(?:ram|memory))?/g)].map(x => ({ n: +x[1], ram: !!x[2] }));
   if (!all.length) return { ram: null, rom: null };
-  const ram = all.find(x => x.ram)?.n ?? (all.length > 1 && all[0].n <= 24 ? all[0].n : null);
+  // Two figures without "RAM": the small one is RAM, the large one storage — in either
+  // order ("8GB 128GB", Samsung's "128 GB｜8 GB").
+  const small = all.filter(x => x.n <= 24), large = all.filter(x => x.n >= 32);
+  const ram = all.find(x => x.ram)?.n ?? (small.length === 1 && large.length >= 1 ? small[0].n : null);
   const rom = all.filter(x => !x.ram && x.n >= 16).map(x => x.n).pop() ?? null;
   return { ram, rom };
 }

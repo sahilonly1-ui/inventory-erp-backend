@@ -870,6 +870,13 @@ async function pickMemoryVariant(page, job) {
       return { t: norm(e), sel: !!inp?.checked || aria || cls, nav: !!href && !href.startsWith('#') && !href.includes('?') };
     });
   });
+  // A summary line such as "Starry White 8+128GB" (OPPO) or "256 GB | 8 GB Awesome Mint"
+  // (Samsung) names what is selected now: if that is ours, nothing to click.
+  const current = await page.evaluate(() => [...document.querySelectorAll('div, span, p, h2, h3')]
+    .map(e => (e.innerText || '').replace(/\s+/g, ' ').trim())
+    .filter(t => t.length > 6 && t.length <= 60 && /\d\s*(gb|tb)/i.test(t) && /[a-z]{4,}/i.test(t.replace(/\d+\s*(gb|tb)|ram|rom|storage|memory/gi, '')) && (t.match(/\d+\s*(gb|tb)/gi) || []).length <= 2)
+    .slice(0, 30)).catch(() => []);
+  if (current.length && current.every(t => memoryOptionMatches(t, want) !== false) && current.some(t => memoryOptionMatches(t, want) === true)) return 'already selected (summary)';
   const verdicts = opts.map(o => memoryOptionMatches(o.t, want));
   const ours = verdicts.map((v, i) => v === true ? i : -1).filter(i => i >= 0);
   if (!ours.length || !verdicts.includes(false)) return null;          // no picker with our variant
