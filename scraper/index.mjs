@@ -388,7 +388,8 @@ async function findOnBrandSite(context, job, domain, bad = []) {
       if (!Array.isArray(list)) { why += `shopify search: no answer; `; continue; }
       for (const p of list) {
         const href = new URL(String(p.url || '').split('?')[0], base).href;
-        if (!seen.has(href)) seen.set(href, { href, text: `${job.brand || ''} ${p.title || ''}` });
+        // The page name (handle) first: it often carries what a title leaves out ("…-buds-s-…").
+        if (!seen.has(href)) seen.set(href, { href, text: `${job.brand || ''} ${slugText(href).replace(/^products\s+/i, '')} ${p.title || ''}` });
       }
       const hit = pickBrandPage(name, job.brand, [...seen.values()]);
       if (hit) return { hit };
