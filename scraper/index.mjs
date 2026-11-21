@@ -430,6 +430,21 @@ async function findOnBrandSite(context, job, domain, bad = []) {
     why += 'mi item lookup: no page; ';
   }
   const pages = await brandPages(context, domain);
+  // Samsung lists only some models' buy pages in its sitemap; the rest are at a fixed address.
+  if (/^samsung\.com$/.test(domain) && !(pages && pickBrandPage(name, job.brand, pages.map(p => ({ href: p.href, text: `${job.brand || ''} ${p.text}` }))))) {
+    const core = job.name.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?|\b\d{1,4}\s*(gb|tb)\b/gi, ' ').replace(/\bsamsung\b/i, ' ');
+    const slug = core.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const kinds = /buds/.test(slug) ? ['audio-sound/galaxy-buds'] : /watch/.test(slug) ? ['watches'] : /tab/.test(slug) ? ['tablets'] : ['smartphones'];
+    for (const kind of kinds) for (const sl of [...new Set([slug.replace(/-5g$/, ''), slug])]) {
+      const href = `https://www.samsung.com/in/${kind}/${sl}/buy/`;
+      if (badKeys.has(urlKey('official', href))) continue;
+      try {
+        const r = await context.request.get(href, { timeout: 25_000, headers: { 'User-Agent': UA, Accept: 'text/html' } });
+        if (r.ok() && r.url().includes(`/${sl}/buy`)) return { hit: { href, text: sl } };
+      } catch { /* next */ }
+    }
+    why += 'samsung buy page: none; ';
+  }
   if (pages) {
     const hit = pickBrandPage(name, job.brand, pages.map(p => ({ href: p.href, text: `${job.brand || ''} ${p.text}` })));
     if (hit) return { hit };
@@ -1003,7 +1018,7 @@ async function scrapeStore(context, job, s) {
     // Brand sites often open on their default variant whatever the link says (HMD
     // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
     if (s.store === 'official' && !sd) await pickMemoryVariant(page, job).catch(() => null);
-    if (oppo.names.size) {
+    if (process.env.OPPO_API === '1' && oppo.names.size) {
       await sleep(1500);
       const want = memOf([job.name, job.variant].filter(Boolean).join(" "));
       const hit = [...oppo.names].map(([code, nm]) => ({ code, nm, m: memMatch(nm, want), p: oppo.prices.get(code) }))

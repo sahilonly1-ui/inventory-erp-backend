@@ -70,7 +70,9 @@ export function titleScore(name, brand, candidate) {
   if (!cand) return 0;
   const squashed = cand.replace(/ /g, '');
   const nameN = norm(name);
-  if ((ACCESSORY_STRONG.test(cand) && !ACCESSORY_STRONG.test(nameN)) || (ACCESSORY.test(cand) && !ACCESSORY.test(nameN))) return 0;
+  // "Case for iPhone 15" — the accessory word leads the title; "…Speaker … Detachable Strap
+  // (ULT Button for Massive Bass)" far down a long title is still the speaker.
+  if ((ACCESSORY_STRONG.test(cand) && !ACCESSORY_STRONG.test(nameN)) || (ACCESSORY.test(cand.slice(0, 70)) && !ACCESSORY.test(nameN))) return 0;
   if (NOT_NEW.test(cand)) return 0;
   // The brand must appear — or the line it is sold under, which is how many listings are
   // titled: "Redmi 13C" for Xiaomi, "Moto g37" for Motorola, "POCO X7" for Xiaomi.
@@ -667,7 +669,8 @@ export function brandScore(name, brand, candText) {
   const ct = candClean.toLowerCase().match(/[a-z0-9]+/g) || [];
   for (let i = 0; i < ct.length; i++) {
     if (!nums.has(ct[i])) continue;
-    for (const w of ct.slice(i + 1, i + 3)) if (VARIANT_ONE.test(w) && !nv.has(w)) return 0;
+    const w = ct[i + 1];
+    if (w && VARIANT_ONE.test(w) && !nv.has(w)) return 0;
   }
   const n5 = /\b5g\b/i.test(name), n4 = /\b4g\b/i.test(name);
   const c5 = /\b5g\b/i.test(candText), c4 = /\b4g\b/i.test(candText);

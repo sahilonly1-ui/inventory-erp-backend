@@ -302,3 +302,12 @@ console.log('debug folder cleanup ok');
   ok(brandScore('Moto G37 5G 4/64GB', 'Motorola', 'Motorola moto g37 power') === 0, 'g37 vs power');
   console.log('variant words ok');
 }
+{
+  const { brandScore, titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const t = 'Sony ULT FIELD 1 Wireless Ultra Portable Bluetooth Compact Speaker with 12hrs of Battery Life IP67 Waterproof,Dustproof,Shockproof,Detachable Strap(ULT Button for Massive Bass)';
+  ok(brandScore('Sony ULT Field 1 Speaker', 'Sony', t) > 0.55, 'sony long title');
+  ok(titleScore('Apple iPhone 15', 'Apple', 'Silicone Case for Apple iPhone 15 with MagSafe') === 0, 'case for still rejected');
+  ok(brandScore('Realme P4s Lite 4/128GB', 'Realme', 'Realme Newrealme P4s Lite Power Through Everything₹13,999₹29,999') > 0.55, 'tagline power');
+  console.log('long titles ok');
+}
