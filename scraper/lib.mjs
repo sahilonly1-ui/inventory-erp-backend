@@ -577,11 +577,12 @@ export const BRAND_SITE_RULES = {
   'samsung.com': {
     sitemaps: ['https://www.samsung.com/in/im-sitemap.xml', 'https://www.samsung.com/in/vd-sitemap.xml', 'https://www.samsung.com/in/da-sitemap.xml', 'https://www.samsung.com/in/assorted-sitemap.xml'],
     include: /samsung\.com\/in\/(smartphones|tablets|watches|audio-sound|galaxy-buds|tvs|audio-video|monitors|computers)\/[a-z0-9-]+\/[a-z0-9-]+/i,
-    exclude: /\/(mobile-accessories|explore|support|business|multistore|ai-products|offer|compare)\b/i,
+    exclude: /\/(mobile-accessories|explore|support|business|multistore|ai-products|offer|compare|reviews|specs|accessories)\b/i,
   },
   'mi.com': { lists: ['https://www.mi.com/in/product-list/'], include: /mi\.com\/in\/product\/[a-z0-9-]+\/?$/i },
   // realme sells on buy.realme.com/in/goods/<id>; the store page lists them (drawn by script).
-  'realme.com': { renders: ['https://www.realme.com/in/store'], include: /buy\.realme\.com\/in\/goods\/\d+$/i },
+  'realme.com': { renders: ['https://www.realme.com/in/store'], sitemaps: ['https://www.realme.com/sitemap-in.xml'],
+    include: /buy\.realme\.com\/in\/goods\/\d+$|realme\.com\/in\/(realme|narzo|gt|c\d|p\d)[a-z0-9-]*$/i, exclude: /\/specs$/i },
   // OPPO's own store pages (/in/product/<name>.P.P<id>) carry the price; its search page lists them.
   'oppo.com': { searches: ['https://www.oppo.com/in/search/?q={q}'], include: /oppo\.com\/in\/product\/[a-z0-9-]+\.P\.P?\d+/i },
   'vivo.com': { sitemaps: ['https://www.vivo.com/in/sitemap.xml'], include: /vivo\.com\/in\/products\/[a-z0-9-]+$/i, exclude: /\/(param|360|compare)\b/i },
@@ -648,7 +649,9 @@ export function brandScore(name, brand, candText) {
   // "Willen II" on the site is "Willen 2" in the ERP.
   candText = String(candText || '').replace(/\b(ii|iii|iv|vi)\b/gi, m => ROMAN[m.toLowerCase()]);
   // A cover / strap / charger page is never the product itself.
-  if (BRAND_ACCESSORY.test(candText) && !BRAND_ACCESSORY.test(name)) return 0;
+  // (Only near the start: "…Speaker with … Detachable Strap" is still the speaker.)
+  const head = candText.split(/\s+/).slice(0, 7).join(' ');
+  if (BRAND_ACCESSORY.test(head) && !BRAND_ACCESSORY.test(name)) return 0;
   const want = memOf(name);
   if (memMatch(candText, want) === false) return 0;
   const n5 = /\b5g\b/i.test(name), n4 = /\b4g\b/i.test(name);

@@ -715,7 +715,7 @@ function readPage(store) {
   }
   // "₹4,602.86/mo with low-cost EMI … or ₹55,999" (Google Store): the full price follows "or".
   if (!res.price && store === 'official') {
-    const m = (document.body?.innerText || '').match(/\/mo[^₹\n]{0,80}\bor\s*₹\s?([\d,]+(?:\.\d{1,2})?)/i);
+    const m = (document.body?.innerText || '').match(/\/mo\.?[^₹]{0,120}?\bor\s*₹\s?([\d,]+(?:\.\d{1,2})?)/i);
     if (m && num(m[1]) > 99) { res.price = num(m[1]); res.priceText = '₹' + m[1]; }
   }
   if (store !== 'amazon' && res.ldPrice && (!res.price || res.price < res.ldPrice * 0.5)) {
@@ -955,8 +955,21 @@ async function scrapeStore(context, job, s) {
     }
     // Brand stores with their own product data (Shopify / VTEX): price and stock for our
     // RAM / storage come from it — the page is still opened for offers.
-    const sd = s.store === 'official' ? (s._data?.price ? s._data : await brandProductData(context, job, url, s).catch(() => null)) : null;
+    let sd = s.store === 'official' ? (s._data?.price ? s._data : await brandProductData(context, job, url, s).catch(() => null)) : null;
     if (sd?.url) url = sd.url;
+    // OPPO's store page gets each SKU's name and price from its own API: listen in.
+    const oppo = { names: new Map(), prices: new Map() };
+    if (s.store === 'official' && /oppo\.com$/.test(new URL(url).hostname)) {
+      page.on('response', async resp => {
+        try {
+          const ru = resp.url();
+          if (!/oppo\.com\/.*\/(product\/detail\/fetch|sku\/settle)/.test(ru)) return;
+          const j = await resp.json();
+          for (const p of j?.data?.products || []) oppo.names.set(p.skuCode, p.name);
+          for (const p of Array.isArray(j?.data) ? j.data : []) if (Number(p.salePrice) > 0) oppo.prices.set(p.skuCode, { price: Number(p.salePrice), mrp: Number(p.originalPrice) || null });
+        } catch { /* not JSON */ }
+      });
+    }
     const load = () => withSlot(s.store, async () => {
       await open(page, url);
       if (s.store === 'amazon') await passInterstitial(page, url);
@@ -976,12 +989,34 @@ async function scrapeStore(context, job, s) {
     // Brand sites often open on their default variant whatever the link says (HMD
     // turns ?sku=<6 GB> into the 4 GB one): pick our RAM / storage on the page.
     if (s.store === 'official' && !sd) await pickMemoryVariant(page, job).catch(() => null);
+    if (oppo.names.size) {
+      await sleep(1500);
+      const want = memOf([job.name, job.variant].filter(Boolean).join(" "));
+      const hit = [...oppo.names].map(([code, nm]) => ({ code, nm, m: memMatch(nm, want), p: oppo.prices.get(code) }))
+        .filter(o => o.p && o.m !== false).sort((a, b) => (b.m === true) - (a.m === true) || a.p.price - b.p.price)[0];
+      if (hit) sd = { price: hit.p.price, mrp: hit.p.mrp > hit.p.price ? hit.p.mrp : null, inStock: null, title: hit.nm, url, how: 'store data (OPPO)' };
+    }
     // Reliance draws its Add to cart / Notify me bar after the price, from a later API call.
     if (s.store === 'reliance') {
       await page.waitForFunction(() => /add to cart|notify me|buy now|out of stock|unavailable/i.test(document.body?.innerText || ''), null, { timeout: 12000 }).catch(() => {});
       await sleep(800);
     }
-    const r = await page.evaluate(readPage, s.store);
+    let r = await page.evaluate(readPage, s.store);
+    // A brand's product page without a price ("realme 15 Pro 5G" overview) usually has a
+    // Buy button to the store page that has it: follow it once.
+    if (s.store === 'official' && !sd && !r.price) {
+      const buy = await page.evaluate(() => {
+        const a = [...document.querySelectorAll('a[href]')].find(x => /^(buy|buy now|shop now)$/i.test((x.innerText || '').trim()) && /^https?:/.test(x.href) && x.href.split('#')[0] !== location.href.split('#')[0]);
+        return a ? a.href : null;
+      }).catch(() => null);
+      if (buy && brandUrlOk(s.officialSite, buy)) {
+        sd = await brandProductData(context, job, buy, s).catch(() => null);
+        url = sd?.url || buy;
+        await withSlot(s.store, () => open(page, url)).catch(() => {});
+        if (!sd) await pickMemoryVariant(page, job).catch(() => null);
+        r = await page.evaluate(readPage, s.store);
+      }
+    }
     if (sd?.price) {
       Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock ?? r.inStock, ldPrice: null });
       if (!r.title || brandScore([job.name, job.variant].filter(Boolean).join(' '), job.brand, r.title) < 0.55) r.title = sd.title || r.title;
@@ -1002,7 +1037,7 @@ async function scrapeStore(context, job, s) {
     // search) can point at a sibling model — SB550 for SB590, SB180 for Bar 2.1
     // Essential. A link the admin pasted is trusted as is.
     const wanted = [job.name, job.variant].filter(Boolean).join(' ');
-    const fits = s.store === 'official' ? brandScore(wanted, job.brand, `${job.brand || ''} ${r.title}`) >= 0.55 || brandScore(wanted, job.brand, `${job.brand || ''} ${slugText(page.url())}`) >= 0.55
+    const fits = s.store === 'official' ? !!sd?.price || brandScore(wanted, job.brand, `${job.brand || ''} ${r.title}`) >= 0.55 || brandScore(wanted, job.brand, `${job.brand || ''} ${slugText(page.url())}`) >= 0.55
       : titleScore(wanted, job.brand, r.title) >= 0.55;
     // A brand page for another RAM / storage ("Galaxy A17 5G (6 GB Memory)" for the 8 GB one):
     // try the next candidate page.
