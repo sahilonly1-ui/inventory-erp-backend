@@ -277,7 +277,20 @@ console.log('debug folder cleanup ok');
   ok(brandUrlOk('samsung.com', 'https://www.samsung.com/in/smartphones/galaxy-a/galaxy-a17-5g-black-128gb-sm-a176bzklins/'), 'samsung url ok');
   ok(!brandUrlOk('samsung.com', 'https://www.samsung.com/in/mobile-accessories/galaxy-a17-5g-card-slot-case-black-ef-oa176tbegin/'), 'samsung accessory');
   ok(!brandUrlOk('samsung.com', 'https://www.samsung.com/uk/smartphones/galaxy-a/galaxy-a17/'), 'samsung uk');
-  ok(brandUrlOk('oppo.com', 'https://www.oppo.com/in/smartphones/series-a/a3-5g/') && !brandUrlOk('oppo.com', 'https://www.oppo.com/in/smartphones/series-a/a3-5g/specs/'), 'oppo');
+  ok(brandUrlOk('oppo.com', 'https://www.oppo.com/in/product/reno16-5g.P.P1110156') && !brandUrlOk('oppo.com', 'https://www.oppo.com/in/smartphones/series-a/a3-5g/'), 'oppo');
   ok(brandUrlOk('in.nothing.tech', 'https://in.nothing.tech/products/phone-3a') && !brandUrlOk('in.nothing.tech', 'https://in.nothing.tech/products/cable'), 'nothing');
   console.log('brand sites ok');
+}
+{
+  const { titleScore, brandScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  ok(titleScore('Sony ULT Field 1 Speaker', 'Sony', 'Sony ULT FIELD 1 Wireless Ultra Portable Bluetooth Compact Speaker') > 0.55, 'ult field ultra portable');
+  ok(titleScore('JBL Clip 5', 'JBL', 'JBL Clip 5 Pro Wireless Speaker') === 0, 'clip 5 pro still rejected');
+  ok(brandScore('boAt Airdopes 141', 'Boat', 'boAt Airdopes 141 Silicon Cover') === 0, 'accessory');
+  ok(brandScore('Marshall Willen 2 Bluetooth Speaker', 'Marshall', 'Marshall in en product willen ii') > 0.55, 'roman');
+  ok(brandScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing products nothing phone 2') === 0, 'phone 3a vs 2');
+  ok(brandScore('Nothing Phone (3a) 8/128GB', 'Nothing', 'Nothing products phone 3a') > 0.55, 'phone 3a');
+  ok(brandScore('Samsung Galaxy A17 5G 8/128GB', 'Samsung', 'Galaxy A17 5G (6 GB Memory)') === 0, 'samsung 6gb memory title');
+  ok(titleScore('Samsung Galaxy S25 Ultra', 'Samsung', 'Galaxy S25 Ultra Certified Re-Newed') === 0, 'renewed');
+  console.log('brand matching ok');
 }

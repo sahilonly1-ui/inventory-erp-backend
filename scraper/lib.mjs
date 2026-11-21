@@ -38,7 +38,7 @@ const ACCESSORY_STRONG = /\b(tempered|screen guard|protector|replacement|sticker
 // Accessory words that also appear in real product titles ("…with Alexa Voice
 // Remote", "…with charger") — only an accessory when it is "X for <product>".
 const ACCESSORY = /\b(case|cover|pouch|strap|band|charger|adapter|adaptor|cable|bag|sleeve|stand|mount|holder|remote|refill|spare|carry)\b[^,]{0,40}\bfor\b/i;
-const NOT_NEW = /\b(renewed|refurbished|pre-?owned|used|open box)\b/i;
+const NOT_NEW = /\b(renewed|re-newed|refurbished|pre-?owned|used|open box|certified re)\b/i;
 
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const tokens = s => norm(s).split(' ').filter(Boolean);
@@ -51,7 +51,7 @@ const tokens = s => norm(s).split(' ').filter(Boolean);
 // Spec tokens ("160w", "5000mah", "120hz") are often left out of listing titles,
 // so they don't decide a match. Model numbers ("120", "s26", "3rd") and storage
 // ("256gb") do.
-const SPEC = /^\d+(w|watt|watts|mah|hz|mm|cm|inch|in|v|a|h|hr|hrs|hours|k)$/;
+const SPEC = /^\d+(w|watt|watts|mah|hz|mm|cm|inch|in|v|h|hr|hrs|hours|k)$/;
 
 // "128 GB" and "128GB" are the same thing. Stores write it both ways (Flipkart and
 // Amazon usually with a space), and with the space the storage token never matched —
@@ -104,9 +104,13 @@ export function titleScore(name, brand, candidate) {
   const numAt = rawToks.map((t, i) => (modelNums.some(n => t === n || t.endsWith(n)) ? i : -1)).filter(i => i >= 0);
   for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
     if (all.includes(v)) continue;
+    // "ULT Field 1 Wireless Ultra Portable", "Max Bass": an adjective before a plain
+    // describing word, not a model variant.
+    const ADJ = { ultra: /^(portable|slim|thin|compact|light|lightweight)$/, max: /^(bass|sound|volume|battery)$/ };
+    const adjective = i => !!ADJ[rawToks[i]] && ADJ[rawToks[i]].test(rawToks[i + 1] || '');
     const near = numAt.length
-      ? rawToks.some((t, i) => t === v && numAt.some(d => i >= d - 1 && i <= d + 2))
-      : rawToks.includes(v);
+      ? rawToks.some((t, i) => t === v && !adjective(i) && numAt.some(d => i >= d - 1 && i <= d + 2))
+      : rawToks.some((t, i) => t === v && !adjective(i));
     if (near) return 0;
   }
   // Distinctive words ("Essential", "Cinema", "Bar", "Boombox") identify the model:
@@ -523,7 +527,7 @@ export function wantedMemory(text) {
   const t = String(text || '').toLowerCase().replace(/(\d)\s*tb\b/g, (_, d) => `${d * 1024}gb`);
   let m = t.match(/\b(\d{1,2})\s*(?:gb)?\s*(?:ram)?\s*[/+,|&-]\s*(\d{2,4})\s*gb\b/);
   if (m && +m[1] <= 24 && +m[2] >= 16) return { ram: +m[1], rom: +m[2] };
-  const all = [...t.matchAll(/\b(\d{1,4})\s*gb\b(\s*ram)?/g)].map(x => ({ n: +x[1], ram: !!x[2] }));
+  const all = [...t.matchAll(/\b(\d{1,4})\s*gb\b(\s*(?:ram|memory))?/g)].map(x => ({ n: +x[1], ram: !!x[2] }));
   if (!all.length) return { ram: null, rom: null };
   const ram = all.find(x => x.ram)?.n ?? (all.length > 1 && all[0].n <= 24 ? all[0].n : null);
   const rom = all.filter(x => !x.ram && x.n >= 16).map(x => x.n).pop() ?? null;
@@ -576,9 +580,10 @@ export const BRAND_SITE_RULES = {
     exclude: /\/(mobile-accessories|explore|support|business|multistore|ai-products|offer|compare)\b/i,
   },
   'mi.com': { lists: ['https://www.mi.com/in/product-list/'], include: /mi\.com\/in\/product\/[a-z0-9-]+\/?$/i },
-  'realme.com': { sitemaps: ['https://www.realme.com/sitemap-in.xml'], include: /realme\.com\/in\/(realme|narzo|gt|c\d)[a-z0-9-]*$/i, exclude: /\/specs$/i },
-  'oppo.com': { sitemaps: ['https://www.oppo.com/in/sitemap.xml'], include: /oppo\.com\/in\/(smartphones|accessories|audio|wearables|tablets)\/(series-[a-z0-9-]+\/)?[a-z0-9-]+\/?$/i,
-    exclude: /\/specs\/?$|\/(smartphones|accessories|audio|wearables|tablets)\/(series-[a-z0-9-]+\/)?$/i },
+  // realme sells on buy.realme.com/in/goods/<id>; the store page lists them (drawn by script).
+  'realme.com': { renders: ['https://www.realme.com/in/store'], include: /buy\.realme\.com\/in\/goods\/\d+$/i },
+  // OPPO's own store pages (/in/product/<name>.P.P<id>) carry the price; its search page lists them.
+  'oppo.com': { searches: ['https://www.oppo.com/in/search/?q={q}'], include: /oppo\.com\/in\/product\/[a-z0-9-]+\.P\.P?\d+/i },
   'vivo.com': { sitemaps: ['https://www.vivo.com/in/sitemap.xml'], include: /vivo\.com\/in\/products\/[a-z0-9-]+$/i, exclude: /\/(param|360|compare)\b/i },
   'oneplus.in': { sitemaps: ['https://www.oneplus.in/sitemap.xml'], include: /oneplus\.in\/(oneplus-[a-z0-9-]+|product\/[a-z0-9-]+)$/i, exclude: /specs|terms|offer/i },
   'marshall.com': { sitemaps: ['https://www.marshall.com/sitemap_0_in.xml'], include: /marshall\.com\/in\/en\/product\//i, exclude: /cabinet|amp|pedal|head|combo|1959|1960/i },
@@ -635,7 +640,15 @@ const stripMem = s => String(s || '').replace(MEM_RE, ' ').replace(/\(\s*[,/+]*\
  * model with RAM / storage chosen on the page, and leave "5G" out of URLs — so the
  * model decides, memory only rules a page out when it names a different one.
  */
+const ROMAN = { ii: '2', iii: '3', iv: '4', v: '5', vi: '6' };
+const BRAND_ACCESSORY = /\b(cover|case|strap|band|charger|cable|adapter|adaptor|tips|protector|tempered|skin|pouch|stand|mount|holder|refill|replacement|ear ?tips|charging case|silicon|silicone)\b/i;
 export function brandScore(name, brand, candText) {
+  // "Phone (3a)", "Pixel (10a)": a model in brackets is the model, not an extra.
+  name = String(name || '').replace(/\(([a-z0-9]{1,4})\)/gi, (m, x) => (/\d/.test(x) && !/gb|tb/i.test(x) ? ` ${x} ` : m));
+  // "Willen II" on the site is "Willen 2" in the ERP.
+  candText = String(candText || '').replace(/\b(ii|iii|iv|vi)\b/gi, m => ROMAN[m.toLowerCase()]);
+  // A cover / strap / charger page is never the product itself.
+  if (BRAND_ACCESSORY.test(candText) && !BRAND_ACCESSORY.test(name)) return 0;
   const want = memOf(name);
   if (memMatch(candText, want) === false) return 0;
   const n5 = /\b5g\b/i.test(name), n4 = /\b4g\b/i.test(name);

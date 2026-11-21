@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, brandSiteRule, brandUrlOk, brandScore, pickBrandPage, shopifyPick, vtexPick } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -332,7 +332,7 @@ const brandListCache = new Map();
 /** Every Indian product page a brand site lists (sitemaps / product-list pages in its rule). */
 function brandPages(context, domain) {
   const rule = brandSiteRule(domain);
-  if (!rule || (!rule.sitemaps && !rule.lists)) return Promise.resolve(null);
+  if (!rule || (!rule.sitemaps && !rule.lists && !rule.renders)) return Promise.resolve(null);
   if (!brandListCache.has(domain)) brandListCache.set(domain, (async () => {
     const urls = new Set();
     for (const sm of rule.sitemaps || []) {
@@ -349,19 +349,36 @@ function brandPages(context, domain) {
     for (const lp of rule.lists || []) {
       const html = await brandGet(context, lp, 'text/html');
       if (!html) continue;
-      for (const m of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
+      for (const m of html.matchAll(/(?:href=|["'(])["']?((?:https?:)?\/\/[^"'\s)<>]+|\/[a-z0-9_-]+\/[^"'\s)<>]+)["')]/gi)) {
         try { const u = new URL(m[1].replace(/&amp;/g, '&'), lp); u.search = ''; if (brandUrlOk(domain, u.href)) urls.add(u.href.replace(/\/+$/, '')); } catch { /* bad link */ }
       }
     }
-    return [...urls];
+    const out = [...urls].map(href => ({ href, text: slugText(href) }));
+    // Store pages drawn by script: open them and read each product link with its name.
+    for (const rp of rule.renders || []) {
+      const page = await context.newPage();
+      try {
+        await page.goto(rp, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        await page.waitForTimeout(6000);
+        for (let k = 0; k < 4; k++) { await page.mouse.wheel(0, 2500); await page.waitForTimeout(800); }
+        const links = await page.evaluate(() => [...document.querySelectorAll('a[href]')].map(a => ({ href: a.href.split('?')[0], text: (a.innerText || a.title || '').replace(/\s+/g, ' ').trim().slice(0, 200) })));
+        const by = new Map();
+        for (const l of links) if (brandUrlOk(domain, l.href) && l.text && l.text.length > (by.get(l.href)?.text.length || 0)) by.set(l.href, l);
+        out.push(...by.values());
+      } catch { /* page would not load — the other routes still run */ }
+      finally { await page.close().catch(() => {}); }
+    }
+    return out;
   })());
   return brandListCache.get(domain);
 }
 
-async function findOnBrandSite(context, job, domain) {
+async function findOnBrandSite(context, job, domain, bad = []) {
   const name = [job.name, job.variant].filter(Boolean).join(' ');
   const rule = brandSiteRule(domain) || {};
   const base = `https://${brandHost(domain)}`;
+  const badKeys = new Set(bad.map(b => urlKey('official', b)));
+  const pickBrandPage = (n, b, cands) => pickBrandPageAll(n, b, cands.filter(c => !badKeys.has(urlKey('official', c.href))));
   let why = '';
   if (await isShopify(context, domain)) {
     const seen = new Map();
@@ -386,9 +403,21 @@ async function findOnBrandSite(context, job, domain) {
       why += `catalogue: ${Array.isArray(j) ? j.length : 'no answer'} for "${q}"; `;
     }
   }
+  for (const tpl of rule.searches || []) {
+    const seen = new Map();
+    for (const q of searchQueries(job.name, job.brand, job.variant).reverse()) {
+      const html = await brandGet(context, tpl.replace('{q}', encodeURIComponent(q.replace(/\(?\b\d{1,2}\s*(gb)?\s*[/+|]\s*\d{2,4}\s*(gb|tb)?\)?/gi, ' ').replace(/\s+/g, ' ').trim())), 'text/html');
+      for (const m of (html || '').matchAll(/(?:href=|["'(])["']?((?:https?:)?\/\/[^"'\s)<>]+|\/[a-z0-9_-]+\/[^"'\s)<>]+)["')]/gi)) {
+        try { const u = new URL(m[1].replace(/&amp;/g, '&'), tpl); u.search = ''; if (brandUrlOk(domain, u.href)) seen.set(u.href, { href: u.href, text: `${job.brand || ''} ${slugText(u.href)}` }); } catch { /* bad link */ }
+      }
+      const hit = pickBrandPage(name, job.brand, [...seen.values()]);
+      if (hit) return { hit };
+    }
+    why += `site search: ${seen.size} pages, none ours; `;
+  }
   const pages = await brandPages(context, domain);
   if (pages) {
-    const hit = pickBrandPage(name, job.brand, pages.map(href => ({ href, text: `${job.brand || ''} ${slugText(href)}` })));
+    const hit = pickBrandPage(name, job.brand, pages.map(p => ({ href: p.href, text: `${job.brand || ''} ${p.text}` })));
     if (hit) return { hit };
     why += `site list: ${pages.length} pages, none ours; `;
   }
@@ -416,6 +445,28 @@ async function brandProductData(context, job, url, s) {
       const v = Array.isArray(j) && j.length ? (vtexPick(j, name, job.brand, u.searchParams.get('skuId')) || vtexPick(j, name, job.brand, u.searchParams.get('skuId'), true)) : null;
       if (v?.price) return { ...v, how: 'store data (catalogue)' };
     }
+  }
+  // Xiaomi: the store's item API lists every RAM / storage / colour with price and stock.
+  const miTag = /(^|\.)mi\.com$/.test(u.hostname) && u.pathname.match(/\/in\/product\/([a-z0-9-]+)/i)?.[1];
+  if (miTag) {
+    const j = await brandJson(context, `https://in-go.buy.mi.com/in/v2/item/productdetail?tag=${miTag}`);
+    const items = (j?.data?.item_detail?.spu_list || []).flatMap(x => x.item_list || []);
+    const want = memOf(name);
+    const sc = items.map(it => ({ it, m: memMatch(it.item_name, want) })).filter(o => o.m !== false && Number(o.it.price) > 0);
+    sc.sort((a, b) => (b.m === true) - (a.m === true) || (!b.it.is_out_of_stock) - (!a.it.is_out_of_stock) || a.it.price - b.it.price);
+    const it = sc[0]?.it;
+    if (it) return { price: Number(it.price), mrp: Number(it.market_price) > Number(it.price) ? Number(it.market_price) : null, inStock: !!it.is_sale && !it.is_out_of_stock, title: it.item_name, url, how: 'store data (Mi)' };
+  }
+  // realme: product API with each SKU's name (RAM + storage) and price.
+  const rmId = /buy\.realme\.com$/.test(u.hostname) && u.pathname.match(/\/in\/goods\/(\d+)/)?.[1];
+  if (rmId) {
+    const j = await brandJson(context, `https://api.realme.com/in/product/detail?productId=${rmId}`);
+    const skus = Object.values(j?.data || {}).filter(x => x && x.skuId && Number(x.price) > 0);
+    const want = memOf(name);
+    const sc = skus.map(x => ({ x, m: memMatch(`${x.skuName || ''} ${x.productName || ''}`, want) })).filter(o => o.m !== false);
+    sc.sort((a, b) => (b.m === true) - (a.m === true) || a.x.price - b.x.price);
+    const x = sc[0]?.x;
+    if (x) return { price: Number(x.price), mrp: Number(x.mrpPrice) > Number(x.price) ? Number(x.mrpPrice) : null, inStock: null, title: x.skuName || x.productName, url, how: 'store data (realme)' };
   }
   return null;
 }
@@ -640,7 +691,7 @@ function readPage(store) {
     for (const el of document.querySelectorAll('body *')) {
       if (el.children.length > 2) continue;
       const t = txt(el);
-      if (!/^(₹|rs\.?)\s?[\d,]+(\.\d{1,2})?$/i.test(t)) continue;
+      if (!/^(₹|rs\.?)\s?[\d,]+(\.\d{1,2})?\s*\*?\s*(\/-)?\s*\*?$/i.test(t)) continue;
       // "₹641/month", "EMI from ₹641" — an instalment, never the product price.
       // Only the text right next to the amount — not the whole section.
       const parentT = txt(el.parentElement);
@@ -661,6 +712,11 @@ function readPage(store) {
       const m = cands.filter(c => c.struck && c.v > res.price).sort((a, b) => Math.abs(a.top - live[0].top) - Math.abs(b.top - live[0].top))[0];
       if (m) res.mrp = m.v;
     }
+  }
+  // "₹4,602.86/mo with low-cost EMI … or ₹55,999" (Google Store): the full price follows "or".
+  if (!res.price && store === 'official') {
+    const m = (document.body?.innerText || '').match(/\/mo[^₹\n]{0,80}\bor\s*₹\s?([\d,]+(?:\.\d{1,2})?)/i);
+    if (m && num(m[1]) > 99) { res.price = num(m[1]); res.priceText = '₹' + m[1]; }
   }
   if (store !== 'amazon' && res.ldPrice && (!res.price || res.price < res.ldPrice * 0.5)) {
     res.price = res.ldPrice; res.priceText = '₹' + res.ldPrice;   // the store's own structured price
@@ -813,8 +869,8 @@ async function scrapeStore(context, job, s) {
       let why = '';
       // 0. Brand sites: the store's own catalogue first (search API / sitemap) — exact and quick.
       if (s.store === 'official') {
-        const b = await findOnBrandSite(context, job, domain).catch(e => ({ hit: null, why: `brand site: ${String(e.message).slice(0, 60)}; ` }));
-        if (b.hit && !(s._bad && urlKey('official', b.hit.href) === urlKey('official', s._bad))) { url = b.hit.href; s._data = b.data || null; }
+        const b = await findOnBrandSite(context, job, domain, [...(s._bads || []), ...(s._bad ? [s._bad] : [])]).catch(e => ({ hit: null, why: `brand site: ${String(e.message).slice(0, 60)}; ` }));
+        if (b.hit) { url = b.hit.href; s._data = b.data || null; }
         else why += b.why || '';
       }
       // 1. Google (shared by all stores of this product — one search, not five).
@@ -875,7 +931,7 @@ async function scrapeStore(context, job, s) {
         const what = verdict === 'blocked' ? 'search blocked' : verdict === 'not_listed' ? 'not found in search' : 'could not look properly';
         diag.push({ store: s.store, product: job.name, what, detail: `${why} · ${await pageSnippet(page)}` });
         return verdict === 'not_listed'
-          ? { store: s.store, status: 'not_listed' }
+          ? { store: s.store, status: 'not_listed', note: why.trim().slice(0, 200) }
           : { store: s.store, status: verdict, note: (verdict === 'blocked' ? why : `Not found yet (will retry): ${why}`).trim().slice(0, 200) };
       }
     }
@@ -927,7 +983,7 @@ async function scrapeStore(context, job, s) {
     }
     const r = await page.evaluate(readPage, s.store);
     if (sd?.price) {
-      Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock, ldPrice: null });
+      Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock ?? r.inStock, ldPrice: null });
       if (!r.title || brandScore([job.name, job.variant].filter(Boolean).join(' '), job.brand, r.title) < 0.55) r.title = sd.title || r.title;
     }
     if (s.store === 'reliance') {
@@ -948,6 +1004,14 @@ async function scrapeStore(context, job, s) {
     const wanted = [job.name, job.variant].filter(Boolean).join(' ');
     const fits = s.store === 'official' ? brandScore(wanted, job.brand, `${job.brand || ''} ${r.title}`) >= 0.55 || brandScore(wanted, job.brand, `${job.brand || ''} ${slugText(page.url())}`) >= 0.55
       : titleScore(wanted, job.brand, r.title) >= 0.55;
+    // A brand page for another RAM / storage ("Galaxy A17 5G (6 GB Memory)" for the 8 GB one):
+    // try the next candidate page.
+    const memWrong = s.store === 'official' && !sd && memMatch(r.title, memOf(wanted)) === false;
+    if (!s.locked && s.store === 'official' && (memWrong || (r.title && !fits)) && (s._tries || 0) < 3) {
+      diag.push({ store: s.store, product: job.name, what: memWrong ? 'brand page is another RAM/storage' : 'brand page is a different product', detail: `${String(r.title).slice(0, 80)} · ${page.url()}` });
+      await page.close().catch(() => {});
+      return scrapeStore(context, job, { ...s, url: null, _data: null, _tries: (s._tries || 0) + 1, _bads: [...(s._bads || []), page.url(), url] });
+    }
     if (!s.locked && r.title && !fits) {
       diag.push({ store: s.store, product: job.name, what: 'page is a different product', detail: `${r.title.slice(0, 80)} · ${page.url()}` });
       if (s.url && !s._retried) {
