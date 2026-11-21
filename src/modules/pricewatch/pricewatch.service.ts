@@ -723,16 +723,3 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
-
-// Diagnostics (temporary): re-check the Moto G67 / G37 Power and log Amazon results.
-setTimeout(async () => {
-  try { await x(`UPDATE price_watch_items SET requested=true WHERE (name ILIKE '%g67 power%' OR name ILIKE '%g37 power%') AND active AND NOT dismissed`); } catch { /* ignore */ }
-}, 14 * 60_000).unref();
-for (const m of [24, 34, 45]) setTimeout(async () => {
-  try {
-    const rows = await q(`SELECT i.name, s.status, s.price::float, s.method, s."fetchedAt", left(s.notes,160) notes
-      FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId" WHERE s.store='amazon' AND (i.name ILIKE '%g67 power%' OR i.name ILIKE '%g37 power%') ORDER BY s."fetchedAt" DESC LIMIT 8`);
-    const tally = await q(`SELECT s.status, s.method, count(*)::int n FROM price_snapshots s WHERE s.store='amazon' AND s."fetchedAt" > now() - interval '30 minutes' GROUP BY 1,2 ORDER BY 3 DESC`);
-    logger.info({ rows, tally, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag amz2');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag amz2 failed'); }
-}, m * 60_000).unref();
