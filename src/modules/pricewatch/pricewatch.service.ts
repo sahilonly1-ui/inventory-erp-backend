@@ -747,8 +747,8 @@ setTimeout(async () => {
 // log the raw offer lines that run sees.
 setTimeout(async () => {
   try {
-    if (!(await q(`SELECT 1 FROM price_watch_settings WHERE key='offer_probe_1'`)).length) {
-      await x(`INSERT INTO price_watch_settings (key, value) VALUES ('offer_probe_1', '{}'::jsonb) ON CONFLICT (key) DO NOTHING`);
+    if (!(await q(`SELECT 1 FROM price_watch_settings WHERE key='offer_probe_2'`)).length) {
+      await x(`INSERT INTO price_watch_settings (key, value) VALUES ('offer_probe_2', '{}'::jsonb) ON CONFLICT (key) DO NOTHING`);
       await x(`UPDATE price_watch_items SET requested=true WHERE id IN (SELECT l."itemId" FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId"
         WHERE i.active AND NOT i.dismissed AND l.url IS NOT NULL AND l.store IN ('flipkart','reliance','croma','amazon') GROUP BY 1 HAVING count(*) >= 3 ORDER BY random() LIMIT 80)`);
     }
@@ -758,10 +758,10 @@ setTimeout(async () => {
   try {
     for (const store of ['flipkart', 'amazon', 'reliance', 'croma', 'official']) {
       const st = await q(`SELECT status, count(*)::int n, count(*) FILTER (WHERE "offerRaw" IS NOT NULL AND "offerRaw" <> '')::int raw, count(*) FILTER (WHERE "bestOffer" IS NOT NULL)::int best
-        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '90 minutes' GROUP BY 1`, store);
+        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '45 minutes' GROUP BY 1`, store);
       const ex = await q(`SELECT i.name, s.price::float, s."bestOffer", left(s."offerRaw", 1600) raw FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
-        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '90 minutes' AND s."offerRaw" IS NOT NULL ORDER BY random() LIMIT 5`, store);
+        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '45 minutes' AND s."offerRaw" IS NOT NULL ORDER BY random() LIMIT 5`, store);
       logger.info({ store, st, ex }, 'PW diag raw');
     }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
-}, 60_000).unref();
+}, 50 * 60_000).unref();

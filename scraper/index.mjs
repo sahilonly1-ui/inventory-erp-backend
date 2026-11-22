@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, offerRawLines, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, offerRawLines, parseFlipkartOffers, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -900,6 +900,30 @@ function readPage(store) {
   }
   // Text above the recommendation rails holds the offers; keep it bounded.
   res.text = (railsAt > 0 ? body.slice(0, railsAt) : body).slice(0, 60_000);
+  // Flipkart's bank-offer cards ("₹3,125 off" + "Credit Card • Includes cashback"), with the
+  // bank names their logos carry. Only cards between the "Bank offers" heading and
+  // "View EMI offers" — not the "Exchange + Banks" combo above them.
+  if (store === 'flipkart') {
+    const exact = re => [...document.querySelectorAll('div, span, h2, h3, p')].find(e => e.childElementCount === 0 && re.test((e.textContent || '').trim()));
+    const head = exact(/^bank offers?$/i), stop = exact(/^view emi offers$/i);
+    const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    res.offerCards = [];
+    if (head) {
+      for (const el of document.querySelectorAll('div, span')) {
+        if (el.childElementCount !== 0 || !/^₹\s?[\d,]+ off$/i.test((el.textContent || '').trim())) continue;
+        if (!after(head, el) || (stop && !after(el, stop))) continue;
+        let card = el;
+        for (let k = 0; k < 5 && card.parentElement; k++) {
+          const up = card.parentElement;
+          if ((up.innerText || '').length > 160 || (up.innerText || '').split('₹').length > 2) break;
+          card = up;
+        }
+        const lines = (card.innerText || '').split('\n').map(t => t.trim()).filter(Boolean);
+        const banks = [...card.querySelectorAll('img, [aria-label], [title]')].map(i => i.getAttribute('alt') || i.getAttribute('aria-label') || i.getAttribute('title') || '').filter(t => t && t.length < 60);
+        res.offerCards.push(`${(el.textContent || '').trim()} | ${lines.filter(t => !/^₹/.test(t)).join(' • ')} | banks: ${[...new Set(banks)].join(', ')}`);
+      }
+    }
+  }
   return res;
 }
 
@@ -1291,10 +1315,13 @@ async function scrapeStore(context, job, s) {
         await debugDump(page, tag + '-offers');
         diag.push({ store: 'amazon', product: job.name, what: 'offers on page but not readable', detail: page.url() });
       }
+    } else if (s.store === 'flipkart') {
+      offers = parseFlipkartOffers(r.text, r.offerCards || []);
+      if (!offers.length) offers = extractOffers(r.text).filter(o => o.offerType !== 'no_cost_emi');
     } else offers = extractOffers(r.text);
     return {
       store: s.store, url: sd?.url || page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
-      title: r.title, priceText: r.priceText, offers, offerRaw: offerRawLines(r.text),
+      title: r.title, priceText: r.priceText, offers, offerRaw: [offerRawLines(r.text), ...(r.offerCards || []).map(c => `[card] ${c}`)].join('\n').slice(0, 6000),
       note: s.store === 'reliance' && !/store api/.test(r.stockWhy || '') ? `Stock read from the page (${r.stockWhy}) — Reliance's own stock data didn't load`
         : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };

@@ -413,3 +413,16 @@ console.log('debug folder cleanup ok');
   ok(g.bank === 'Flipkart Axis' && g.offerType === 'cashback' && g.percent === 5 && g.maxDiscount === 4000, 'flipkart axis ' + JSON.stringify(g));
   console.log('offer parsing ok');
 }
+{
+  const { parseFlipkartOffers, parseAmazonCards, parseOffer } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const fk = 'Apply offers for maximum savings\nPay ₹22,499 • No Cost EMI\nExchange offer\nSelect and apply the best offers\nExtra off on Exchange + Banks\n₹3,225 off\nBank offers\n₹3,125 off\nCredit Card • Includes cashback\n₹2,000 off\nCredit Card\nMultiple Banks\nView EMI offers\nUnlock Air fryer coupon • 10% off';
+  const f = parseFlipkartOffers(fk);
+  ok(f.length === 2 && f[0].amount === 3125 && f[0].offerType === 'cashback' && f[0].cardType === 'Credit Card' && f[1].amount === 2000 && f[1].bank === 'Multiple Banks', 'flipkart ' + JSON.stringify(f));
+  const fc = parseFlipkartOffers('', ['₹1,200 off | Credit Card | banks: HDFC Bank', '₹750 off | Credit Card • Cashback | banks: Flipkart Axis Bank']);
+  ok(fc[0].bank === 'HDFC Bank' && fc[1].bank === 'Flipkart Axis' && fc[1].offerType === 'cashback', 'flipkart cards ' + JSON.stringify(fc));
+  const a = parseAmazonCards('Bank Offer\nUpto ₹3,000.00 discount on select Credit Cards\n50 offers\nCashback\nUpto ₹509.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards\nUpto ₹509.00 cashback as Amazon Pay Balance when…\nNo Cost EMI\nUpto ₹497.25 EMI interest savings on Amazon Pay ICICI Bank Credit Cards');
+  ok(a.length === 1 && a[0].amount === 509 && a[0].bank === 'Amazon Pay ICICI' && a[0].mode === 'Full swipe', 'amazon cards ' + JSON.stringify(a));
+  ok(parseOffer('Instant discount of Rs 500 on SBI Bank credit card. Discounted price inclusive of cashback will be applied').offerType === 'instant_discount', 'croma instant');
+  console.log('store offer formats ok');
+}

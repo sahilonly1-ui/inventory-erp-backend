@@ -217,6 +217,7 @@ export function parseOffer(text) {
 
   let offerType = 'other';
   if (/no cost emi/.test(lower)) offerType = 'no_cost_emi';
+  else if (/instant (discount|savings?)/.test(lower) && !/neu ?coins?/.test(lower)) offerType = 'instant_discount';
   else if (/cashback|neu ?coins?|reward points|\d\s?% back\b|₹\s?[\d,]+ back\b/.test(lower)) offerType = 'cashback';
   else if (/exchange/.test(lower) && !bank) offerType = 'exchange';
   else if (/coupon/.test(lower) && !bank) offerType = 'coupon';
@@ -489,8 +490,65 @@ export function parseAmazonCards(text) {
       amount, percent: null, maxDiscount: null, minTxn: null,
       summary: `${cashback ? 'Cashback' : 'Save'} ₹${amount.toLocaleString('en-IN')} with ${card}${emi ? ' on No Cost EMI' : ''}` });
   }
+  // Signed-out card layout: "Upto ₹509.00 cashback as Amazon Pay Balance when you pay with
+  // Amazon Pay ICICI Bank Credit Cards" — Amazon works the figure out for this product.
+  // ("Upto ₹3,000 discount on select Credit Cards" is the best of 50 offers, EMI ones
+  // included, with no bank named — not usable on its own.)
+  for (const l of lines) {
+    if (/…$/.test(l)) continue;
+    const m = l.match(/^up\s?to ₹\s?([\d,]+(?:\.\d+)?) cashback as amazon pay balance when you pay with (.+)$/i);
+    if (!m) continue;
+    const amount = Math.floor(Number(m[1].replace(/,/g, '')));
+    const card = m[2];
+    const bank = BANKS.find(([, re]) => re.test(card))?.[0] ?? null;
+    const low = card.toLowerCase();
+    out.push({ bank, cardType: /credit/.test(low) ? 'Credit Card' : /debit/.test(low) ? 'Debit Card' : null, offerType: 'cashback', mode: 'Full swipe',
+      amount, percent: null, maxDiscount: null, minTxn: null, summary: `₹${amount.toLocaleString('en-IN')} cashback (Amazon Pay balance) with ${card}` });
+  }
   const seen = new Set();
   return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
+}
+
+/**
+ * Flipkart's offer box (2026): "Bank offers" followed by cards — "₹3,125 off" /
+ * "Credit Card • Includes cashback", "₹2,000 off" / "Credit Card" / "Multiple Banks".
+ * The amount is what this product gets; the bank is shown as a logo, so its name
+ * comes from the card's picture (cards: "₹3,125 off | Credit Card • … | banks: HDFC Bank").
+ */
+export function parseFlipkartOffers(text, cards = []) {
+  const out = [];
+  const add = (amount, desc, banks) => {
+    const d = String(desc || '').toLowerCase();
+    if (!amount || /exchange/.test(d)) return;
+    const bankTxt = [banks, desc].filter(Boolean).join(' ');
+    const bank = BANKS.find(([, re]) => re.test(bankTxt))?.[0] ?? (/multiple banks/i.test(bankTxt) ? 'Multiple Banks' : null);
+    const cardType = /credit/.test(d) && /debit/.test(d) ? 'Credit & Debit' : /credit/.test(d) ? 'Credit Card' : /debit/.test(d) ? 'Debit Card' : /upi/.test(d) ? 'UPI' : null;
+    out.push({ bank, cardType, offerType: /cashback/.test(d) ? 'cashback' : 'instant_discount', mode: /\bemi\b/.test(d) ? 'EMI' : null,
+      amount, percent: null, maxDiscount: null, minTxn: null,
+      summary: `₹${amount.toLocaleString('en-IN')} off${cardType ? ` with ${cardType}` : ''}${bank ? ` (${bank})` : ''}${/cashback/.test(d) ? ' — includes cashback' : ''}` });
+  };
+  if (cards.length) {
+    for (const c of cards) {
+      const [head, desc, banks] = String(c).split(' | ');
+      const m = (head || '').match(/^₹\s?([\d,]+) off$/i);
+      if (m) add(Number(m[1].replace(/,/g, '')), desc, (banks || '').replace(/^banks:\s*/i, ''));
+    }
+  } else {
+    const lines = String(text || '').split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const start = lines.findIndex(l => /^bank offers?$/i.test(l));
+    if (start >= 0) {
+      for (let i = start + 1; i < Math.min(lines.length, start + 30); i++) {
+        if (/^(view emi offers|buy with emi|unlock|gift cards?|special price|exchange offer)/i.test(lines[i])) break;
+        const m = lines[i].match(/^₹\s?([\d,]+) off$/i);
+        if (!m) continue;
+        const desc = lines[i + 1] && !/^₹/.test(lines[i + 1]) ? lines[i + 1] : '';
+        const banks = lines[i + 2] && /bank|card/i.test(lines[i + 2]) && !/^₹/.test(lines[i + 2]) ? lines[i + 2] : '';
+        add(Number(m[1].replace(/,/g, '')), desc, banks);
+      }
+    }
+  }
+  const seen = new Set();
+  return out.filter(o => { const k = [o.amount, o.cardType, o.offerType, o.bank].join('|'); return seen.has(k) ? false : seen.add(k); });
 }
 
 // ── Reliability helpers ──────────────────────────────────────────────────────
