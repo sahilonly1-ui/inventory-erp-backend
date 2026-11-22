@@ -742,3 +742,16 @@ setTimeout(async () => {
     logger.info({ cleared: cleared.length, queued: queued.length }, 'PW re-find all: not-sold-here cleared, every product queued');
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW re-find all failed'); }
 }, 60_000).unref();
+
+// Diagnostics (temporary, read-only): raw offer lines per store.
+setTimeout(async () => {
+  try {
+    for (const store of ['flipkart', 'amazon', 'reliance', 'croma', 'official']) {
+      const st = await q(`SELECT status, count(*)::int n, count(*) FILTER (WHERE "offerRaw" IS NOT NULL AND "offerRaw" <> '')::int raw, count(*) FILTER (WHERE "bestOffer" IS NOT NULL)::int best
+        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '50 minutes' GROUP BY 1`, store);
+      const ex = await q(`SELECT i.name, s.price::float, s."bestOffer", left(s."offerRaw", 1600) raw FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
+        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '50 minutes' AND s."offerRaw" IS NOT NULL ORDER BY length(s."offerRaw") DESC LIMIT 3`, store);
+      logger.info({ store, st, ex }, 'PW diag raw');
+    }
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
+}, 40_000).unref();
