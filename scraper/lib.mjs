@@ -97,10 +97,16 @@ export function titleScore(name, brand, candidate) {
   const all = tokens(nameNoChannels);
   const pairs = candTokensAll.slice(0, -1).map((c, i) => c + candTokensAll[i + 1]);   // "Go 4" → "go4"
   const has = t => new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(cand) || new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(squashed) || pairs.includes(t);
+  let modelMatched = false;
   for (let i = 0; i < all.length; i++) {
     const t = all[i];
     if (!/\d/.test(t) || SPEC.test(t)) continue;
+    // A stock code after the model ("Flip 7 … JBLFLIP7BLK", "Aurel 1 … POR-1374") is
+    // the ERP's own reference; stores rarely print it, so it may be missing.
+    const skuLike = (t.length >= 6 && /[a-z].*\d|\d.*[a-z]/.test(t) && (t.match(/[a-z]/g) || []).length >= 3) || (/^\d{3,5}$/.test(t) && /^[a-z]{2,4}$/.test(all[i - 1] || '') && ['por', 'tor', 'bsw', 'pfb', 'fit', 'ms', 'mh', 'es', 'sc', 'scm', 'hp', 'ptwe', 'sm', 'r'].includes(all[i - 1]));
+    if (skuLike && modelMatched && !has(t)) continue;
     if (!has(t)) return 0;                       // model number must match exactly
+    modelMatched = true;
     // …and not as the start of another model: "90" is not "90x", "6" is not "6R", "13" is not "13C".
     if (/^\d+$/.test(t) && !candTokensAll.includes(t) && candTokensAll.some(c => new RegExp(`^${t}[a-z]$`).test(c))) return 0;
     // …and so must the word naming the line right before it: "Club 120" is not
@@ -136,10 +142,16 @@ export function titleScore(name, brand, candidate) {
   // Channel counts ("Bar 2.1", "5.1 ch") are specs, not model numbers — left out here too.
   const candToks = String(candidate).toLowerCase().replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ').match(/[a-z0-9]+/g) || [];
   for (let i = 0; i + 1 < candToks.length; i++) {
-    if (distinctive.includes(candToks[i]) && /^\d{1,3}$/.test(candToks[i + 1]) && !modelNums.includes(candToks[i + 1])) return 0;
+    if (distinctive.includes(candToks[i]) && /^\d{1,3}$/.test(candToks[i + 1]) && !modelNums.includes(candToks[i + 1])
+      && !modelNums.includes(candToks[i + 1] + (candToks[i + 2] || ''))) return 0;   // "680 NC" is our "680NC"
   }
-  const missing = distinctive.filter(w => !wordFound(w, candTokensAll, squashed)).length;
-  if (missing > (distinctive.length >= 3 ? 1 : 0)) return 0;
+  const missingW = distinctive.filter(w => !wordFound(w, candTokensAll, squashed));
+  // A line word we asked for ("Pro", "Ultra", "Lite"…) is never the one allowed to be missing.
+  if (missingW.some(w => /^(pro|ultra|max|plus|lite|mini|fe|neo|prime|power|edge|fold|flip|essential|club|encore|air|go|mk\d?)$/.test(w))) return 0;
+  const missing = missingW.length;
+  // With the model number matched (and the word before it checked above), one stray or
+  // misspelt word in the ERP name ("OveEar") is allowed.
+  if (missing > (distinctive.length >= 3 || (modelMatched && distinctive.length >= 2) ? 1 : 0)) return 0;
   const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);
   const hit = words.length ? words.filter(w => wordFound(w, candTokensAll, squashed)).length / words.length : 1;
   // Tie-break only: a listing full of words our name doesn't have is less likely to be it.

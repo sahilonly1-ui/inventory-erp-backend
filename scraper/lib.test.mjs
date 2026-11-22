@@ -382,3 +382,17 @@ console.log('debug folder cleanup ok');
   for (const [n, b, c, want] of T) ok((titleScore(n, b, c) > 0.55) === want, `${n} vs ${c}`);
   console.log('marketplace fixes ok');
 }
+{
+  const { titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const T = [
+    ['JBL Flip 7 Portable Waterproof and Drop-Proof Speaker JBLFLIP7BLK', 'JBL', 'JBL Flip 7 Portable Waterproof and Drop-Proof Speaker, Bold Pro Sound with AI Sound Boost', true],
+    ['JBL Tune 680NC Wireless Noise Cancelling OveEar Headphone', 'JBL', 'JBL Tune 680 NC Wireless On-Ear Headphones, Black', true],
+    ['JBL Live 780NC Wireless Noise Cancelling Over-Ear HeadPhone', 'JBL', 'JBL Tune 780 NC Wireless Over Ear ANC Headphones', false],
+    ['Portronics Aurel 1 Foldable Wired Headphone POR-1374', 'Portronics', 'Portronics Aurel 1 Foldable Wired Headphones with Mic', true],
+    ['Pebble Explore Smart Watch PFB57', 'Pebble', 'Pebble Cosmos Smart Watch PFB06', false],
+    ['JBL Flip 7 Portable Speaker JBLFLIP7BLK', 'JBL', 'JBL Flip 6 Wireless Portable Bluetooth Speaker', false],
+  ];
+  for (const [n, b, c, want] of T) ok((titleScore(n, b, c) > 0.55) === want, `${n} vs ${c}`);
+  console.log('stock codes ok');
+}
