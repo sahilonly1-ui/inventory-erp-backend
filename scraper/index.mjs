@@ -305,6 +305,70 @@ async function findViaSitemap(context, job, domain) {
   return hit ? { hit } : { hit: null, why: `sitemap: ${urls.length} urls, no match; ` };
 }
 
+// ── Store catalogues: Reliance Digital and Croma ──────────────────────────
+// Both stores' search pages are drawn from their own catalogue APIs. Reading those
+// gives every listing's exact name, price, MRP, stock and EAN — no page parsing, and
+// an EAN match is certain. Reliance's API only answers from inside its own pages
+// (a plain request is refused), so it is called from a reliancedigital.in tab.
+const relPages = new WeakMap();
+function reliancePage(context) {
+  if (!relPages.has(context)) relPages.set(context, (async () => {
+    const p = await context.newPage();
+    await p.goto('https://www.reliancedigital.in/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await p.waitForTimeout(3000);
+    return p;
+  })().catch(e => { relPages.delete(context); throw e; }));
+  return relPages.get(context);
+}
+async function relianceSearch(context, q) {
+  const p = await reliancePage(context);
+  const items = await p.evaluate(async q => {
+    const r = await fetch(`/ext/raven-api/catalog/v1.0/products?q=${encodeURIComponent(q)}&page_id=*&page_no=1&page_size=24&page_type=number`, { headers: { accept: 'application/json' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j.items || []).map(x => ({ name: x.name, slug: x.slug, sellable: x.sellable, price: x.price?.effective?.min, mrp: x.price?.marked?.min, ean: x.attributes?.identifier?.ean || [] }));
+  }, q).catch(() => null);
+  return items;
+}
+async function cromaSearch(context, q) {
+  try {
+    const r = await context.request.get(`https://api.croma.com/searchservices/v1/search?currentPage=0&query=${encodeURIComponent(q)}%3Arelevance&fields=FULL&channel=WEB`,
+      { timeout: 25_000, headers: { 'User-Agent': UA, Accept: 'application/json' } });
+    if (!r.ok()) return null;
+    const j = await r.json();
+    return (j.products || []).map(x => ({ name: x.name, url: x.url, price: x.price?.value ?? x.pincodePrice?.value, mrp: x.mrp?.value, ean: x.ean ? [x.ean] : [] }));
+  } catch { return null; }
+}
+/** Find the product in Reliance's / Croma's catalogue. Returns { hit, data } or { why }. */
+async function findInCatalogue(context, job, store, bad = []) {
+  const name = [job.name, job.variant].filter(Boolean).join(' ');
+  const badKeys = new Set(bad.map(b => urlKey(store, b)));
+  const ean = job.ean && /^\d{8,14}$/.test(job.ean) ? job.ean : null;
+  const queries = [...(ean ? [ean] : []), ...searchQueries(job.name, job.brand, job.variant)];
+  let seen = 0, answered = false, best = null;
+  for (const q of [...new Set(queries)]) {
+    const items = store === 'reliance' ? await relianceSearch(context, q) : await cromaSearch(context, q);
+    if (!items) continue;
+    answered = true;
+    seen += items.length;
+    const cands = items.map(x => ({
+      href: store === 'reliance' ? `https://www.reliancedigital.in/product/${x.slug}` : new URL(x.url, 'https://www.croma.com').href,
+      text: x.name, x,
+    })).filter(c => c.x.name && !badKeys.has(urlKey(store, c.href)));
+    const byEan = ean && cands.find(c => (c.x.ean || []).includes(ean));
+    const hit = byEan ? { ...byEan, score: 1 } : pickBest(name, job.brand, cands);
+    if (hit && (!best || hit.score > best.score)) best = hit;
+    if (best && (byEan || best.score >= 0.8)) break;
+  }
+  if (!best) return { hit: null, why: answered ? `${store} catalogue: ${seen} listings, none ours; ` : `${store} catalogue: no answer; ` };
+  const x = best.x;
+  const price = Number(x.price) || null, mrp = Number(x.mrp) || null;
+  return {
+    hit: { href: best.href, text: x.name },
+    data: price ? { price, mrp: mrp && mrp > price ? mrp : null, inStock: store === 'reliance' ? x.sellable !== false : null, title: x.name, url: best.href, how: `${store === 'reliance' ? 'Reliance' : 'Croma'} catalogue` } : null,
+  };
+}
+
 // ── Brand sites: the store's own catalogue ────────────────────────────────
 // Each brand's Indian store is searched the way the site itself works (see
 // BRAND_SITE_RULES): Shopify's search API, VTEX's catalogue API, or the list of
@@ -907,6 +971,12 @@ async function scrapeStore(context, job, s) {
       }
       const domain = s.store === 'official' ? s.officialSite : STORE_DOMAIN[s.store];
       let why = '';
+      // 0. Reliance / Croma: their own catalogue search first — exact names, prices, EANs.
+      if (s.store === 'reliance' || s.store === 'croma') {
+        const c = await findInCatalogue(context, job, s.store, [...(s._bads || []), ...(s._bad ? [s._bad] : [])]).catch(e => ({ hit: null, why: `${s.store} catalogue: ${String(e.message).slice(0, 60)}; ` }));
+        if (c.hit) { url = c.hit.href; s._data = c.data || null; }
+        else why += c.why || '';
+      }
       // 0. Brand sites: the store's own catalogue first (search API / sitemap) — exact and quick.
       if (s.store === 'official') {
         const b = await findOnBrandSite(context, job, domain, [...(s._bads || []), ...(s._bad ? [s._bad] : [])]).catch(e => ({ hit: null, why: `brand site: ${String(e.message).slice(0, 60)}; ` }));
@@ -1017,6 +1087,10 @@ async function scrapeStore(context, job, s) {
     });
     let blocked = await load();
     if (blocked) { await sleep(4000 + Math.random() * 3000); blocked = await load(); } // one polite retry
+    const cat = (s.store === 'reliance' || s.store === 'croma') && s._data?.price ? s._data : null;
+    if (blocked && cat) {
+      return { store: s.store, url, status: 'ok', price: cat.price, mrp: cat.mrp, inStock: cat.inStock, title: cat.title, priceText: '₹' + cat.price, offers: [], note: `Price from the ${cat.how} (page did not load)` };
+    }
     if (blocked && sd?.price) {
       return { store: s.store, url, status: 'ok', price: sd.price, mrp: sd.mrp, inStock: sd.inStock, title: sd.title, priceText: '₹' + sd.price, offers: [], note: `Price from the brand's ${sd.how}` };
     }
@@ -1076,6 +1150,13 @@ async function scrapeStore(context, job, s) {
     if (s.store === 'official' && r.fromLd && !sd) {
       const w = memOf([job.name, job.variant].filter(Boolean).join(' '));
       if (w.ram != null || w.rom != null) { r.price = null; r.priceText = null; }
+    }
+    // Reliance / Croma: the catalogue entry the product was found by stands in for a page
+    // that didn't draw its title or price ("Buy undefined").
+    if (cat) {
+      if (!r.title || /\bundefined\b/i.test(r.title)) r.title = cat.title;
+      if (!r.price) Object.assign(r, { price: cat.price, priceText: '₹' + cat.price, mrp: r.mrp ?? cat.mrp, ldPrice: null });
+      if (r.inStock == null && cat.inStock != null) r.inStock = cat.inStock;
     }
     if (sd?.price) {
       Object.assign(r, { price: sd.price, priceText: '₹' + sd.price, mrp: sd.mrp ?? r.mrp, inStock: sd.inStock ?? r.inStock, ldPrice: null });
