@@ -74,6 +74,19 @@ async function launch() {
     viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'Accept-Language': 'en-IN,en;q=0.9' },
   });
   await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+  // Croma decides stock by delivery pincode (Mumbai by default): use the showroom's
+  // pincode so "available" means available in Chandigarh.
+  await context.addInitScript(pin => {
+    try {
+      if (!/(^|\.)croma\.com$/.test(location.hostname)) return;
+      if (localStorage.getItem('itaPin') === pin.code) return;
+      localStorage.setItem('pincodeLatLong', JSON.stringify({ pincode: pin.code, latitude: pin.lat, longitude: pin.lng }));
+      localStorage.setItem('3hrPincode', JSON.stringify(pin.code));
+      localStorage.setItem('cityName', pin.city);
+      localStorage.setItem('itaPin', pin.code);
+      document.cookie = `localStoragePincode="${pin.code}"; path=/; domain=.croma.com`;
+    } catch { /* storage blocked — Croma falls back to its default */ }
+  }, { code: process.env.PINCODE || '160022', lat: 30.7333, lng: 76.7794, city: process.env.PIN_CITY || 'Chandigarh' });
   // Images, fonts and video are not needed to read a price — skipping them roughly halves load time.
   await context.route('**/*', route => (['image', 'media', 'font'].includes(route.request().resourceType()) ? route.abort() : route.continue()));
   return { browser, context };
@@ -839,7 +852,10 @@ function readPage(store) {
     // make an unavailable product look buyable.
     const btns = [...document.querySelectorAll('button, a, input[type="submit"], [role="button"]')]
       .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top + window.scrollY < 2500; })
-      .map(b => ({ t: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().toLowerCase(), off: b.disabled || b.getAttribute('aria-disabled') === 'true' }));
+      .map(b => ({ t: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().toLowerCase(),
+        // Greyed-out buttons that can't be clicked: disabled, or switched off by style /
+        // class (Croma: "disableBuyNow", pointer-events: none).
+        off: b.disabled || b.getAttribute('aria-disabled') === 'true' || /\bdisable/i.test(String(b.className)) || getComputedStyle(b).pointerEvents === 'none' }));
     // Flipkart writes "Buy now at ₹15,999" / "Add to cart" with extra words — match the start.
     const BUY = /^(add to cart|buy now|add to bag|go to cart|buy)(\b|$)/;
     // Flipkart's buy bar is made of plain <div>s, not buttons — look at short visible
@@ -863,11 +879,13 @@ function readPage(store) {
     // A div that merely reads "Buy now" counts only when the page isn't offering "Notify me".
     const buyable = realBtn || (!notifyFirst && [...document.querySelectorAll('div, span, li')].some(el => el.childElementCount <= 3 && looksBuy(el)));
     const notifyBtn = btns.some(b => /^(notify me|notify when available)$/.test(b.t));
-    const unavailable = notifyBtn || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
+    // "Not Available for your pincode" (Croma) means it can't be bought here: out of stock for us.
+    const noDelivery = /(not available for (your|this) pin ?code|not deliverable|not serviceable|cannot be delivered|does not deliver)/.test(head);
+    const unavailable = notifyBtn || noDelivery || /(currently unavailable|out of stock|sold out|coming soon)/.test(head);
     // A working Buy / Add-to-cart button for the open variant beats everything else:
     // "Sold out" on another colour/variant swatch, or structured data describing a
     // different variant (Flipkart), must not mark the product out of stock.
-    if (buyable) res.inStock = true;
+    if (buyable && !noDelivery) res.inStock = true;
     else if (unavailable) res.inStock = false;
     const hitBtn = btns.find(b => !b.off && BUY.test(b.t) && !/emi|pay later/.test(b.t));
     res.stockWhy = buyable ? (hitBtn ? `button "${hitBtn.t.slice(0, 40)}"` : 'buy bar')
