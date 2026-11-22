@@ -724,13 +724,16 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
   return { itemId, price, products: ids.length };
 }
 
-// Diagnostics (temporary, read-only): items each marketplace could not find.
+// One-time (22-Nov-2026, asked by the admin): clear every "Not sold here" and look for
+// every product on every store again with the new store searches. Runs once — a
+// marker in price_watch_settings stops it repeating on later restarts.
 setTimeout(async () => {
   try {
-    for (const st of ['amazon', 'flipkart', 'reliance', 'croma']) {
-      const rows = await q(`SELECT i.name, i.brand, coalesce(c.name, '') category FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId" LEFT JOIN products p ON p.id=i."productId" LEFT JOIN product_categories c ON c.id=p."categoryId"
-        WHERE l.store=$1 AND l."notListed" AND i.active AND NOT i.dismissed ORDER BY 3, 2 LIMIT 220`, st);
-      logger.info({ st, n: rows.length, rows: rows.map((r: any) => `${r.category}|${r.brand}|${r.name}`) }, 'PW diag missing');
-    }
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag missing failed'); }
-}, 45_000).unref();
+    const done = await q(`SELECT 1 FROM price_watch_settings WHERE key='refind_all_2026_11_22'`);
+    if (done.length) return;
+    await x(`INSERT INTO price_watch_settings (key, value) VALUES ('refind_all_2026_11_22', '{"at":"start"}'::jsonb) ON CONFLICT (key) DO NOTHING`);
+    const cleared = await q(`DELETE FROM price_watch_links WHERE "notListed" AND "lockedByUser" RETURNING "itemId", store`);
+    const queued = await q(`UPDATE price_watch_items SET requested=true WHERE active AND NOT dismissed RETURNING id`);
+    logger.info({ cleared: cleared.length, queued: queued.length }, 'PW re-find all: not-sold-here cleared, every product queued');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW re-find all failed'); }
+}, 60_000).unref();

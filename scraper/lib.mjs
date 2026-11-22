@@ -114,12 +114,12 @@ export function titleScore(name, brand, candidate) {
   // Essential 2") — "Superior Pro Sound" further along the title is just marketing.
   const rawToks = String(candidate).toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) || [];
   const modelNums = all.filter(t => /\d/.test(t) && !SPEC.test(t));
-  const numAt = rawToks.map((t, i) => (modelNums.some(n => t === n || t.endsWith(n)) ? i : -1)).filter(i => i >= 0);
+  const numAt = rawToks.map((t, i) => (modelNums.some(n => t === n || t.endsWith(n) || (i > 0 && rawToks[i - 1] + t === n)) ? i : -1)).filter(i => i >= 0);
   for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
     if (all.includes(v) || all.some(t => t.startsWith(v) && /^\d/.test(t.slice(v.length)))) continue;   // "GO4" is "Go 4"
     // "ULT Field 1 Wireless Ultra Portable", "Max Bass": an adjective before a plain
     // describing word, not a model variant.
-    const ADJ = { ultra: /^(portable|slim|thin|compact|light|lightweight)$/, max: /^(bass|sound|volume|battery)$/ };
+    const ADJ = { ultra: /^(portable|slim|thin|compact|light|lightweight)$/, max: /^(bass|sound|volume|battery)$/, pro: /^(sound|audio|grade|gaming)$/ };
     const adjective = i => !!ADJ[rawToks[i]] && ADJ[rawToks[i]].test(rawToks[i + 1] || '');
     const near = numAt.length
       ? rawToks.some((t, i) => t === v && !adjective(i) && numAt.some(d => i >= d - 1 && i <= d + 2))
