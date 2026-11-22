@@ -670,3 +670,6 @@ CREATE TABLE IF NOT EXISTS price_watch_group_products (
   "itemId" TEXT NOT NULL REFERENCES price_watch_items(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS price_watch_group_products_item ON price_watch_group_products("itemId");
+
+-- Offer lines as shown on the store page, kept with each result (to check offers).
+ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS "offerRaw" TEXT;

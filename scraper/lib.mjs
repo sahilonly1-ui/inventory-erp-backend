@@ -179,7 +179,7 @@ export function toNumber(text) {
 const BANKS = [
   // Co-branded cards first, so "Flipkart Axis" isn't reported as plain Axis.
   ['Amazon Pay ICICI', /amazon pay icici/i], ['Flipkart Axis', /flipkart axis/i], ['Flipkart SBI', /flipkart sbi/i],
-  ['Swiggy HDFC', /swiggy hdfc/i], ['Tata Neu HDFC', /tata neu/i], ['Airtel Axis', /airtel axis/i],
+  ['Swiggy HDFC', /swiggy hdfc/i], ['Tata Neu SBI', /tata neu (sbi|state bank)/i], ['Tata Neu HDFC', /tata neu (hdfc|bank)/i], ['Tata Neu UPI', /tata neu upi/i], ['Airtel Axis', /airtel axis/i],
   ['HDFC Bank', /\bhdfc\b/i], ['ICICI Bank', /\bicici\b/i], ['SBI Card', /\bsbi\b/i], ['Axis Bank', /\baxis\b/i],
   ['Kotak', /\bkotak\b/i], ['IDFC FIRST Bank', /\bidfc\b/i], ['OneCard', /\bone ?card\b/i], ['Federal Bank', /\bfederal\b/i],
   ['RBL Bank', /\brbl\b/i], ['Bank of Baroda', /\b(bob ?card|bank of baroda|bob)\b/i], ['AU Bank', /\bau (small|bank)\b/i],
@@ -189,7 +189,7 @@ const BANKS = [
   ['Paytm', /\bpaytm\b/i],
   ['BHIM UPI', /\bbhim\b/i], ['Bajaj Finserv', /\bbajaj\b/i], ['Jio Finance', /\bjio ?finance\b/i],
 ];
-const OFFER_HINT = /(bank offer|cashback|instant discount|no cost emi|\bemi\b|credit card|debit card|\b(off|discount)\b.*(card|bank)|(card|bank).*\b(off|discount)\b)/i;
+const OFFER_HINT = /(bank offer|cashback|instant discount|no cost emi|\bemi\b|credit card|debit card|neu ?coins?|\bupi\b.*(off|back|discount)|\b(off|discount)\b.*(card|bank)|(card|bank).*\b(off|discount)\b)/i;
 const RUPEE = /(?:₹|\brs\.?(?=\s?\d)|\binr(?=\s?\d))\s?([\d,]+(?:\.\d+)?)/gi;
 
 /** Picks out offer sentences from page text, joining a short line with its neighbours. */
@@ -211,13 +211,13 @@ export function offerBlocks(text) {
 }
 
 export function parseOffer(text) {
-  const t = text.replace(/\s+/g, ' ').trim();
+  const t = String(text).replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ').trim();
   const bank = BANKS.find(([, re]) => re.test(t))?.[0] ?? null;
   const lower = t.toLowerCase();
 
   let offerType = 'other';
   if (/no cost emi/.test(lower)) offerType = 'no_cost_emi';
-  else if (/cashback|\d\s?% back\b|₹\s?[\d,]+ back\b/.test(lower)) offerType = 'cashback';
+  else if (/cashback|neu ?coins?|reward points|\d\s?% back\b|₹\s?[\d,]+ back\b/.test(lower)) offerType = 'cashback';
   else if (/exchange/.test(lower) && !bank) offerType = 'exchange';
   else if (/coupon/.test(lower) && !bank) offerType = 'coupon';
   else if (/(discount|\boff\b|save)/.test(lower)) offerType = 'instant_discount';
@@ -227,19 +227,22 @@ export function parseOffer(text) {
   const notOnEmi = /not (applicable|valid|available) (on|for) emi/.test(lower);
   // "Non EMI" is not an EMI mention.
   const emi = /\bemi\b/.test(lower.replace(/non[- ]?emi/g, ' ')) && offerType !== 'no_cost_emi' && !notOnEmi;
-  const nonEmi = notOnEmi || /(non[- ]?emi|full swipe|one[- ]?time|without emi)/.test(lower);
+  const nonEmi = notOnEmi || /(non[- ]?emi|full[- ]?swipe|one[- ]?time|without emi)/.test(lower);
   const mode = emi && nonEmi ? 'EMI & Full swipe' : nonEmi ? 'Full swipe' : emi ? (/(emi and non|emi & non|emi\/non)/.test(lower) ? 'EMI & Full swipe' : 'EMI') : null;
 
   const pcts = [...t.matchAll(/(\d+(?:\.\d+)?)\s?%/g)].map(m => Number(m[1]));
   // "5% back for Prime members, 3% for others": count what every customer gets.
-  const percent = !pcts.length ? null : (/prime/i.test(t) && pcts.length > 1 ? Math.min(...pcts) : pcts[0]);
+  // "…10% on Infinity variant and 7% on Plus variant" (card tiers): count the lower one.
+  const percent = !pcts.length ? null : ((/prime/i.test(t) || /variant|tier/i.test(t)) && pcts.length > 1 ? Math.min(...pcts) : pcts[0]);
   // Amounts "per month" are EMI instalments, never a saving.
   const rupees = [...t.matchAll(RUPEE)]
     .filter(m => !/^\s*(\/-)?\s*(\/\s?m(o|onth)?\b|per month|p\.?m\.?\b|x\s?\d+\s?m)/i.test(t.slice(m.index + m[0].length, m.index + m[0].length + 16)))
     .map(m => ({ v: Number(m[1].replace(/,/g, '')), at: m.index }));
   const minM = t.match(/(?:\bmin(?:imum)?\.?(?:\s*(?:txn|transaction|purchase|order|cart))?(?:\s*(?:value|amount))?(?:\s*of)?|(?:orders?|purchases?|transactions?|txns?)\s*(?:value\s*)?(?:of|above|over|worth)|above)\s*:?\s*(?:₹|rs\.?|inr)?\s?([\d,]+)/i);
   const minTxn = minM ? Number(minM[1].replace(/,/g, '')) : null;
-  const upTo = t.match(/(?:up\s?to|upto|\bmax(?:imum)?(?: discount| cashback)?(?: of)?)\s*(?:₹|\brs\.?|\binr)\s?([\d,]+)/i);
+  // "up to ₹1,500"; NeuCoins / points caps are written without ₹ ("up to 250").
+  const upTo = t.match(/(?:up\s?to|upto|\bmax(?:imum)?(?: discount| cashback)?(?: of)?)\s*(?:₹|\brs\.?|\binr)\s?([\d,]+)/i)
+    || (/neu ?coins?|points/i.test(t) ? t.match(/(?:up\s?to|upto)\s+([\d,]+)(?![\d,]*\s*%)(?!\s*(?:months?|days?))/i) : null);
   let maxDiscount = upTo ? Number(upTo[1].replace(/,/g, '')) : null;
 
   let amount = null;
@@ -260,10 +263,29 @@ export function parseOffer(text) {
   };
 }
 
+/** The offer-looking lines of a page, as shown — kept with each result so offers can be checked. */
+export function offerRawLines(text) {
+  const seen = new Set();
+  return String(text || '').split('\n').map(l => l.replace(/\s+/g, ' ').trim())
+    .filter(l => l.length >= 8 && l.length <= 300 && /(offer|bank|card|cashback|discount|\bemi\b|\bupi\b|neu ?coin|% off|₹\s?[\d,]+ off|save ₹)/i.test(l) && !seen.has(l) && seen.add(l))
+    .slice(0, 50).join('\n').slice(0, 6000);
+}
+
+export function isEmiRow(b) {
+  const l = String(b).toLowerCase();
+  if (/^pay ₹?\s?[\d,]+\s*•/.test(l)) return true;
+  const saving = /(instant discount|cashback|\boff\b|save|saving|discount of|back on|neu ?coins?)/.test(l);
+  if (saving) return false;
+  return /(standard emi|emi starts?|emi from|₹\s?[\d,.]+\s*\/\s*\d+\s*m\b|\/\s*mo(nth)?\b|per month|effective price)/.test(l);
+}
+
 /** Text → structured offers, de-duplicated, only real bank/payment offers. */
 export function extractOffers(text) {
   const seen = new Set(); const out = [];
   for (const b of offerBlocks(text)) {
+    // An EMI plan row ("Standard EMI ₹4,427.22/3m", "₹949/month") or a tab label
+    // ("Pay ₹5,399 • No Cost EMI Exchange offer") is not an offer.
+    if (isEmiRow(b)) continue;
     const o = parseOffer(b);
     if (!o.bank && !['cashback', 'no_cost_emi'].includes(o.offerType)) continue;
     if (!o.amount && !o.percent && !o.maxDiscount && o.offerType !== 'no_cost_emi') continue;

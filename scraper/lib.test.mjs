@@ -396,3 +396,20 @@ console.log('debug folder cleanup ok');
   for (const [n, b, c, want] of T) ok((titleScore(n, b, c) > 0.55) === want, `${n} vs ${c}`);
   console.log('stock codes ok');
 }
+{
+  const { extractOffers, parseOffer } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const rel = 'STANDARD CHARTERED BANK CREDIT CARD - Standard EMI ₹4,427.22/3m\nRBL BANK CREDIT CARD - Standard EMI ₹4,427.22/3m\n7.5% Instant Discount with Punjab National Bank Credit Card';
+  const r = extractOffers(rel);
+  ok(r.length === 1 && r[0].bank === 'PNB' && r[0].percent === 7.5, 'reliance emi rows ' + JSON.stringify(r));
+  ok(extractOffers('Pay ₹5,399 • No Cost EMI Exchange offer').length === 0, 'flipkart tab label');
+  const c = parseOffer('Get upto 10% NeuCoins with the Tata Neu SBI Bank Credit Card (10% on Infinity variant and 7% on Plus variant). Offer valid on full‑swipe purchases');
+  ok(c.bank === 'Tata Neu SBI' && c.offerType === 'cashback' && c.percent === 7 && c.mode === 'Full swipe', 'neucoins ' + JSON.stringify(c));
+  const u = parseOffer('Get 10% Neu Coins up to 250 on payments via Tata Neu UPI on transactions of Rs.300 or more.');
+  ok(u.bank === 'Tata Neu UPI' && u.offerType === 'cashback' && u.maxDiscount === 250 && u.minTxn === 300, 'neu upi ' + JSON.stringify(u));
+  const f = parseOffer('Bank Offer 10% off up to ₹1,000 on HDFC Bank Credit Card EMI Transactions, on orders of ₹5,000 and above T&C');
+  ok(f.bank === 'HDFC Bank' && f.percent === 10 && f.maxDiscount === 1000 && f.minTxn === 5000 && f.mode === 'EMI', 'flipkart hdfc ' + JSON.stringify(f));
+  const g = parseOffer('Bank Offer 5% cashback on Flipkart Axis Bank Credit Card upto ₹4,000 per statement quarter');
+  ok(g.bank === 'Flipkart Axis' && g.offerType === 'cashback' && g.percent === 5 && g.maxDiscount === 4000, 'flipkart axis ' + JSON.stringify(g));
+  console.log('offer parsing ok');
+}

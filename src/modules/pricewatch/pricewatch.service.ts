@@ -231,8 +231,8 @@ export async function listItems() {
   if (!ids.length) return [];
 
   const [latest, good, links] = await Promise.all([
-    q(`SELECT DISTINCT ON ("itemId", store) * FROM price_snapshots WHERE "itemId" = ANY($1::text[]) ORDER BY "itemId", store, "fetchedAt" DESC`, ids),
-    q(`SELECT DISTINCT ON ("itemId", store) * FROM price_snapshots WHERE "itemId" = ANY($1::text[]) AND status IN ('ok','suspect') ORDER BY "itemId", store, "fetchedAt" DESC`, ids),
+    q(`SELECT DISTINCT ON ("itemId", store) id, "itemId", store, url, status, price, mrp, "inStock", title, offers, "effectivePrice", "bestOffer", "priceText", notes, method, "fetchedAt" FROM price_snapshots WHERE "itemId" = ANY($1::text[]) ORDER BY "itemId", store, "fetchedAt" DESC`, ids),
+    q(`SELECT DISTINCT ON ("itemId", store) id, "itemId", store, url, status, price, mrp, "inStock", title, offers, "effectivePrice", "bestOffer", "priceText", notes, method, "fetchedAt" FROM price_snapshots WHERE "itemId" = ANY($1::text[]) AND status IN ('ok','suspect') ORDER BY "itemId", store, "fetchedAt" DESC`, ids),
     q(`SELECT * FROM price_watch_links WHERE "itemId" = ANY($1::text[])`, ids),
   ]);
   const num = (v: any) => (v === null || v === undefined ? null : Number(v));
@@ -500,7 +500,7 @@ export interface AgentOffer {
 }
 export interface AgentResult {
   store: string; url?: string | null; status?: string; price?: number | null; mrp?: number | null;
-  inStock?: boolean | null; title?: string | null; priceText?: string | null; offers?: AgentOffer[]; note?: string | null;
+  inStock?: boolean | null; title?: string | null; priceText?: string | null; offers?: AgentOffer[]; note?: string | null; offerRaw?: string | null;
 }
 
 const OFFER_TYPES = ['instant_discount', 'cashback', 'no_cost_emi', 'exchange', 'coupon', 'other'];
@@ -566,6 +566,7 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
     inStock: typeof r.inStock === 'boolean' ? r.inStock : null,
     title: r.title ? String(r.title).slice(0, 300) : null,
     priceText: r.priceText ? String(r.priceText).slice(0, 80) : null,
+    offerRaw: r.offerRaw ? String(r.offerRaw).slice(0, 6000) : null,
   };
 }
 
@@ -609,10 +610,11 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
     }
     {
       await x(
-        `INSERT INTO price_snapshots("itemId",store,url,status,price,mrp,"inStock",title,offers,"effectivePrice","bestOffer","priceText",notes,method)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`,
+        `INSERT INTO price_snapshots("itemId",store,url,status,price,mrp,"inStock",title,offers,"effectivePrice","bestOffer","priceText",notes,method,"offerRaw")
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15)`,
         itemId, r.store, v.url ?? link?.url ?? null, v.status, v.price ?? null, v.mrp ?? null, v.inStock ?? null, v.title ?? null,
-        JSON.stringify(v.offers ?? []), v.effectivePrice ?? null, v.bestOffer ?? null, v.priceText ?? null, (v.notes ?? []).join(' · ') || null, method);
+        JSON.stringify(v.offers ?? []), v.effectivePrice ?? null, v.bestOffer ?? null, v.priceText ?? null, (v.notes ?? []).join(' · ') || null, method,
+        (v as any).offerRaw ?? null);
     }
     saved.push({ store: r.store, status: v.status, notes: v.notes });
   }
@@ -737,22 +739,3 @@ setTimeout(async () => {
     logger.info({ cleared: cleared.length, queued: queued.length }, 'PW re-find all: not-sold-here cleared, every product queued');
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW re-find all failed'); }
 }, 60_000).unref();
-
-// Diagnostics (temporary, read-only): store results and offer quality.
-setTimeout(async () => {
-  try {
-    const cov = await q(`SELECT l.store, count(*) FILTER (WHERE l.url IS NOT NULL)::int linked, count(*) FILTER (WHERE l."notListed")::int not_listed
-      FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId" WHERE i.active AND NOT i.dismissed GROUP BY 1`);
-    const st = await q(`WITH last AS (SELECT DISTINCT ON ("itemId", store) * FROM price_snapshots ORDER BY "itemId", store, "fetchedAt" DESC)
-      SELECT store, status, method, count(*)::int n, count(*) FILTER (WHERE jsonb_array_length(offers) > 0)::int with_offers,
-        count(*) FILTER (WHERE "bestOffer" IS NOT NULL)::int with_best, max("fetchedAt") last
-      FROM last GROUP BY 1,2,3 ORDER BY 1,4 DESC`);
-    const req = await q(`SELECT count(*) FILTER (WHERE requested)::int requested, count(*)::int total FROM price_watch_items WHERE active AND NOT dismissed`);
-    logger.info({ cov, st, req, localSeen: localSeen ? new Date(localSeen).toISOString() : null }, 'PW diag q1');
-    for (const store of ['amazon', 'flipkart', 'reliance', 'croma', 'official']) {
-      const ex = await q(`SELECT i.name, s.price::float, s."bestOffer", s."effectivePrice"::float, s.offers FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
-        WHERE s.store=$1 AND s.status='ok' AND s."fetchedAt" > now() - interval '24 hours' AND jsonb_array_length(s.offers) > 0 ORDER BY s."fetchedAt" DESC LIMIT 4`, store);
-      logger.info({ store, ex: ex.map((e: any) => ({ ...e, offers: e.offers.slice(0, 6) })) }, 'PW diag offers');
-    }
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag q1 failed'); }
-}, 45_000).unref();

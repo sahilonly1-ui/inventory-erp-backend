@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, offerRawLines, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -625,6 +625,12 @@ async function expandOffers(page, store) {
     : [];
   for (const sel of tries) {
     try { const el = page.locator(sel).first(); if (await el.count()) { await el.click({ timeout: 2500 }); await sleep(1500); break; } } catch { /* next */ }
+  }
+  // Flipkart's offer area opens on its "Bank offers" tab / "View N more offers".
+  if (store === 'flipkart') {
+    for (const re of [/^bank offers?$/i, /^(view|show) (all|\d+ more) offers?$/i, /^\+\s?\d+ more$/i]) {
+      try { const el = page.getByText(re).first(); if (await el.count()) { await el.click({ timeout: 2500 }); await sleep(1200); } } catch { /* fine */ }
+    }
   }
   // "View 5 more offers", "View all offers", "See all", "+3 more offers"
   try {
@@ -1288,7 +1294,7 @@ async function scrapeStore(context, job, s) {
     } else offers = extractOffers(r.text);
     return {
       store: s.store, url: sd?.url || page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
-      title: r.title, priceText: r.priceText, offers,
+      title: r.title, priceText: r.priceText, offers, offerRaw: offerRawLines(r.text),
       note: s.store === 'reliance' && !/store api/.test(r.stockWhy || '') ? `Stock read from the page (${r.stockWhy}) — Reliance's own stock data didn't load`
         : r.ldPrice && Math.abs(r.ldPrice - r.price) > 1 ? `Structured data says ₹${r.ldPrice}` : null,
     };
