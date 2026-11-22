@@ -559,7 +559,10 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   const best = offers.filter(o => !/^emi$/i.test(String(o.mode ?? '').trim()) && o.offerType !== 'no_cost_emi')
     .sort((a, b) => b.value - a.value)[0];
   const effectivePrice = best && best.value > 0 ? price - best.value : null;
-  const bestOffer = best && best.value > 0 ? [best.bank, best.cardType, best.mode].filter(Boolean).join(' · ') : null;
+  // "₹1,500 off · HDFC Bank · Credit Card · Full swipe" — what the saving is, then on what.
+  const bestOffer = best && best.value > 0
+    ? [`₹${best.value.toLocaleString('en-IN')} ${best.offerType === 'cashback' ? 'cashback' : 'off'}`, best.bank, best.cardType, best.mode].filter(Boolean).join(' · ')
+    : null;
   if (r.note) notes.push(String(r.note).slice(0, /^Stock from:/.test(String(r.note)) ? 1100 : 300));
   return {
     status, url, price, mrp, offers, effectivePrice, bestOffer, notes,
