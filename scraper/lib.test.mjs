@@ -365,3 +365,20 @@ console.log('debug folder cleanup ok');
   ok(brandScore('Noise ALT Buds Wireless Bluetooth Earbuds Chosen Grey', 'Noise', 'Noise Noise ALT Buds S Truly Wireless') === 0, 'buds s');
   console.log('single letters ok');
 }
+{
+  const { titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const T = [
+    ['JBL GO4 Portable Bluetooth Speaker', 'JBL', 'JBL Go 4, Wireless Ultra Portable, 4.2 W Bluetooth Speaker, IP67', true],
+    ['Sony Wireless Stereo Headset WH-CH520', 'Sony', 'SONY WH-CH520 Bluetooth Headphone with Mic (Digital Sound Enhancement Engine, On Ear, Black)', true],
+    ['Marshall Acton 3 Bluetooth Speaker', 'Marshall', 'Marshall Acton III 60W Portable Bluetooth Speaker', true],
+    ['Moto G37 Power 5G 4/64GB', 'Motorola', 'MOTOROLA g37 Power (PANTONE Nautical Blue, 64 GB) (4 GB RAM)', true],
+    ['Infinix Note Edge 5G 8/128GB', 'Infinix', 'Infinix Note edge (Silk Green, 128 GB) (8 GB RAM)', true],
+    ['Redmi 13 5G 6/128GB', 'Xiaomi', 'Redmi 13 4G (Black, 128 GB) (6 GB RAM)', false],
+    ['JBL Go 3', 'JBL', 'JBL Go 4 Portable Speaker', false],
+    ['JBL GO4 Portable Bluetooth Speaker', 'JBL', 'JBL Go Essential 2 Portable Speaker', false],
+    ['Moto G37 Power 5G 4/64GB', 'Motorola', 'MOTOROLA g37 (PANTONE Nautical Blue, 64 GB) (4 GB RAM)', false],
+  ];
+  for (const [n, b, c, want] of T) ok((titleScore(n, b, c) > 0.55) === want, `${n} vs ${c}`);
+  console.log('marketplace fixes ok');
+}

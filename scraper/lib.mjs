@@ -29,7 +29,8 @@ const GENERIC = new Set(['soundbar', 'sound', 'subwoofer', 'woofer', 'channel', 
   'speakers', 'earbuds', 'earphones', 'headphones', 'headphone', 'tws', 'true', 'smart', 'watch', 'smartwatch', 'tv', 'led', 'oled', 'qled',
   'inch', 'inches', 'cm', 'display', 'deep', 'bass', 'stereo', 'audio', 'music', 'waterproof', 'ultra', 'portable', 'party', 'karaoke',
   'microphone', 'mic', 'mics', 'noise', 'cancelling', 'canceling', 'anc', 'hdmi', 'earc', 'optical', 'bluetooth', 'wireless', 'wired', 'mobile', 'tablet',
-  '5g', '4g', 'dual', 'sim', 'ram', 'rom', 'storage', 'memory', 'eco']);
+  '5g', '4g', 'dual', 'sim', 'ram', 'rom', 'storage', 'memory', 'eco', 'headset', 'headsets', 'earphone', 'earpods', 'earbods', 'buds', 'neckband',
+  'foldable', 'calling', 'player', 'over', 'ear', 'on', 'speaker', 'fitness', 'tracker', 'charging', 'case', 'generation', 'gen', 'series']);
 const STOP = new Set(['with', 'and', 'the', 'for', 'of', 'in', 'by', 'new', 'latest', 'edition', 'version', 'speaker', 'speakers',
   'portable', 'bluetooth', 'wireless', 'wifi', 'wi', 'fi', 'smartphone', 'mobile', 'phone', 'android', 'india', 'black', 'white',
   'blue', 'grey', 'gray', 'red', 'green', 'silver', 'gold', 'party', 'box']);
@@ -62,6 +63,13 @@ const joinUnits = s => String(s || '').replace(/(\d)\s+(gb|tb|mb)\b/gi, '$1$2');
 export function titleScore(name, brand, candidate) {
   name = joinUnits(name);
   candidate = joinUnits(candidate);
+  // "Acton III" on the store is "Acton 3" in the ERP.
+  candidate = String(candidate).replace(/\b([A-Za-z]{2,})\s+(II|III|IV|VI)\b/g, (m, w, r) => `${w} ${{ II: 2, III: 3, IV: 4, VI: 6 }[r.toUpperCase()]}`);
+  // "5G" in our name is not needed in a title that leaves it out — only a title that
+  // names the other network ("4G") is a different phone.
+  const net5 = /\b5g\b/i.test(name), net4 = /\b4g\b/i.test(name);
+  if ((net5 && /\b4g\b/i.test(candidate) && !/\b5g\b/i.test(candidate)) || (net4 && /\b5g\b/i.test(candidate) && !/\b4g\b/i.test(candidate))) return 0;
+  name = String(name).replace(/\b[45]g\b/gi, ' ');
   // Bracketed extras in ERP names — SKU codes "(JBLCLIP5SQUAD)", colours
   // "(Black)" — aren't in store titles, so they don't count. Storage/RAM in
   // brackets "(8GB/256GB)" does.
@@ -87,7 +95,8 @@ export function titleScore(name, brand, candidate) {
   const nameNoChannels = String(name).replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ');
   const candTokensAll = tokens(cand);
   const all = tokens(nameNoChannels);
-  const has = t => new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(cand) || new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(squashed);
+  const pairs = candTokensAll.slice(0, -1).map((c, i) => c + candTokensAll[i + 1]);   // "Go 4" → "go4"
+  const has = t => new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(cand) || new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(squashed) || pairs.includes(t);
   for (let i = 0; i < all.length; i++) {
     const t = all[i];
     if (!/\d/.test(t) || SPEC.test(t)) continue;
@@ -107,7 +116,7 @@ export function titleScore(name, brand, candidate) {
   const modelNums = all.filter(t => /\d/.test(t) && !SPEC.test(t));
   const numAt = rawToks.map((t, i) => (modelNums.some(n => t === n || t.endsWith(n)) ? i : -1)).filter(i => i >= 0);
   for (const v of ['pro', 'ultra', 'max', 'plus', 'lite', 'mini', 'fe', 'neo', 'essential', 'go', 'air', 'prime', 'club', 'encore']) {
-    if (all.includes(v)) continue;
+    if (all.includes(v) || all.some(t => t.startsWith(v) && /^\d/.test(t.slice(v.length)))) continue;   // "GO4" is "Go 4"
     // "ULT Field 1 Wireless Ultra Portable", "Max Bass": an adjective before a plain
     // describing word, not a model variant.
     const ADJ = { ultra: /^(portable|slim|thin|compact|light|lightweight)$/, max: /^(bass|sound|volume|battery)$/ };
