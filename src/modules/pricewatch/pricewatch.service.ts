@@ -758,10 +758,10 @@ setTimeout(async () => {
   try {
     for (const store of ['flipkart', 'amazon', 'reliance', 'croma', 'official']) {
       const st = await q(`SELECT status, count(*)::int n, count(*) FILTER (WHERE "offerRaw" IS NOT NULL AND "offerRaw" <> '')::int raw, count(*) FILTER (WHERE "bestOffer" IS NOT NULL)::int best
-        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '60 minutes' GROUP BY 1`, store);
+        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '90 minutes' GROUP BY 1`, store);
       const ex = await q(`SELECT i.name, s.price::float, s."bestOffer", left(s."offerRaw", 1600) raw FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
-        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '60 minutes' AND s."offerRaw" IS NOT NULL ORDER BY random() LIMIT 5`, store);
+        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '90 minutes' AND s."offerRaw" IS NOT NULL ORDER BY random() LIMIT 5`, store);
       logger.info({ store, st, ex }, 'PW diag raw');
     }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
-}, 55 * 60_000).unref();
+}, 60_000).unref();
