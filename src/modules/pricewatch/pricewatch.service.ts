@@ -729,7 +729,7 @@ setTimeout(async () => {
   try {
     for (const st of ['amazon', 'flipkart', 'reliance', 'croma']) {
       const rows = await q(`SELECT i.name, i.brand, i.category FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId"
-        WHERE l.store=$1 AND l."notListed" AND i.active AND NOT i.dismissed ORDER BY i.category, i.brand LIMIT 220`, [st]);
+        WHERE l.store=$1 AND l."notListed" AND i.active AND NOT i.dismissed ORDER BY i.category, i.brand LIMIT 220`, st);
       logger.info({ st, n: rows.length, rows: rows.map((r: any) => `${r.category}|${r.brand}|${r.name}`) }, 'PW diag missing');
     }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag missing failed'); }
