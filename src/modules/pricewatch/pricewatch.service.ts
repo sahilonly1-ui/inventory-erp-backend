@@ -723,3 +723,21 @@ export async function setOurPrice(itemId: string, price: number | null, userId: 
                 ON CONFLICT ("productId") DO UPDATE SET price=EXCLUDED.price, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()`, ids, price, userId);
   return { itemId, price, products: ids.length };
 }
+
+// Diagnostics (temporary, read-only): marketplace link coverage and failure reasons.
+setTimeout(async () => {
+  try {
+    const cov = await q(`SELECT l.store, count(*) FILTER (WHERE l.url IS NOT NULL AND l."lockedByUser")::int manual,
+        count(*) FILTER (WHERE l.url IS NOT NULL AND NOT l."lockedByUser")::int auto,
+        count(*) FILTER (WHERE l."notListed" AND l."lockedByUser")::int admin_not_sold,
+        count(*) FILTER (WHERE l."notListed" AND NOT l."lockedByUser")::int auto_not_listed
+      FROM price_watch_links l JOIN price_watch_items i ON i.id=l."itemId" WHERE i.active AND NOT i.dismissed GROUP BY 1`);
+    const items = await q(`SELECT count(*)::int n FROM price_watch_items WHERE active AND NOT dismissed`);
+    const why = await q(`SELECT s.store, s.method, s.status, left(regexp_replace(coalesce(s.notes,''), '"[^"]*"|\\d+', '#', 'g'), 120) why, count(*)::int n
+      FROM price_snapshots s WHERE s.store IN ('amazon','flipkart','reliance','croma') AND s."fetchedAt" > now() - interval '24 hours' AND s.status <> 'ok'
+      GROUP BY 1,2,3,4 ORDER BY 5 DESC LIMIT 45`);
+    const okc = await q(`SELECT s.store, s.method, count(*)::int n FROM price_snapshots s WHERE s.status='ok' AND s."fetchedAt" > now() - interval '24 hours' GROUP BY 1,2 ORDER BY 1`);
+    logger.info({ cov, items, okc }, 'PW diag mkt');
+    logger.info({ why }, 'PW diag mkt why');
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag mkt failed'); }
+}, 45_000).unref();
