@@ -12,7 +12,7 @@ for (const it of LIST) {
       if (!/json/.test(ct)) return;
       const t = await r.text();
       if (!new RegExp((it.net || 'price|Price|sellingPrice|salePrice').replace('(?i)', ''), 'i').test(t)) return;
-      nets.push({ u: r.url().slice(0, 160), n: t.length, s: (t.match(/"[a-zA-Z_]*(price|Price|amount)[a-zA-Z_]*"\s*:\s*"?[\d.]+/g) || []).slice(0, 6), head: it.net ? t.slice(0, 700) : undefined });
+      nets.push({ u: r.url().slice(0, 160), n: t.length, s: (t.match(/"[a-zA-Z_]*(price|Price|amount)[a-zA-Z_]*"\s*:\s*"?[\d.]+/g) || []).slice(0, 6), head: it.net ? t.slice(0, it.headLen || 700) : undefined, post: it.net ? (r.request().postData() || '').slice(0, 600) : undefined });
     } catch {}
   });
   let err = '';
