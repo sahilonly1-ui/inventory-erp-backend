@@ -14,7 +14,7 @@ const run = async () => {
     job.stores = [s];
     let r;
     try { r = await scrapeStore(context, job, s); } catch (e) { r = { status: 'crash', note: e.message }; }
-    console.log('PROBE ' + JSON.stringify({ store: j.store, name: j.name, secs: Math.round((Date.now() - t) / 1000), status: r.status, price: r.price, inStock: r.inStock, url: r.url, title: String(r.title || '').slice(0, 70), note: String(r.note || '').slice(0, 400) }));
+    console.log('PROBE ' + JSON.stringify({ store: j.store, name: j.name, secs: Math.round((Date.now() - t) / 1000), status: r.status, price: r.price, inStock: r.inStock, url: r.url, title: String(r.title || '').slice(0, 70), note: String(r.note || '').slice(0, 400), data: s._data || null }));
   }
 };
 await Promise.all([run(), run(), run()]);
