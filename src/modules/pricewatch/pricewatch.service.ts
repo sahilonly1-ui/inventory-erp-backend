@@ -761,11 +761,15 @@ setTimeout(async () => {
   try {
     for (const store of ['flipkart', 'amazon', 'reliance', 'croma', 'official']) {
       const st = await q(`SELECT status, count(*)::int n, count(*) FILTER (WHERE "offerRaw" IS NOT NULL AND "offerRaw" <> '')::int raw, count(*) FILTER (WHERE "bestOffer" IS NOT NULL)::int best
-        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '45 minutes' GROUP BY 1`, store);
+        FROM price_snapshots WHERE store=$1 AND "fetchedAt" > now() - interval '58 minutes' GROUP BY 1`, store);
       const ex = await q(`SELECT i.name, s.price::float, s."bestOffer", s.method, (SELECT string_agg(o->>'summary', ' || ') FROM jsonb_array_elements(s.offers) o) offs, left(s."offerRaw", 500) raw FROM price_snapshots s JOIN price_watch_items i ON i.id=s."itemId"
-        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '45 minutes' ORDER BY random() LIMIT 6`, store);
+        WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '58 minutes' ORDER BY random() LIMIT 6`, store);
       logger.info({ store, st, ex }, 'PW diag raw');
     }
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
+}, 60 * 60_000).unref();
+setTimeout(async () => {
+  try {
     // Prices far from the same product's other stores: likely the wrong listing.
     const odd = await q(`WITH l AS (SELECT DISTINCT ON (s."itemId", s.store) s."itemId", s.store, s.price::float p, s.title, s.url, s.method, s.status
         FROM price_snapshots s WHERE s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '3 days' ORDER BY s."itemId", s.store, s."fetchedAt" DESC),
@@ -773,5 +777,5 @@ setTimeout(async () => {
       SELECT i.name, l.store, l.p, round(m.med) med, l.status, l.method, left(l.title, 90) title, l.url FROM l JOIN m USING ("itemId") JOIN price_watch_items i ON i.id=l."itemId"
       WHERE l.p > m.med * 1.3 OR l.p < m.med * 0.7 ORDER BY abs(l.p - m.med) / m.med DESC LIMIT 40`);
     logger.info({ n: odd.length, odd }, 'PW diag odd');
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
-}, 60 * 60_000).unref();
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag odd failed'); }
+}, 4 * 60_000).unref();
