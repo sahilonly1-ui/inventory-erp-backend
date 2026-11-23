@@ -180,15 +180,20 @@ const BANKS = [
   // Co-branded cards first, so "Flipkart Axis" isn't reported as plain Axis.
   ['Amazon Pay ICICI', /amazon pay icici/i], ['Flipkart Axis', /flipkart axis/i], ['Flipkart SBI', /flipkart sbi/i],
   ['Swiggy HDFC', /swiggy hdfc/i], ['Tata Neu SBI', /tata neu (sbi|state bank)/i], ['Tata Neu HDFC', /tata neu (hdfc|bank)/i], ['Tata Neu UPI', /tata neu upi/i], ['Airtel Axis', /airtel axis/i],
-  ['HDFC Bank', /\bhdfc\b/i], ['ICICI Bank', /\bicici\b/i], ['SBI Card', /\bsbi\b/i], ['Axis Bank', /\baxis\b/i],
+  ['HDFC Bank', /\bhdfc\b/i], ['ICICI Bank', /\bicici\b/i], ['SBI Card', /\b(sbi|state bank)\b/i], ['Axis Bank', /\baxis\b/i],
   ['Kotak', /\bkotak\b/i], ['IDFC FIRST Bank', /\bidfc\b/i], ['OneCard', /\bone ?card\b/i], ['Federal Bank', /\bfederal\b/i],
   ['RBL Bank', /\brbl\b/i], ['Bank of Baroda', /\b(bob ?card|bank of baroda|bob)\b/i], ['AU Bank', /\bau (small|bank)\b/i],
   ['Yes Bank', /\byes bank\b/i], ['IndusInd Bank', /\bindusind\b/i], ['American Express', /\b(amex|american express)\b/i],
   ['HSBC', /\bhsbc\b/i], ['Standard Chartered', /\bstandard chartered\b/i], ['DBS Bank', /\bdbs\b/i], ['Citi', /\bciti\b/i],
   ['Canara Bank', /\bcanara\b/i], ['PNB', /\b(pnb|punjab national)\b/i], ['Union Bank', /\bunion bank\b/i],
+  ['IDBI Bank', /\bidbi\b/i], ['Indian Overseas Bank', /\b(indian overseas|iob)\b/i], ['Bandhan Bank', /\bbandhan\b/i],
+  ['Bank of India', /\bbank of india\b/i], ['Central Bank', /\bcentral bank\b/i],
   ['Paytm', /\bpaytm\b/i],
   ['BHIM UPI', /\bbhim\b/i], ['Bajaj Finserv', /\bbajaj\b/i], ['Jio Finance', /\bjio ?finance\b/i],
+  // Pay-later accounts last: an EMI line listing "HDFC Bank Debit Cards, Amazon Pay Later" is HDFC's.
+  ['Flipkart Pay Later', /flipkart (pay later|finance)/i], ['Amazon Pay Later', /amazon pay later/i],
 ];
+const bankOf = t => BANKS.find(([, re]) => re.test(t))?.[0] ?? null;
 const OFFER_HINT = /(bank offer|cashback|instant discount|no cost emi|\bemi\b|credit card|debit card|neu ?coins?|\bupi\b.*(off|back|discount)|\b(off|discount)\b.*(card|bank)|(card|bank).*\b(off|discount)\b)/i;
 const RUPEE = /(?:₹|\brs\.?(?=\s?\d)|\binr(?=\s?\d))\s?([\d,]+(?:\.\d+)?)/gi;
 
@@ -236,8 +241,10 @@ export function parseOffer(text) {
   // "…10% on Infinity variant and 7% on Plus variant" (card tiers): count the lower one.
   const percent = !pcts.length ? null : ((/prime/i.test(t) || /variant|tier/i.test(t)) && pcts.length > 1 ? Math.min(...pcts) : pcts[0]);
   // Amounts "per month" are EMI instalments, never a saving.
+  // "Get at ₹61,999 with ₹3,000 instant bank discount": the first is a price, not a saving.
   const rupees = [...t.matchAll(RUPEE)]
     .filter(m => !/^\s*(\/-)?\s*(\/\s?m(o|onth)?\b|per month|p\.?m\.?\b|x\s?\d+\s?m)/i.test(t.slice(m.index + m[0].length, m.index + m[0].length + 16)))
+    .filter(m => !/(\bat|\bfrom|\bprice:?|\bbuy for|\bpay)\s*$/i.test(t.slice(Math.max(0, m.index - 20), m.index)))
     .map(m => ({ v: Number(m[1].replace(/,/g, '')), at: m.index }));
   const minM = t.match(/(?:\bmin(?:imum)?\.?(?:\s*(?:txn|transaction|purchase|order|cart))?(?:\s*(?:value|amount))?(?:\s*of)?|(?:orders?|purchases?|transactions?|txns?)\s*(?:value\s*)?(?:of|above|over|worth)|above)\s*:?\s*(?:₹|rs\.?|inr)?\s?([\d,]+)/i);
   const minTxn = minM ? Number(minM[1].replace(/,/g, '')) : null;
@@ -288,6 +295,9 @@ export function extractOffers(text) {
     // ("Pay ₹5,399 • No Cost EMI Exchange offer") is not an offer.
     if (isEmiRow(b)) continue;
     const o = parseOffer(b);
+    // "Incl. of ₹3000 instant bank discount", "10% off with select bank cards": a real
+    // bank offer whose bank the page doesn't name.
+    if (!o.bank && ['instant_discount', 'cashback'].includes(o.offerType) && /\bbank\b|credit cards?|debit cards?|\bcards\b/i.test(b) && (o.amount || o.percent)) o.bank = 'Bank offer';
     if (!o.bank && !['cashback', 'no_cost_emi'].includes(o.offerType)) continue;
     if (!o.amount && !o.percent && !o.maxDiscount && o.offerType !== 'no_cost_emi') continue;
     const key = [o.bank, o.offerType, o.amount, o.percent, o.maxDiscount, o.cardType].join('|');
@@ -505,6 +515,19 @@ export function parseAmazonCards(text) {
     out.push({ bank, cardType: /credit/.test(low) ? 'Credit Card' : /debit/.test(low) ? 'Debit Card' : null, offerType: 'cashback', mode: 'Full swipe',
       amount, percent: null, maxDiscount: null, minTxn: null, summary: `₹${amount.toLocaleString('en-IN')} cashback (Amazon Pay balance) with ${card}` });
   }
+  // "Upto ₹474.97 discount on Axis Bank Credit Cards": one named bank — Amazon's figure
+  // for this product. ("…on select Credit Cards" names none and is skipped.)
+  for (const l of lines) {
+    if (/…$/.test(l)) continue;
+    const m = l.match(/^up\s?to ₹\s?([\d,]+(?:\.\d+)?) (?:instant )?discount on (.+?(credit|debit) cards?.*)$/i);
+    if (!m || /\bselect\b|\bbanks\b|\band\b|,/i.test(m[2])) continue;
+    const bank = bankOf(m[2]);
+    if (!bank) continue;
+    const amount = Math.floor(Number(m[1].replace(/,/g, '')));
+    const low = m[2].toLowerCase();
+    out.push({ bank, cardType: /credit/.test(low) && /debit/.test(low) ? 'Credit & Debit' : /credit/.test(low) ? 'Credit Card' : 'Debit Card', offerType: 'instant_discount',
+      mode: /\bemi\b/.test(low) ? 'EMI' : null, amount, percent: null, maxDiscount: null, minTxn: null, summary: `Up to ₹${amount.toLocaleString('en-IN')} off with ${m[2]}` });
+  }
   const seen = new Set();
   return out.filter(o => { const k = [o.bank, o.cardType, o.offerType, o.amount, o.mode].join('|'); return seen.has(k) ? false : seen.add(k); });
 }
@@ -517,22 +540,28 @@ export function parseAmazonCards(text) {
  */
 export function parseFlipkartOffers(text, cards = []) {
   const out = [];
+  // A card whose text is only the section's own words ("Bank offers • View EMI offers")
+  // is the section heading picked up with the first amount, not a card.
+  const bare = d => !String(d || '').replace(/\b(bank offers?|view emi offers|best value for you|apply|know more)\b|•/gi, '').trim();
   const add = (amount, desc, banks) => {
-    const d = String(desc || '').toLowerCase();
+    const d = String(desc || '').toLowerCase().replace(/view emi offers/g, ' ');
     if (!amount || /exchange/.test(d)) return;
     const bankTxt = [banks, desc].filter(Boolean).join(' ');
-    const bank = BANKS.find(([, re]) => re.test(bankTxt))?.[0] ?? (/multiple banks/i.test(bankTxt) ? 'Multiple Banks' : null);
-    const cardType = /credit/.test(d) && /debit/.test(d) ? 'Credit & Debit' : /credit/.test(d) ? 'Credit Card' : /debit/.test(d) ? 'Debit Card' : /upi/.test(d) ? 'UPI' : null;
+    const bank = bankOf(bankTxt) ?? (/multiple banks/i.test(bankTxt) ? 'Multiple Banks' : bare(desc) && !banks ? 'Bank offer' : null);
+    const cardType = /pay later/.test(d) ? 'Pay Later' : /credit/.test(d) && /debit/.test(d) ? 'Credit & Debit' : /credit/.test(d) ? 'Credit Card' : /debit/.test(d) ? 'Debit Card' : /upi/.test(d) ? 'UPI' : null;
     out.push({ bank, cardType, offerType: /cashback/.test(d) ? 'cashback' : 'instant_discount', mode: /\bemi\b/.test(d) ? 'EMI' : null,
       amount, percent: null, maxDiscount: null, minTxn: null,
       summary: `₹${amount.toLocaleString('en-IN')} off${cardType ? ` with ${cardType}` : ''}${bank ? ` (${bank})` : ''}${/cashback/.test(d) ? ' — includes cashback' : ''}` });
   };
   if (cards.length) {
-    for (const c of cards) {
+    const parsed = cards.map(c => {
       const [head, desc, banks] = String(c).split(' | ');
       const m = (head || '').match(/^₹\s?([\d,]+) off$/i);
-      if (m) add(Number(m[1].replace(/,/g, '')), desc, (banks || '').replace(/^banks:\s*/i, ''));
-    }
+      return m && { amount: Number(m[1].replace(/,/g, '')), desc, banks: (banks || '').replace(/^banks:\s*/i, '').trim() };
+    }).filter(Boolean);
+    // Heading-only cards count only when no real card was read.
+    const real = parsed.filter(p => p.banks || !bare(p.desc));
+    for (const p of (real.length ? real : parsed.slice(0, 1))) add(p.amount, p.desc, p.banks);
   } else {
     const lines = String(text || '').split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
     const start = lines.findIndex(l => /^bank offers?$/i.test(l));
@@ -549,6 +578,54 @@ export function parseFlipkartOffers(text, cards = []) {
   }
   const seen = new Set();
   return out.filter(o => { const k = [o.amount, o.cardType, o.offerType, o.bank].join('|'); return seen.has(k) ? false : seen.add(k); });
+}
+
+/**
+ * Reliance Digital's offers, from its own promotions API (the page asks
+ * /ext/raven-api/promotions?article-id=…): bank_offers carry percent, cap and minimum
+ * cart value; top_emi_offer_list carries flat instant discounts given on EMI.
+ * pg_offer (catalogue "_custom_meta") is Reliance's own best figure for the product —
+ * used when the promotions answer wasn't seen.
+ */
+export function relianceOffers(promo, pgOffer) {
+  const out = [];
+  const cardOf = pm => {
+    const p = String(pm || '').toUpperCase();
+    return /CC/.test(p) && /DC/.test(p) ? 'Credit & Debit' : /CC/.test(p) ? 'Credit Card' : /DC/.test(p) ? 'Debit Card' : /UPI/.test(p) ? 'UPI' : null;
+  };
+  for (const b of Array.isArray(promo?.bank_offers) ? promo.bank_offers : []) {
+    const desc = String(b.offer_desc || '').replace(/\s+/g, ' ').trim();
+    const codes = (b.bank_codes || []).filter(Boolean).join(' ');
+    const pm = String(b.payment_method || '').toUpperCase();
+    const bank = bankOf(`${codes} ${desc}`) ?? (pm === 'UPI' || /\bupi\b/i.test(desc) ? 'UPI' : codes || null);
+    const emi = pm === 'EMI' || /\bemi\b/i.test(desc);
+    const fixed = Number(b.fixed_offer_amount) || Number(b.bank_offer_discount) || null;
+    out.push({
+      bank, cardType: pm === 'EMI' ? (/debit/i.test(desc) ? 'Debit Card' : 'Credit Card') : cardOf(pm) ?? (/credit/i.test(desc) ? 'Credit Card' : /debit/i.test(desc) ? 'Debit Card' : null),
+      offerType: /cashback/i.test(`${b.discount_type} ${desc}`) ? 'cashback' : 'instant_discount', mode: emi ? 'EMI' : 'Full swipe',
+      amount: fixed, percent: fixed ? null : Number(b.offer_percentage) || null, maxDiscount: Number(b.offer_capping) || null, minTxn: Number(b.min_car_amount) || null,
+      summary: [desc, b.offer_capping ? `up to ₹${Number(b.offer_capping).toLocaleString('en-IN')}` : '', b.min_car_amount ? `min ₹${Number(b.min_car_amount).toLocaleString('en-IN')}` : ''].filter(Boolean).join(' · '),
+    });
+  }
+  const seen = new Set();
+  for (const e of Array.isArray(promo?.top_emi_offer_list) ? promo.top_emi_offer_list : []) {
+    const amt = Math.round(Number(e.offer_amount) || 0);
+    if (amt <= 0) continue;
+    const bank = bankOf(`${e.bank_code} ${e.bank_name}`) ?? e.bank_name ?? null;
+    const key = `${bank}|${amt}|${e.emi_card_type}`;
+    if (seen.has(key)) continue; seen.add(key);
+    out.push({ bank, cardType: /dc/i.test(e.emi_card_type) ? 'Debit Card' : 'Credit Card', offerType: 'instant_discount', mode: 'EMI',
+      amount: amt, percent: null, maxDiscount: null, minTxn: null,
+      summary: `₹${amt.toLocaleString('en-IN')} instant discount on ${String(e.emi_type || 'EMI').replace(/_/g, ' ').toLowerCase()} with ${e.card_name || bank}` });
+  }
+  if (!out.length && pgOffer && Number(pgOffer.discount) > 0) {
+    const t = String(pgOffer.bank || '');
+    const amt = Math.round(Number(pgOffer.discount));
+    out.push({ bank: bankOf(t) ?? (/upi/i.test(t) ? 'UPI' : t.replace(/\s*no cost emi\s*/i, '').trim() || null), cardType: null, offerType: 'instant_discount',
+      mode: /\bemi\b/i.test(t) || pgOffer.subtitle ? 'EMI' : null, amount: amt, percent: null, maxDiscount: null, minTxn: null,
+      summary: `₹${amt.toLocaleString('en-IN')} off with ${t} (Reliance's best offer)` });
+  }
+  return out;
 }
 
 // ── Reliability helpers ──────────────────────────────────────────────────────

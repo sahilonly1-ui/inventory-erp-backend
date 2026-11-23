@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, offerRawLines, parseFlipkartOffers, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
+import { debugFilesToDelete, classifyMiss, makeBudget, makeBreaker, isProductUrl, urlKey, pickBest, titleScore, extractOffers, searchQueries, storeSearchUrl, STORE_DOMAIN, MARKETPLACES, unwrapSearchLink, engineUrls, sitemapLocs, slugText, productSitemaps, googleUrl, isGoogleBlock, parseAmazonPanel, parseAmazonCards, parseOffer, wantedMemory, memoryOptionMatches, offerRawLines, parseFlipkartOffers, relianceOffers, brandSiteRule, brandUrlOk, brandScore, pickBrandPage as pickBrandPageAll, shopifyPick, memOf, memMatch, vtexPick } from './lib.mjs';
 
 const API = process.env.API_BASE || 'https://inventory-erp-backend-iplr.onrender.com/api/v1';
 const KEY = process.env.AGENT_KEY;
@@ -339,7 +339,8 @@ async function relianceSearch(context, q) {
     const r = await fetch(`/ext/raven-api/catalog/v1.0/products?q=${encodeURIComponent(q)}&page_id=*&page_no=1&page_size=24&page_type=number`, { headers: { accept: 'application/json' } });
     if (!r.ok) return null;
     const j = await r.json();
-    return (j.items || []).map(x => ({ name: x.name, slug: x.slug, sellable: x.sellable, price: x.price?.effective?.min, mrp: x.price?.marked?.min, ean: x.attributes?.identifier?.ean || [] }));
+    const pg = x => { try { return JSON.parse((x._custom_meta || []).find(m => m.key === 'pg_offer')?.value || 'null'); } catch { return null; } };
+    return (j.items || []).map(x => ({ name: x.name, slug: x.slug, sellable: x.sellable, price: x.price?.effective?.min, mrp: x.price?.marked?.min, ean: x.attributes?.identifier?.ean || [], pg: pg(x) }));
   }, q).catch(() => null);
   return items;
 }
@@ -378,7 +379,7 @@ async function findInCatalogue(context, job, store, bad = []) {
   const price = Number(x.price) || null, mrp = Number(x.mrp) || null;
   return {
     hit: { href: best.href, text: x.name },
-    data: price ? { price, mrp: mrp && mrp > price ? mrp : null, inStock: store === 'reliance' ? x.sellable !== false : null, title: x.name, url: best.href, how: `${store === 'reliance' ? 'Reliance' : 'Croma'} catalogue` } : null,
+    data: price ? { price, mrp: mrp && mrp > price ? mrp : null, inStock: store === 'reliance' ? x.sellable !== false : null, title: x.name, url: best.href, pg: x.pg || null, how: `${store === 'reliance' ? 'Reliance' : 'Croma'} catalogue` } : null,
   };
 }
 
@@ -1097,7 +1098,21 @@ async function scrapeStore(context, job, s) {
     // ("sellable", per-size "is_available") is what the store itself goes by, so it
     // beats reading buttons — those differ by layout and by pincode.
     const api = [];
+    // Reliance's offers come from its promotions API and the product's own catalogue
+    // entry (pg_offer) — read them as the page loads them.
+    const relOffers = { promo: null, pg: null };
     if (s.store === 'reliance') {
+      page.on('response', async resp => {
+        try {
+          const u = resp.url();
+          if (/\/ext\/raven-api\/promotions\?/.test(u) && !relOffers.promo) relOffers.promo = (await resp.json())?.data || null;
+          else if (/\/ext\/raven-api\/catalog\/v1\.0\/products\/[^/?]+(\?|$)/.test(u) && !relOffers.pg) {
+            const j = await resp.json();
+            const v = (j?._custom_meta || []).find(m => m.key === 'pg_offer')?.value;
+            if (v) relOffers.pg = JSON.parse(v);
+          }
+        } catch { /* not JSON */ }
+      });
       page.on('response', async resp => {
         try {
           const u = resp.url();
@@ -1137,7 +1152,7 @@ async function scrapeStore(context, job, s) {
     if (blocked) { await sleep(4000 + Math.random() * 3000); blocked = await load(); } // one polite retry
     const cat = (s.store === 'reliance' || s.store === 'croma') && s._data?.price ? s._data : null;
     if (blocked && cat) {
-      return { store: s.store, url, status: 'ok', price: cat.price, mrp: cat.mrp, inStock: cat.inStock, title: cat.title, priceText: '₹' + cat.price, offers: [], note: `Price from the ${cat.how} (page did not load)` };
+      return { store: s.store, url, status: 'ok', price: cat.price, mrp: cat.mrp, inStock: cat.inStock, title: cat.title, priceText: '₹' + cat.price, offers: s.store === 'reliance' ? relianceOffers(null, cat.pg) : [], note: `Price from the ${cat.how} (page did not load)` };
     }
     if (blocked && sd?.price) {
       return { store: s.store, url, status: 'ok', price: sd.price, mrp: sd.mrp, inStock: sd.inStock, title: sd.title, priceText: '₹' + sd.price, offers: [], note: `Price from the brand's ${sd.how}` };
@@ -1176,6 +1191,9 @@ async function scrapeStore(context, job, s) {
     if (s.store === 'reliance') {
       await page.waitForFunction(() => /add to cart|notify me|buy now|out of stock|unavailable/i.test(document.body?.innerText || ''), null, { timeout: 12000 }).catch(() => {});
       await sleep(800);
+      // The offers block (and its promotions call) loads as the page scrolls.
+      for (let i = 0; i < 8 && !relOffers.promo; i++) { await page.mouse.wheel(0, 700).catch(() => {}); await sleep(600); }
+      for (let i = 0; i < 6 && !relOffers.promo; i++) await sleep(500);
     }
     let r = await page.evaluate(readPage, s.store);
     // A brand's product page without a price ("realme 15 Pro 5G" overview) usually has a
@@ -1318,7 +1336,11 @@ async function scrapeStore(context, job, s) {
     } else if (s.store === 'flipkart') {
       offers = parseFlipkartOffers(r.text, r.offerCards || []);
       if (!offers.length) offers = extractOffers(r.text).filter(o => o.offerType !== 'no_cost_emi');
+    } else if (s.store === 'reliance') {
+      offers = relianceOffers(relOffers.promo, relOffers.pg || cat?.pg);
+      if (!offers.length) offers = extractOffers(r.text);
     } else offers = extractOffers(r.text);
+    if (s.store === 'reliance' && relOffers.promo) r.offerCards = [...(r.offerCards || []), ...(relOffers.promo.bank_offers || []).map(b => `${b.offer_desc} | ${b.payment_method} | ${b.offer_percentage || ''}% cap ${b.offer_capping || ''} min ${b.min_car_amount || ''}`)];
     return {
       store: s.store, url: sd?.url || page.url(), status: 'ok', price: r.price, mrp: r.mrp, inStock: r.inStock,
       title: r.title, priceText: r.priceText, offers, offerRaw: [offerRawLines(r.text), ...(r.offerCards || []).map(c => `[card] ${c}`)].join('\n').slice(0, 6000),

@@ -426,3 +426,45 @@ console.log('debug folder cleanup ok');
   ok(parseOffer('Instant discount of Rs 500 on SBI Bank credit card. Discounted price inclusive of cashback will be applied').offerType === 'instant_discount', 'croma instant');
   console.log('store offer formats ok');
 }
+{
+  // Real offer text read by the scraper (Nov 2026 sample run).
+  const { parseFlipkartOffers, parseAmazonCards, extractOffers, relianceOffers } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const fk = parseFlipkartOffers('', [
+    '₹2,750 off | Best value for you • Apply • Flipkart Axis • Credit Card • Cashback | banks: ',
+    '₹2,500 off | Apply • ICICI • Credit Card | banks: ',
+    '₹2,500 off | Apply • IndusInd • Credit Card | banks: ',
+    '₹100 off | Apply • Flipkart Finance • Flipkart Pay Later • Know more | banks: ',
+    '₹2,750 off | Bank offers | banks: ']);
+  ok(fk.length === 4, 'flipkart heading card dropped ' + JSON.stringify(fk));
+  ok(fk[0].bank === 'Flipkart Axis' && fk[0].offerType === 'cashback' && fk[1].bank === 'ICICI Bank' && fk[2].bank === 'IndusInd Bank', 'flipkart banks ' + JSON.stringify(fk));
+  ok(fk[3].bank === 'Flipkart Pay Later' && fk[3].cardType === 'Pay Later', 'pay later ' + JSON.stringify(fk[3]));
+  const only = parseFlipkartOffers('', ['₹750 off | Bank offers • Bank offers • View EMI offers | banks: ']);
+  ok(only.length === 1 && only[0].amount === 750 && only[0].bank === 'Bank offer' && only[0].mode === null, 'flipkart only heading ' + JSON.stringify(only));
+  const am = parseAmazonCards('Cashback\nUpto ₹569.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards\nNo Cost EMI\nUpto ₹616.14 EMI interest savings on select Credit Cards, Bajaj Finserv EMI cards, Amazon Pay Later\nBank Offer\nUpto ₹474.97 discount on Axis Bank Credit Cards\nBank Offer\nUpto ₹2,000.00 discount on select Credit Cards');
+  ok(am.length === 2 && am[1].bank === 'Axis Bank' && am[1].amount === 474 && am[1].offerType === 'instant_discount', 'amazon named bank ' + JSON.stringify(am));
+  const sam = extractOffers('Black Friday Deal : Starting at ₹ 61999 with instant bank discount\n• Incl. of ₹ 3000 instant bank discount\n• Extra ₹ 2000 off with First Purchase Benefit\nUnlock Corporate+ Privileges : Extra 7% additional discount with your work email ID\nGet at ₹61999 with ₹3000 instant bank discount');
+  ok(sam.length === 1 && sam[0].amount === 3000 && sam[0].bank === 'Bank offer', 'samsung brand ' + JSON.stringify(sam));
+  const noise = extractOffers('Get 10% off on orders above ₹4,999 with HDFC cards');
+  ok(noise.length === 1 && noise[0].bank === 'HDFC Bank' && noise[0].percent === 10 && noise[0].minTxn === 4999, 'noise ' + JSON.stringify(noise));
+  ok(extractOffers('Get additional 5% off on Prepaid Orders | Code: BOATHEAD | Shop Now\nRedeem upto 10% off additionally with boAt rewards').length === 0, 'boat coupons are not bank offers');
+  const promo = { bank_offers: [
+    { offer_desc: '10% Instant Discount on SBI Bank Credit Card Txns', bank_codes: ['SBI'], offer_percentage: 10, offer_capping: 10000, min_car_amount: 5000, payment_method: 'CC', discount_type: 'Instant Discount' },
+    { offer_desc: '5% Instant Discount with IDBI Credit Card EMI', bank_codes: ['IDBI'], offer_percentage: 5, offer_capping: 1800, min_car_amount: 30000, payment_method: 'EMI', discount_type: 'Instant Discount' },
+    { offer_desc: 'Pay with UPI & Get 10% up to Rs. 10000 Instant Discount', bank_codes: [''], offer_percentage: 10, offer_capping: 10000, min_car_amount: 5000, payment_method: 'UPI', discount_type: 'Instant Discount' },
+    { offer_desc: '5% Instant Discount with IDBI Credit/Debit Card', bank_codes: ['IDBI'], offer_percentage: 5, offer_capping: 1800, min_car_amount: 30000, payment_method: 'DC+CC', discount_type: 'Instant Discount' }],
+    top_emi_offer_list: [{ bank_code: 'ICICI', bank_name: 'ICICI BANK', card_name: 'ICICI BANK CREDIT CARD', offer_amount: 5000, emi_card_type: 'cc', emi_type: 'NO_COST_EMI' }, { bank_code: 'HDFC', bank_name: 'HDFC BANK', offer_amount: 0, emi_card_type: 'cc' }] };
+  const ro = relianceOffers(promo, null);
+  ok(ro.length === 5, 'reliance count ' + ro.length);
+  ok(ro[0].bank === 'SBI Card' && ro[0].percent === 10 && ro[0].maxDiscount === 10000 && ro[0].minTxn === 5000 && ro[0].cardType === 'Credit Card' && ro[0].mode === 'Full swipe', 'reliance sbi ' + JSON.stringify(ro[0]));
+  ok(ro[1].bank === 'IDBI Bank' && ro[1].mode === 'EMI', 'reliance idbi emi ' + JSON.stringify(ro[1]));
+  ok(ro[2].bank === 'UPI' && ro[2].cardType === 'UPI', 'reliance upi ' + JSON.stringify(ro[2]));
+  ok(ro[3].cardType === 'Credit & Debit', 'reliance dc+cc');
+  ok(ro[4].bank === 'ICICI Bank' && ro[4].amount === 5000 && ro[4].mode === 'EMI', 'reliance emi instant ' + JSON.stringify(ro[4]));
+  const pg = relianceOffers(null, { bank: 'PNB', subtitle: null, discount: '899.925' });
+  ok(pg.length === 1 && pg[0].bank === 'PNB' && pg[0].amount === 900 && pg[0].mode === null, 'reliance pg ' + JSON.stringify(pg));
+  const pg2 = relianceOffers(null, { bank: 'ICICI BANK NO COST EMI', subtitle: '15815.94/6', discount: '5004.36' });
+  ok(pg2[0].bank === 'ICICI Bank' && pg2[0].mode === 'EMI', 'reliance pg emi ' + JSON.stringify(pg2));
+  ok(relianceOffers(null, { bank: null, subtitle: null, discount: null }).length === 0, 'reliance none');
+  console.log('real offer lines ok');
+}

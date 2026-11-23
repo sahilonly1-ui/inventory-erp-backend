@@ -26,6 +26,18 @@ describe('agent result verification', () => {
     expect(v.effectivePrice).toBeNull();
     expect((verify({ store: 'reliance', status: 'not_listed' }, null, 'JBL') as any).status).toBe('not_listed');
   });
+  it('prefers a full-swipe offer, falls back to an EMI one, respects caps and minimums', () => {
+    const url = 'https://www.reliancedigital.in/product/samsung-galaxy-a37-5g-x';
+    const sbi = { bank: 'SBI Card', cardType: 'Credit Card', offerType: 'instant_discount', mode: 'Full swipe', percent: 10, maxDiscount: 10000, minTxn: 5000, summary: '10% SBI' };
+    const emi = { bank: 'ICICI Bank', cardType: 'Credit Card', offerType: 'instant_discount', mode: 'EMI', amount: 8000, summary: 'ICICI EMI' };
+    const v: any = verify({ store: 'reliance', url, price: 56499, offers: [emi, sbi] }, null, 'Samsung');
+    expect(v.effectivePrice).toBe(56499 - 5650);
+    expect(v.bestOffer).toBe('₹5,650 off · SBI Card · Credit Card · Full swipe');
+    const e: any = verify({ store: 'reliance', url, price: 56499, offers: [emi] }, null, 'Samsung');
+    expect(e.bestOffer).toBe('₹8,000 off · ICICI Bank · Credit Card · EMI');
+    const low: any = verify({ store: 'reliance', url, price: 3999, offers: [sbi] }, null, 'Samsung');
+    expect(low.bestOffer).toBeNull();
+  });
 });
 
 describe('store urls', () => {
