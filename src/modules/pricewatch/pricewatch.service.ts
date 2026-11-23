@@ -766,5 +766,12 @@ setTimeout(async () => {
         WHERE s.store=$1 AND s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '45 minutes' ORDER BY random() LIMIT 6`, store);
       logger.info({ store, st, ex }, 'PW diag raw');
     }
+    // Prices far from the same product's other stores: likely the wrong listing.
+    const odd = await q(`WITH l AS (SELECT DISTINCT ON (s."itemId", s.store) s."itemId", s.store, s.price::float p, s.title, s.url, s.method, s.status
+        FROM price_snapshots s WHERE s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '3 days' ORDER BY s."itemId", s.store, s."fetchedAt" DESC),
+      m AS (SELECT "itemId", percentile_cont(0.5) WITHIN GROUP (ORDER BY p) med, count(*) n FROM l GROUP BY 1 HAVING count(*) >= 3)
+      SELECT i.name, l.store, l.p, round(m.med) med, l.status, l.method, left(l.title, 90) title, l.url FROM l JOIN m USING ("itemId") JOIN price_watch_items i ON i.id=l."itemId"
+      WHERE l.p > m.med * 1.3 OR l.p < m.med * 0.7 ORDER BY abs(l.p - m.med) / m.med DESC LIMIT 40`);
+    logger.info({ n: odd.length, odd }, 'PW diag odd');
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag raw failed'); }
-}, 50 * 60_000).unref();
+}, 60 * 60_000).unref();
