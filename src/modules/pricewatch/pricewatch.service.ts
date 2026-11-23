@@ -525,6 +525,8 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   const price = numOrNull(r.price);
   if (!price) return { status: st === 'blocked' ? 'blocked' : 'not_found', url, notes: [...notes, r.note || 'No price reported'] };
   if (!url) return { status: 'unverified', url: null, price, notes: [...notes, 'No valid product URL, so the price was not trusted'] };
+  // "₹99,99,999" is what a store shows for a product not on sale yet.
+  if (price >= 1_000_000 || /^9{6,}$/.test(String(Math.round(price)))) return { status: 'not_found', url, notes: [...notes, `Placeholder price ₹${Math.round(price).toLocaleString('en-IN')} — not on sale here yet`] };
 
   let status: 'ok' | 'suspect' = st === 'suspect' ? 'suspect' : 'ok';
   // Plausibility: against the ERP's MRP when known (selling above MRP, or below
@@ -774,8 +776,19 @@ setTimeout(async () => {
     const odd = await q(`WITH l AS (SELECT DISTINCT ON (s."itemId", s.store) s."itemId", s.store, s.price::float p, s.title, s.url, s.method, s.status
         FROM price_snapshots s WHERE s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '3 days' ORDER BY s."itemId", s.store, s."fetchedAt" DESC),
       m AS (SELECT "itemId", percentile_cont(0.5) WITHIN GROUP (ORDER BY p) med, count(*) n FROM l GROUP BY 1 HAVING count(*) >= 3)
-      SELECT i.name, l.store, l.p, round(m.med) med, l.status, l.method, left(l.title, 90) title, l.url FROM l JOIN m USING ("itemId") JOIN price_watch_items i ON i.id=l."itemId"
+      SELECT i.name, l.store, l.p, round(m.med) med, l.status, l.method, left(l.title, 90) title, l.url, k."lockedByUser" locked FROM l JOIN m USING ("itemId") JOIN price_watch_items i ON i.id=l."itemId"
+      LEFT JOIN price_watch_links k ON k."itemId"=l."itemId" AND k.store=l.store
       WHERE l.p > m.med * 1.3 OR l.p < m.med * 0.7 ORDER BY abs(l.p - m.med) / m.med DESC LIMIT 40`);
     logger.info({ n: odd.length, odd }, 'PW diag odd');
+    // Once: re-check every product with a store price far off its other stores, under the
+    // stricter matching (wrong listings get searched for again).
+    if (!(await q(`SELECT 1 FROM price_watch_settings WHERE key='odd_recheck_1'`)).length) {
+      await x(`INSERT INTO price_watch_settings (key, value) VALUES ('odd_recheck_1', '{}'::jsonb) ON CONFLICT (key) DO NOTHING`);
+      const n = await x(`WITH l AS (SELECT DISTINCT ON (s."itemId", s.store) s."itemId", s.price::float p FROM price_snapshots s
+          WHERE s.status IN ('ok','suspect') AND s."fetchedAt" > now() - interval '7 days' ORDER BY s."itemId", s.store, s."fetchedAt" DESC),
+        m AS (SELECT "itemId", percentile_cont(0.5) WITHIN GROUP (ORDER BY p) med FROM l GROUP BY 1 HAVING count(*) >= 3)
+        UPDATE price_watch_items SET requested=true WHERE id IN (SELECT l."itemId" FROM l JOIN m USING ("itemId") WHERE l.p > m.med * 1.3 OR l.p < m.med * 0.7)`);
+      logger.info({ n }, 'PW odd recheck queued');
+    }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'PW diag odd failed'); }
 }, 4 * 60_000).unref();

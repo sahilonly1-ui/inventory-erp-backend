@@ -26,6 +26,9 @@ describe('agent result verification', () => {
     expect(v.effectivePrice).toBeNull();
     expect((verify({ store: 'reliance', status: 'not_listed' }, null, 'JBL') as any).status).toBe('not_listed');
   });
+  it('treats a placeholder price as not on sale', () => {
+    expect((verify({ store: 'official', url: 'https://in.nothing.tech/products/phone-4b', price: 9999999 }, null, 'Nothing') as any).status).toBe('not_found');
+  });
   it('prefers a full-swipe offer, falls back to an EMI one, respects caps and minimums', () => {
     const url = 'https://www.reliancedigital.in/product/samsung-galaxy-a37-5g-x';
     const sbi = { bank: 'SBI Card', cardType: 'Credit Card', offerType: 'instant_discount', mode: 'Full swipe', percent: 10, maxDiscount: 10000, minTxn: 5000, summary: '10% SBI' };

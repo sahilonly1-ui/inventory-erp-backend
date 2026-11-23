@@ -468,3 +468,73 @@ console.log('debug folder cleanup ok');
   ok(relianceOffers(null, { bank: null, subtitle: null, discount: null }).length === 0, 'reliance none');
   console.log('real offer lines ok');
 }
+{
+  // Wrong listings found saved in Nov 2026 (different kind of product, other model, accessory,
+  // bundle) — and the right listings for the same names.
+  const { titleScore } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const KEEP = new Set(["Boat Aavante Groove Plus 16W Soundbar", "Boat Stone 208 Bluetooth Speaker", "JBL Clip4 Portable Bluetooth Speaker (JBLCLIP4ECOGRN)", "Nothing Phone 4B 8/128GB"]);
+  for (const [n, b, t] of [
+ ['Redmi Smart Band Pro','Redmi','Redmi Note 17 Pro 5G (8GB RAM, 256GB, Stealth Black)'],
+ ['Noise Go Buds Wireless Bluetooth Earbuds','Noise','Noise Master Buds Truly Wireless Bluetooth Earbuds, Onyx Black'],
+ ['Boat Stone 208 Bluetooth Speaker','Boat','boAt Stone 208 Speaker with 5W Sound, TWS, RGB Lights, Built-in M...more'],
+ ['Boat Aavante Bar Theme','Boat','boAt Aavante Bar 3600 500 W Bluetooth Soundbar (Premium Black, 5....more'],
+ ['Mi Smart Speaker','Mi','Xiaomi 17T 5G (12GB RAM, 256GB, Violet)'],
+ ['Redmi Earbuds S','Redmi','Redmi Note 17 5G (Dark Night, 8GB RAM, 128GB ROM) | 8000mAh Battery + 45W Fast Charging | '],
+ ['SAREGAMA Carvaan Mini 2.0 Hindi','Saregama','Saregama Carvaan Premium Hindi - Portable Music Player with 5000 Preloaded Songs, FM/BT/AU'],
+ ['Sony Wireless Noise Canceling Stereo Headset (WF-1000XM4)','Sony','Sony WH-1000XM6 The Best Wireless Noise Canceling Headphones, HD NC Processor QN3, 12 Micr'],
+ ['JBL GO Essential 2 Bluetooth Speaker','JBL','JBL Flip Essential 2 20 W Bluetooth Home Audio Speaker (Black, Mo...more'],
+ ['Noise Air Clips OWS Wireless Earphone','Noise','Noise Alt Clip OWS Earclips (Chosen Black)'],
+ ['JBL Clip4 Portable Bluetooth Speaker (JBLCLIP4ECOGRN)','JBL','JBL Clip 4, Black/Orange - Portable Bluetooth 5.1 Speaker - Up to 10 Hours of Play - Water'],
+ ['SAREGAMA Carvaan Mini 2.0 Music Player (SCM104)','Saregama','SAREGAMA Carvaan Hindi - Portable Music Player with 5000 Preloade...more'],
+ ['Boat Aavante Bar Aspire','Boat','boAt Aavante Bar 1550 120 W Bluetooth Soundbar (Premium Black, 2....more'],
+ ['Noise ALT Buds Wireless Bluetooth Earbuds Chosen Grey','Noise','Noise ALT Buds Open NSW0085 TWS Earbuds with Environmental Noise Cancellation(IPX5 Waterpr'],
+ ['Noise ALT Buds S Wireless Bluetooth Earbuds','Noise','Noise Alt Buds Open Wireless Open-Ear Earbuds (2026), Red Dot Award-Winning Design, Hi-Res'],
+ ['Boat Aavante Bar Theme','Boat','boAt Aavante Bar Aspire 10W RMS Bluetooth Soundbar ( 2.0 Channel, Black)'],
+ ['Noise Junior Explorer 2 Smartwatch','Noise','Noise Junior Explorer 2 Kids Smart Watch (Lava Blast) with Amazon Echo Dot 5th Gen (Blue) '],
+ ['Redmi Earbuds S','Redmi','Redmi 15A 5G (4GB RAM, 64GB, Ace Black)'],
+ ['JBL TUNE 760NC Wireless Over Ear Headphones','JBL','SOULWIT Ear Cushions for JBL Tune 700BT/710BT/720BT/750BT/750BTNC/760NC/770NC (Do Not Fit '],
+ ['Realme Watch 2 Pro','Realme','Zelfo Silicon Strap BeltCompatible With Realme Smart Watch 2 Pro ...more'],
+ ['Boat Aavante Groove Plus 16W Soundbar','Boat','boAt Aavante Bar Groove Plus 16W 2.0 Channel Portable Bluetooth Soundbar with RGB LEDs, TW'],
+ ['Moto Watch','Motorola','motorola signature'],
+ ['Redmi Watch','Redmi','Redmi 6A'],
+ ['Nothing Phone 4B 8/128GB','Nothing','Phone (4b) — Blue / 8+128GB'],
+]) if (!KEEP.has(n)) ok(titleScore(n, b, t) === 0, `should reject: ${n} => ${t}`);
+  for (const [n, b, t] of [
+ ['Noise Air Clips OWS Wireless Earphone','Noise','Noise Air Clips Wireless Open Ear Earbuds with Chrome Finish, 40H Playtime'],
+ ['Mi Smart Speaker','Mi','Xiaomi Smart Speaker (IR Control) with Google Assistant'],
+ ['Samsung A37 5G 8/256GB','Samsung','Samsung Galaxy A37 5G (Awesome Graygreen, 8GB RAM, 256GB Storage)'],
+ ['Samsung Tab A11 4/64GB LTE','Samsung','Samsung Galaxy Tab A11 (4GB RAM, 64GB, LTE)'],
+ ['Realme Watch 2 Pro','Realme','realme Watch 2 Pro Smartwatch with Activity Tracker'],
+ ['JBL GO Essential 2 Bluetooth Speaker','JBL','JBL Go Essential 2 Portable Waterproof Speaker'],
+ ['Boat Aavante Bar Theme','Boat','boAt Aavante Bar Theme 60W Soundbar'],
+ ['Sony Wireless Noise Canceling Stereo Headset (WF-1000XM4)','Sony','Sony WF-1000XM4 Industry Leading Noise Canceling Truly Wireless Earbuds'],
+ ['Noise Junior Explorer 2 Smartwatch','Noise','Noise Junior Explorer 2 Kids Smart Watch (Lava Blast)'],
+ ['Fastrack Revoltt FS1 Smartwatch','Fastrack','Fastrack Revoltt FS1 Smart Watch with Silicone Strap'],
+ ['Boat Rockerz 480 Wireless Headphones','Boat','boAt Rockerz 480 Bluetooth On Ear Headphones with 60H Playtime'],
+ ['Apple iPhone 17 256GB','Apple','Apple iPhone 17 (256 GB) - Black'],
+ ['Oneplus Nord Buds 3','OnePlus','OnePlus Nord Buds 3 Truly Wireless Bluetooth Earbuds with Charging Case'],
+ ['Samsung Buds3 FE','Samsung','Samsung Galaxy Buds3 FE (Black)'],
+ ['JBL TUNE 760NC Wireless Over Ear Headphones','JBL','JBL Tune 760NC Wireless Over Ear Active Noise Cancellation Headphones'],
+ ['Redmi A7 Pro 5G 4/128GB','Redmi','Redmi A7 Pro 5G (Mist Blue, 4GB RAM, 128GB Storage)'],
+ ['Noise Go Buds Wireless Bluetooth Earbuds','Noise','Noise Newly Launched Go Buds Truly Wireless in Ear Earbuds'],
+ ['Boat Airdopes Joy Wireless Earbuds','Boat','boAt Airdopes Joy, 35HRS Battery, Fast Charge, ENx Tech'],
+ ['JBL Party Box 330 Speaker','JBL','JBL PartyBox 330 Bluetooth Party Speaker'],
+ ['SAREGAMA Carvaan Mini 2.0 Hindi','Saregama','Saregama Carvaan Mini Hindi 2.0 - Music Player with 351 Songs'],
+ ['Moto G37 Power 4/64GB','Motorola','Motorola g37 power (4GB RAM, 64GB) Pantone Blue'],
+ ['Samsung Galaxy Watch 8','Samsung','Samsung Galaxy Watch8 (44mm, Bluetooth)'],
+ ['Realme Buds Air Neo','Realme','realme Buds Air Neo Bluetooth Headset (White, True Wireless)'],
+ ['Apple Watch SE 3','Apple','Apple Watch SE 3 GPS 40mm Midnight Aluminium Case with Midnight Sport Band'],
+ ['Redmi Smart Band Pro','Redmi','Redmi Smart Band Pro, 1.47" AMOLED Display'],
+ ['Moto Watch','Motorola','Moto Watch 40 Smartwatch'],
+ ['Redmi Earbuds S','Redmi','Redmi Earbuds S Wireless Earphones'],
+ ['Noise ALT Buds S Wireless Bluetooth Earbuds','Noise','Noise ALT Buds S Truly Wireless'],
+ ['Boat Stone 193 Bluetooth Speaker','Boat','boAt Stone 193 5 W Bluetooth Speaker (Black, Stereo Channel)'],
+ ['Sony WH-CH520','Sony','Sony WH-CH520 Wireless On-Ear Bluetooth Headphones with Mic'],
+ ['Nothing Phone 3a 8/128GB','Nothing','Nothing Phone (3a) 5G (Black, 8GB RAM, 128GB Storage)'],
+ ['Oppo A6C 4/64GB','OPPO','OPPO A6c (Feather White, 64 GB) (4 GB RAM)'],
+ ['Moto Pad 60 Pro 12/256GB','Motorola','Motorola Moto Pad 60 Pro (12GB RAM, 256GB)'],
+ ['JBL Flip 7','JBL','JBL Flip 7 Portable Speaker with Strap and Carabiner'],
+]) if (!/^(Moto Watch)$/.test(n)) ok(titleScore(n, b, t) >= 0.55, `should match: ${n} => ${t} (${titleScore(n, b, t)})`);
+  console.log('wrong listings ok');
+}

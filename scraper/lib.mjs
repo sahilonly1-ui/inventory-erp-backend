@@ -35,7 +35,29 @@ const STOP = new Set(['with', 'and', 'the', 'for', 'of', 'in', 'by', 'new', 'lat
   'portable', 'bluetooth', 'wireless', 'wifi', 'wi', 'fi', 'smartphone', 'mobile', 'phone', 'android', 'india', 'black', 'white',
   'blue', 'grey', 'gray', 'red', 'green', 'silver', 'gold', 'party', 'box']);
 // Always an accessory listing:
-const ACCESSORY_STRONG = /\b(tempered|screen guard|protector|replacement|sticker|decal|skin|compatible with|compatible for)\b/i;
+const ACCESSORY_STRONG = /\b(tempered|screen guard|protector|replacement|sticker|decal|skin)\b|compatible (with|for)\b/i;
+// Accessories that lead the title ("Ear Cushions for JBL Tune 760NC", "Silicon Strap for
+// Realme Watch 2 Pro") — before any word naming our kind of product.
+const ACCESSORY_LEAD = /\b(cushions?|ear ?pads?|ear ?tips?|straps?|belts?|protectors?|guards?|covers?|cases?|pouch|skins?)\b/i;
+// A listing that sells our product together with something else.
+const BUNDLE = /\bwith (amazon )?echo\b|\bcombo\b|\bbundle\b|\b(pack|set) of [2-9]\b|\+\s?(free\s)?(amazon|echo|alexa)\b/i;
+// What kind of product a title is about. Two titles of different kinds are never the same
+// product ("Redmi Earbuds S" is not "Redmi Note 17 5G (8GB RAM, 128GB)").
+const KINDS = {
+  ear: /^(earbuds?|buds|earphones?|tws|neckband|airdopes|earclips?|ows|earpods|airpods|headphones?|headsets?|iem)$/,
+  speaker: /^(speakers?|soundbars?|subwoofer|boombox|partybox|bar|karaoke)$/,
+  watch: /^(watch|watches|smartwatch|band|smartband)$/,
+  tablet: /^(tab|tablet|tablets|pad|ipad)$/,
+  phone: /^(phone|smartphones?|iphone)$/,
+};
+export function kindsOf(text) {
+  const raw = String(text || '').replace(/\b(dual|tri|multi)[ -]band\b/gi, ' ');
+  const toks = raw.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const out = new Set(Object.keys(KINDS).filter(k => toks.some(t => KINDS[k].test(t))));
+  // "8GB RAM", "8/256GB", "(12GB, 256GB)": a phone — or a tablet when it says so.
+  if (!out.has('tablet') && /\b\d{1,2}\s?gb\s?ram\b|\b\d{1,2}\s?\/\s?\d{2,4}\s?gb\b|\(\s*\d{1,2}\s?gb\s?[,+/]\s?\d{2,4}\s?gb/i.test(raw)) out.add('phone');
+  return out;
+}
 // Accessory words that also appear in real product titles ("…with Alexa Voice
 // Remote", "…with charger") — only an accessory when it is "X for <product>".
 const ACCESSORY = /\b(case|cover|pouch|strap|band|charger|adapter|adaptor|cable|bag|sleeve|stand|mount|holder|remote|refill|spare|carry)\b[^,]{0,40}\bfor\b/i;
@@ -70,6 +92,19 @@ export function titleScore(name, brand, candidate) {
   const net5 = /\b5g\b/i.test(name), net4 = /\b4g\b/i.test(name);
   if ((net5 && /\b4g\b/i.test(candidate) && !/\b5g\b/i.test(candidate)) || (net4 && /\b5g\b/i.test(candidate) && !/\b4g\b/i.test(candidate))) return 0;
   name = String(name).replace(/\b[45]g\b/gi, ' ');
+  // A model code in brackets ("(WF-1000XM4)") is often left out by stores, but a listing
+  // carrying a different code of the same series ("WH-1000XM6") is another product.
+  const codes = (String(name).match(/\(([^)]*)\)/g) || []).map(b => b.slice(1, -1).toLowerCase().replace(/[^a-z0-9]/g, '')).filter(c => /[a-z]/.test(c) && /\d{3,}/.test(c));
+  const candSq = String(candidate).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const candT = String(candidate).toLowerCase().replace(/(\w)-(\w)/g, '$1$2').match(/[a-z0-9]+/g) || [];
+  for (const c of codes) {
+    if (candSq.includes(c)) continue;
+    const core = c.match(/\d{3,}/)[0];
+    if (candT.some(t => t !== c && t.includes(core) && /[a-z]/.test(t))) return 0;
+  }
+  if (BUNDLE.test(candidate) && !BUNDLE.test(name)) return 0;
+  const nk = kindsOf(name), ck = kindsOf(candidate);
+  if (nk.size && ck.size && ![...nk].some(k => ck.has(k))) return 0;
   // Bracketed extras in ERP names — SKU codes "(JBLCLIP5SQUAD)", colours
   // "(Black)" — aren't in store titles, so they don't count. Storage/RAM in
   // brackets "(8GB/256GB)" does.
@@ -82,6 +117,14 @@ export function titleScore(name, brand, candidate) {
   // (ULT Button for Massive Bass)" far down a long title is still the speaker.
   if ((ACCESSORY_STRONG.test(cand) && !ACCESSORY_STRONG.test(nameN)) || (ACCESSORY.test(cand.slice(0, 70)) && !ACCESSORY.test(nameN))) return 0;
   if (NOT_NEW.test(cand)) return 0;
+  {
+    const acc = cand.match(ACCESSORY_LEAD);
+    if (acc && !ACCESSORY_LEAD.test(nameN)) {
+      const kindAt = tokens(cand).findIndex(t => [...nk].some(k => KINDS[k].test(t)));
+      const accAt = tokens(cand.slice(0, acc.index)).length;
+      if (kindAt < 0 ? accAt < 6 : accAt < kindAt) return 0;
+    }
+  }
   // The brand must appear — or the line it is sold under, which is how many listings are
   // titled: "Redmi 13C" for Xiaomi, "Moto g37" for Motorola, "POCO X7" for Xiaomi.
   if (brand && !squashed.includes(norm(brand).replace(/ /g, ''))) {
@@ -135,23 +178,37 @@ export function titleScore(name, brand, candidate) {
   // Distinctive words ("Essential", "Cinema", "Bar", "Boombox") identify the model:
   // all must be present (one may be missing/misspelt when the name has 3 or more).
   const brandN = norm(brand || '').replace(/ /g, '');
-  const distinctive = [...new Set(all.filter(t => !/\d/.test(t) && !isGenericWord(t) && t.length > 2 && t !== brandN))];
+  const distinctive = [...new Set(all.filter(t => !/\d/.test(t) && t !== brandN && ((!isGenericWord(t) && t.length > 2) || /^(go|fe)$/.test(t))))];
+  // Short line words ("Go", "FE") must stand as words: "go" inside "algorithm" isn't one.
+  const found = w => (w.length <= 2 ? candTokensAll.includes(w) || pairs.some(p => p.startsWith(w) && /\d/.test(p.slice(w.length))) : wordFound(w, candTokensAll, squashed));
+  // A single-letter variant ("Buds S", "Earbuds S") must be there too.
+  for (let i = 1; i < all.length; i++) {
+    const t = all[i];
+    if (/^[b-z]$/.test(t) && !/\d/.test(all[i - 1]) && !candTokensAll.includes(t) && !squashed.includes(all[i - 1] + t)) return 0;
+  }
+  // Nothing but the brand / its line and a kind of product ("Moto Watch", "Redmi Earbuds
+  // S", "Mi Smart Speaker"): the listing must at least be that kind of product.
+  const line0 = tokens(name)[0];
+  const core = distinctive.filter(w => w !== line0);
+  if (!modelNums.length && !core.length && nk.size && ![...nk].some(k => ck.has(k))) return 0;
   // A model number the listing adds straight after one of our model words is a different
   // model: "Nova 2" is not "Nova", "Clip 5" is not "Clip". (Numbers we have, like "iPhone 14",
   // are fine; "5G" and "64GB" are not model numbers.)
   // Channel counts ("Bar 2.1", "5.1 ch") are specs, not model numbers — left out here too.
-  const candToks = String(candidate).toLowerCase().replace(/\b\d(\.\d){1,2}\b(\s*(ch|channel))?/gi, ' ').match(/[a-z0-9]+/g) || [];
+  // Decimals ("1.47\" display", "2.1 ch") are sizes and channel counts, never model numbers.
+  const candToks = String(candidate).toLowerCase().replace(/\b\d+(\.\d+){1,2}\b(\s*(ch|channel))?/gi, ' ').match(/[a-z0-9]+/g) || [];
   for (let i = 0; i + 1 < candToks.length; i++) {
-    if (distinctive.includes(candToks[i]) && /^\d{1,3}$/.test(candToks[i + 1]) && !modelNums.includes(candToks[i + 1])
+    if (distinctive.includes(candToks[i]) && /^\d{1,4}$/.test(candToks[i + 1]) && !modelNums.includes(candToks[i + 1])
       && !modelNums.includes(candToks[i + 1] + (candToks[i + 2] || ''))) return 0;   // "680 NC" is our "680NC"
   }
-  const missingW = distinctive.filter(w => !wordFound(w, candTokensAll, squashed));
+  const missingW = distinctive.filter(w => !found(w));
   // A line word we asked for ("Pro", "Ultra", "Lite"…) is never the one allowed to be missing.
   if (missingW.some(w => /^(pro|ultra|max|plus|lite|mini|fe|neo|prime|power|edge|fold|flip|essential|club|encore|air|go|mk\d?)$/.test(w))) return 0;
   const missing = missingW.length;
   // With the model number matched (and the word before it checked above), one stray or
   // misspelt word in the ERP name ("OveEar") is allowed.
-  if (missing > (distinctive.length >= 3 || (modelMatched && distinctive.length >= 2) ? 1 : 0)) return 0;
+  // Without a model number the naming words are the model ("Aavante Bar Theme"): all of them.
+  if (missing > ((modelMatched && distinctive.length >= 2) || distinctive.length >= 4 ? 1 : 0)) return 0;
   const words = all.filter(t => (!/\d/.test(t) || SPEC.test(t)) && !STOP.has(t) && t.length > 1);
   const hit = words.length ? words.filter(w => wordFound(w, candTokensAll, squashed)).length / words.length : 1;
   // Tie-break only: a listing full of words our name doesn't have is less likely to be it.
@@ -462,7 +519,7 @@ export function wordFound(word, candTokens, squashed) {
 
 /** A category word, or a misspelling of one ("Speakar", "Soundber"). */
 function isGenericWord(w) {
-  if (STOP.has(w) || GENERIC.has(w)) return true;
+  if (STOP.has(w) || GENERIC.has(w) || Object.values(KINDS).some(re => re.test(w))) return true;
   if (w.length < 5) return false;
   const tol = w.length >= 7 ? 2 : 1;
   for (const g of [...STOP, ...GENERIC]) if (g.length >= 5 && editDistance(w, g) <= tol) return true;
