@@ -1249,10 +1249,15 @@ async function scrapeStore(context, job, s) {
       const slug = new URL(page.url()).pathname.split('/').filter(Boolean).pop() || '#';
       const mine = api.filter(a => a.sellable.length && a.full.includes(slug));
       const any = mine.find(a => /\/sizes|size/i.test(a.u)) || mine[0];
+      // The page's own "Currently unavailable online … Notify Me" wins over the API: Reliance
+      // keeps sellable=true for products that are only in its shops, not online.
+      const pageSaysNo = r.inStock === false && /notify-me|unavailable/.test(String(r.stockWhy || ''));
       if (any) {
-        const ok = any.sellable[0];
-        r.inStock = ok;
-        r.stockWhy = `store api sellable=${ok} (${any.u})`;
+        const avail = mine.flatMap(a => a.avail || []);
+        const ok = any.sellable[0] !== false && (avail.length ? avail.some(v => v === true) : true);
+        r.inStock = ok && !pageSaysNo;
+        r.stockWhy = pageSaysNo ? `page: ${r.stockWhy} (store api sellable=${any.sellable[0]})`
+          : `store api sellable=${any.sellable[0]}${avail.length ? ` is_available=${avail.join(',')}` : ''} (${any.u})`;
       }
     }
     // Is this page really our product? A link saved earlier (or picked from a
