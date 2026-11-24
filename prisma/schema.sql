@@ -697,3 +697,6 @@ CREATE TABLE IF NOT EXISTS price_watch_rejected (
   "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY ("itemId", store, url)
 );
+
+-- When a spec entry was last re-checked in the background (for a real source, or by a newer parser).
+ALTER TABLE spec_entries ADD COLUMN IF NOT EXISTS "checkedAt" TIMESTAMPTZ;

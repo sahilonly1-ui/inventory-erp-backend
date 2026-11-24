@@ -4,7 +4,11 @@ import { builtInTemplate, GENERIC, SpecField } from './specs.templates';
 import { findPhonePage, readPhone, isGsmArena } from './specs.gsmarena';
 import { aiProvider, askForSpecs, askPlain, readPage, askWithUrl, groundingAvailable } from './specs.ai';
 import * as g360 from './specs.gadgets360';
-import { findOnBrandStore, specPairs, pairsToColumns, storeBrands } from './specs.brandstore';
+import { findOnBrandStore, specPairs, pairsToColumns } from './specs.brandstore';
+import { findSpecPages } from './specs.websearch';
+import { officialDomains, STORES } from '../pricewatch/stores';
+import { sellableStockSql } from '../../common/sellableStock';
+import { bestOfferOf } from '../pricewatch/pricewatch.service';
 
 /*
  * Specifications tab.
@@ -176,7 +180,31 @@ async function fromBrandSite(title: string, brand: string, categoryName: string,
   return null;
 }
 
-async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null): Promise<FetchResult> {
+/** A real page found by web search: read it the way its site needs. */
+async function fromWeb(title: string, brand: string, categoryName: string, fields: SpecField[]): Promise<FetchResult | null> {
+  let hits: Awaited<ReturnType<typeof findSpecPages>> = [];
+  try { hits = await findSpecPages(title, brand, officialDomains(brand)); } catch { return null; }
+  for (const h of hits) {
+    try {
+      if (/gadgets360\.com$/.test(h.host)) { const r = await fromGadgets360(h.url, title, categoryName, fields); if (r?.status === 'OK') return r; continue; }
+      if (/gsmarena\.com$/.test(h.host) && isPhoneLike(fields)) {
+        const r = await readPhone(h.url, title); const res = finish(r.specs, [h.url], fields); if (res.status === 'OK') return res; continue;
+      }
+      const text = await readPage(h.url);
+      if (text.length < 1500) continue;
+      const direct = finish(pairsToColumns(specPairs(text, text), fields.map(f => f.key)), [h.url], fields);
+      if (direct.status === 'OK' && Object.keys(direct.specs).length >= Math.max(3, Math.ceil(fields.length * 0.6))) return direct;
+      if (aiProvider()) { const r = await viaAi(title, categoryName, fields, { pageText: text, pageUrl: h.url }); if (r.status === 'OK') return r; }
+      if (direct.status === 'OK') return direct;
+    } catch (e: any) {
+      if (/daily limit/i.test(String(e?.message))) throw e;
+      logger.info({ url: h.url, msg: e?.message }, 'web spec page unreadable');
+    }
+  }
+  return null;
+}
+
+async function fetchSpecs(title: string, brand: string, categoryName: string, fields: SpecField[], url?: string | null, opts: { noKnowledge?: boolean } = {}): Promise<FetchResult> {
   // 1. A link the user gave: read that page, whichever way works.
   if (url) {
     if (/gadgets360\.com/i.test(url)) {
@@ -218,13 +246,16 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
     } catch { /* blocked */ }
   }
 
+  // 3b. Any real spec page found by web search (brand site, Gadgets 360, 91mobiles, GSMArena…).
+  { const r = await fromWeb(title, brand, categoryName, fields); if (r) return r; }
+
   // 4. AI with Google Search, only if the key has it (paid keys). Free keys: ask for a link.
   if (aiProvider() && groundingAvailable()) {
     try { return await viaAi(title, categoryName, fields, { note: 'GSMArena, Gadgets 360 or the official brand website are preferred.' }); }
     catch (e: any) { logger.info({ msg: e?.message }, 'search-based fetch unavailable'); }
   }
   // 5. Last resort: the AI's own knowledge, only when it is confident — flagged "verify" on the sheet.
-  if (aiProvider()) {
+  if (aiProvider() && !opts.noKnowledge) {
     const r = await fromKnowledge(title, categoryName, fields);
     if (r) return r;
   }
@@ -232,22 +263,29 @@ async function fetchSpecs(title: string, brand: string, categoryName: string, fi
 }
 
 // ── Queue ─────────────────────────────────────────────────────────────────
-type Job = { key: string; title: string; brand: string; categoryName: string; url?: string | null };
+// mode 'fetch'  — no specs yet (or the user asked): the row shows "Fetching…".
+// mode 'source' — specs came from the AI's memory: look for a real page again, quietly;
+//                 the row keeps its specs unless a real page is found.
+// mode 'refresh'— read again with a newer parser, quietly; kept unless the new read is fuller.
+type Job = { key: string; title: string; brand: string; categoryName: string; url?: string | null; mode?: 'fetch' | 'source' | 'refresh' };
 const queue: Job[] = [];
 const running = new Set<string>();
 const CONCURRENCY = 1;   // GSMArena and the free AI tier both dislike bursts
 
 export async function enqueue(jobs: Job[]) {
-  for (const j of jobs) {
-    if (running.has(j.key) || queue.some(q => q.key === j.key)) continue;
+  const fresh = jobs.filter((j, i) => !running.has(j.key) && !queue.some(q => q.key === j.key) && jobs.findIndex(x => x.key === j.key) === i);
+  const shown = fresh.filter(j => (j.mode ?? 'fetch') === 'fetch');
+  if (shown.length) {
     await prisma.$executeRawUnsafe(
       `INSERT INTO spec_entries (key, title, brand, "categoryName", status, "sourceUrl")
-       VALUES ($1, $2, $3, $4, 'PENDING', $5)
+       SELECT k, t, b, c, 'PENDING', NULLIF(u, '') FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[]) AS j(k, t, b, c, u)
        ON CONFLICT (key) DO UPDATE SET status = 'PENDING', error = NULL,
          "sourceUrl" = COALESCE(EXCLUDED."sourceUrl", spec_entries."sourceUrl"), "updatedAt" = now()`,
-      j.key, j.title, j.brand, j.categoryName, j.url ?? null);
-    queue.push(j);
+      shown.map(j => j.key), shown.map(j => j.title), shown.map(j => j.brand ?? ''), shown.map(j => j.categoryName), shown.map(j => j.url ?? ''));
   }
+  // What the user is waiting for goes first.
+  queue.unshift(...shown);
+  queue.push(...fresh.filter(j => (j.mode ?? 'fetch') !== 'fetch'));
   pump();
 }
 
@@ -259,7 +297,29 @@ function pump() {
   }
 }
 
+async function runQuiet(job: Job) {
+  try {
+    const fields = await templateFor(job.categoryName);
+    const r = await fetchSpecs(job.title, job.brand, job.categoryName, fields, job.url, { noKnowledge: true });
+    const [old]: any[] = await (prisma as any).$queryRawUnsafe(`SELECT specs, manual FROM spec_entries WHERE key = $1`, job.key);
+    const real = r.status === 'OK' && !r.sources.includes(AI_KNOWLEDGE);
+    const fuller = Object.keys(r.specs).length >= Object.keys(old?.specs ?? {}).length;
+    if (old && !old.manual && real && (job.mode === 'source' || fuller)) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE spec_entries SET status = 'OK', specs = $2::jsonb, sources = $3::jsonb, error = NULL, "fetchedAt" = now(), "checkedAt" = now(), "updatedAt" = now() WHERE key = $1`,
+        job.key, JSON.stringify(r.specs), JSON.stringify(r.sources));
+      logger.info({ key: job.key, mode: job.mode, sources: r.sources.slice(0, 2) }, 'spec re-checked: replaced with a real source');
+    } else {
+      await prisma.$executeRawUnsafe(`UPDATE spec_entries SET "checkedAt" = now() WHERE key = $1`, job.key);
+    }
+  } catch (e: any) {
+    await prisma.$executeRawUnsafe(`UPDATE spec_entries SET "checkedAt" = now() WHERE key = $1`, job.key).catch(() => {});
+    logger.info({ key: job.key, msg: e?.message }, 'spec re-check failed (old specs kept)');
+  }
+}
+
 async function runJob(job: Job) {
+  if ((job.mode ?? 'fetch') !== 'fetch') return runQuiet(job);
   await prisma.$executeRawUnsafe(`UPDATE spec_entries SET status = 'FETCHING', "updatedAt" = now() WHERE key = $1`, job.key);
   try {
     const fields = await templateFor(job.categoryName);
@@ -306,7 +366,7 @@ export async function inStockCategories() {
   return rows.map((r: any) => ({ id: r.id, name: r.name, count: Number(r.count) }));
 }
 
-export async function sheet(categoryId: string) {
+export async function sheet(categoryId: string, withMarket = false) {
   const cat = await prisma.productCategory.findUnique({ where: { id: categoryId }, select: { id: true, name: true } });
   if (!cat) return null;
   const products: any[] = await prisma.product.findMany({
@@ -347,6 +407,7 @@ export async function sheet(categoryId: string) {
   const prices = products.length ? await (prisma as any).$queryRawUnsafe(
     `SELECT "productId", price FROM spec_prices WHERE "productId" = ANY($1::text[])`, products.map((p: any) => p.id)) : [];
   const priceBy = new Map<string, number>((prices as any[]).map((p: any) => [p.productId, Number(p.price)]));
+  const market = withMarket ? await marketBest(products.map((p: any) => p.id)) : new Map();
 
   // Fetch whatever is missing, plus jobs left half-done by a restart.
   const stale = Date.now() - 5 * 60_000;
@@ -374,11 +435,42 @@ export async function sheet(categoryId: string) {
       price: priceBy.get(p.id) ?? cost, priceEdited: priceBy.has(p.id), costPrice: cost, mrp: Number(p.sellingPrice),
       status: e?.status ?? 'PENDING', specs: e?.specs ?? {}, sources: e?.sources ?? [],
       error: e?.error ?? null, sourceUrl: e?.sourceUrl ?? null, manual: !!e?.manual,
+      market: market.get(p.id) ?? null,
     };
   });
   // Brands A→Z, then price low → high, then name.
   rows.sort((a: any, b: any) => a.brand.localeCompare(b.brand) || a.price - b.price || a.model.localeCompare(b.model));
   return { category: cat, fields, rows, aiEnabled: aiEnabled() };
+}
+
+/**
+ * Lowest current market price per product (from Market Prices): verified, in stock,
+ * read in the last 4 days; with the best bank-card offer when there is one.
+ */
+async function marketBest(productIds: string[]) {
+  const out = new Map<string, { price: number; effective: number; store: string; offer: string | null; at: string }>();
+  if (!productIds.length) return out;
+  let rows: any[] = [];
+  try {
+    rows = await (prisma as any).$queryRawUnsafe(`
+      SELECT g."productId", s.store, s.price::float AS price, s."effectivePrice"::float AS eff, s."bestOffer", s.offers, s."fetchedAt"
+      FROM price_watch_group_products g
+      JOIN LATERAL (
+        SELECT DISTINCT ON (store) store, price, "effectivePrice", "bestOffer", offers, "fetchedAt", status, "inStock"
+        FROM price_snapshots WHERE "itemId" = g."itemId" AND "fetchedAt" > now() - interval '4 days'
+        ORDER BY store, "fetchedAt" DESC
+      ) s ON s.status = 'ok' AND s."inStock" IS DISTINCT FROM false AND s.price > 0
+      WHERE g."productId" = ANY($1::text[])`, productIds);
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'specs: market prices unavailable'); return out; }
+  const label = (k: string) => STORES.find(x => x.key === k)?.label ?? k;
+  for (const r of rows) {
+    const offers = Array.isArray(r.offers) ? r.offers.filter((o: any) => typeof o?.value === 'number') : [];
+    const b = offers.length ? bestOfferOf(offers) : null;
+    const effective = b ? r.price - b.value : (r.eff ?? r.price);
+    const cur = out.get(r.productId);
+    if (!cur || effective < cur.effective) out.set(r.productId, { price: r.price, effective, store: label(r.store), offer: b ? `${b.bank ?? 'Bank offer'}${b.cardType ? ' ' + b.cardType : ''}` : (r.bestOffer ?? null), at: r.fetchedAt });
+  }
+  return out;
 }
 
 export async function setPrice(productId: string, price: number | null, userId: string) {
@@ -407,34 +499,66 @@ export async function refetch(key: string, url: string | null) {
   return true;
 }
 
-// Once per deploy: give earlier failures another go with the current engine.
-setTimeout(async () => {
-  const commit = process.env.RENDER_GIT_COMMIT || 'local';
-  try {
-    const seen: any[] = await (prisma as any).$queryRawUnsafe(`SELECT fields FROM spec_templates WHERE "categoryName" = '__selftest__'`);
-    if (seen[0]?.fields?.commit === commit) return;
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO spec_templates ("categoryName", fields) VALUES ('__selftest__', $1::jsonb)
-       ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ commit }));
-    const n = await prisma.$executeRawUnsafe(
-      `UPDATE spec_entries SET status = 'PENDING', error = NULL, "updatedAt" = now() - interval '1 hour'
-       WHERE manual = false AND (status IN ('ERROR', 'NOT_FOUND', 'NO_AI')
-          OR (status = 'OK' AND sources::text ILIKE '%gadgets360%')
-          OR (status = 'OK' AND sources::text ILIKE '%ai:knowledge%' AND lower(brand) = ANY($1::text[])))`, storeBrands());   // Gadgets 360 rows: re-read with the latest parser (no AI cost)
-    logger.info({ requeued: n }, 'Specs: earlier failures queued for another try');
-    const rows: any[] = await (prisma as any).$queryRawUnsafe(
-      `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries WHERE status = 'PENDING' ORDER BY "updatedAt" LIMIT 300`);
-    await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs requeue failed'); }
-}, 30_000).unref();
+// ── Background work (nobody needs to open the tab) ─────────────────────────
+// Bump when the readers change enough that rows read with an older one should be
+// re-read (quietly — the old specs stay on the sheet until a fuller read replaces them).
+const SPEC_ENGINE = '2026-11-25';
 
-// Every hour, retry fetches that failed (e.g. the free AI daily limit) so the
-// sheet keeps filling without anyone opening the tab.
-setInterval(async () => {
+const jobOf = (r: any, mode: Job['mode'] = 'fetch'): Job => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl ?? null, mode });
+
+/** Every product in stock (or added / changed in the last 90 days) that has no specs yet. */
+async function queueMissing() {
+  const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+    SELECT p.brand, p.model, c.name AS "categoryName"
+    FROM products p JOIN product_categories c ON c.id = p."categoryId"
+    WHERE p."isDeleted" = false
+      AND (${sellableStockSql('p')} > 0 OR GREATEST(p."updatedAt", p."createdAt") > now() - interval '90 days')`);
+  const want = new Map<string, Job>();
+  for (const r of rows) {
+    if (!r.brand || !r.model) continue;
+    const key = specKey(r.brand, r.model);
+    if (!want.has(key)) want.set(key, { key, title: specTitle(r.brand, r.model), brand: r.brand, categoryName: r.categoryName, mode: 'fetch' });
+  }
+  if (!want.size) return 0;
+  const have: any[] = await (prisma as any).$queryRawUnsafe(`SELECT key FROM spec_entries WHERE key = ANY($1::text[])`, [...want.keys()]);
+  const known = new Set(have.map(h => h.key));
+  const jobs = [...want.values()].filter(j => !known.has(j.key));
+  if (jobs.length) { await enqueue(jobs); logger.info({ queued: jobs.length }, 'Specs: new products queued in the background'); }
+  return jobs.length;
+}
+
+async function background() {
   try {
-    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+    await queueMissing();
+    // Interrupted by a restart, failed (network / AI limit) more than an hour ago.
+    const retry: any[] = await (prisma as any).$queryRawUnsafe(
       `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
-       WHERE status = 'ERROR' AND manual = false AND "updatedAt" < now() - interval '1 hour' ORDER BY "updatedAt" LIMIT 100`);
-    if (rows.length) await enqueue(rows.map(r => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl })));
-  } catch (e: any) { logger.warn({ msg: e?.message }, 'specs hourly retry failed'); }
-}, 60 * 60_000).unref();
+       WHERE manual = false AND (status IN ('PENDING', 'FETCHING', 'ERROR') OR (status = 'NO_AI' AND $1::boolean))
+         AND "updatedAt" < now() - interval '1 hour' ORDER BY "updatedAt" LIMIT 100`, aiEnabled());
+    if (retry.length) await enqueue(retry.map(r => jobOf(r)));
+    // Specs the AI gave from memory: look for a real page again, once a day.
+    const ai: any[] = await (prisma as any).$queryRawUnsafe(
+      `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
+       WHERE manual = false AND status = 'OK' AND sources::text ILIKE '%ai:knowledge%'
+         AND ("checkedAt" IS NULL OR "checkedAt" < now() - interval '1 day') ORDER BY "checkedAt" NULLS FIRST LIMIT 40`);
+    if (ai.length) await enqueue(ai.map(r => jobOf(r, 'source')));
+    // "Not found" rows: try again every 3 days (sites add pages; search gets better).
+    const nf: any[] = await (prisma as any).$queryRawUnsafe(
+      `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
+       WHERE manual = false AND status = 'NOT_FOUND' AND "updatedAt" < now() - interval '3 days' ORDER BY "updatedAt" LIMIT 30`);
+    if (nf.length) await enqueue(nf.map(r => jobOf(r)));
+    // Rows read by an older engine: once per engine version, quietly.
+    const seen: any[] = await (prisma as any).$queryRawUnsafe(`SELECT fields FROM spec_templates WHERE "categoryName" = '__engine__'`);
+    if (seen[0]?.fields?.v !== SPEC_ENGINE) {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO spec_templates ("categoryName", fields) VALUES ('__engine__', $1::jsonb)
+         ON CONFLICT ("categoryName") DO UPDATE SET fields = EXCLUDED.fields, "updatedAt" = now()`, JSON.stringify({ v: SPEC_ENGINE }));
+      const old: any[] = await (prisma as any).$queryRawUnsafe(
+        `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
+         WHERE manual = false AND status = 'OK' AND sources::text ILIKE '%gadgets360%' LIMIT 400`);
+      if (old.length) await enqueue(old.map(r => jobOf(r, 'refresh')));
+    }
+  } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs background work failed'); }
+}
+setTimeout(background, 45_000).unref();
+setInterval(background, 15 * 60_000).unref();

@@ -5,7 +5,7 @@ import { ok } from '../../common/apiResponse';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
-import { PERMISSIONS } from '../../constants/permissions';
+import { PERMISSIONS, WILDCARD } from '../../constants/permissions';
 import * as svc from './specs.service';
 
 const router = Router();
@@ -20,7 +20,8 @@ router.get('/categories', authorize(PERMISSIONS.PRODUCTS_READ), asyncHandler(asy
 router.get('/', authorize(PERMISSIONS.PRODUCTS_READ), asyncHandler(async (req: Request, res: Response) => {
   const categoryId = String(req.query.categoryId || '');
   if (!categoryId) throw new BadRequestError('categoryId is required');
-  const data = await svc.sheet(categoryId);
+  // Market prices are commercial information: administrators only (as on Market Prices).
+  const data = await svc.sheet(categoryId, !!req.user?.permissions?.has?.(WILDCARD));
   if (!data) throw new NotFoundError('Category not found');
   ok(res, data);
 }));
