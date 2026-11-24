@@ -26,6 +26,17 @@ describe('agent result verification', () => {
     expect(v.effectivePrice).toBeNull();
     expect((verify({ store: 'reliance', status: 'not_listed' }, null, 'JBL') as any).status).toBe('not_listed');
   });
+  it('shows the best instant bank discount before wallet cashback', () => {
+    const url = 'https://www.amazon.in/dp/B0BY3M2RR7';
+    const icici = { bank: 'Amazon Pay ICICI', cardType: 'Credit Card', offerType: 'cashback', mode: 'Full swipe', amount: 1355, summary: 'cashback' };
+    const axis = { bank: 'Axis Bank', cardType: 'Credit Card', offerType: 'instant_discount', mode: null, amount: 1129, summary: 'Axis' };
+    const upi = { bank: 'UPI', cardType: 'UPI', offerType: 'instant_discount', mode: 'Full swipe', amount: 2000, summary: 'UPI' };
+    const v: any = verify({ store: 'amazon', url, price: 45189, offers: [icici, upi, axis] }, null, 'Samsung');
+    expect(v.bestOffer).toBe('₹1,129 off · Axis Bank · Credit Card');
+    expect(v.effectivePrice).toBe(45189 - 1129);
+    const c: any = verify({ store: 'amazon', url, price: 45189, offers: [icici, upi] }, null, 'Samsung');
+    expect(c.bestOffer).toBe('₹1,355 cashback · Amazon Pay ICICI · Credit Card · Full swipe');
+  });
   it('treats a placeholder price as not on sale', () => {
     expect((verify({ store: 'official', url: 'https://in.nothing.tech/products/phone-4b', price: 9999999 }, null, 'Nothing') as any).status).toBe('not_found');
   });

@@ -688,3 +688,12 @@ CREATE TABLE IF NOT EXISTS festive_sync (
   value TEXT NOT NULL DEFAULT '',
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Pages the admin removed as wrong for a product: never picked for it again.
+CREATE TABLE IF NOT EXISTS price_watch_rejected (
+  "itemId" TEXT NOT NULL,
+  store TEXT NOT NULL,
+  url TEXT NOT NULL,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY ("itemId", store, url)
+);

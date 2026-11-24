@@ -72,11 +72,13 @@ router.put('/items/:id/our-price', asyncHandler(async (req: any, res) => {
   ok(res, await svc.setOurPrice(req.params.id, price, req.user?.id ?? null));
 }));
 router.post('/items/:id/request', asyncHandler(async (req, res) => { await svc.requestRefresh(req.params.id, !!req.body?.rediscover); ok(res, { ok: true }); }));
+router.get('/drops', asyncHandler(async (req, res) => ok(res, await svc.priceDrops(Number(req.query.days) || 7))));
 router.get('/items/:id/history', asyncHandler(async (req, res) => ok(res, await svc.history(req.params.id, Number(req.query.days) || 30))));
 router.put('/items/:id/links/:store', asyncHandler(async (req, res) => {
   await svc.setLink(req.params.id, storeParam(req.params.store), req.body?.url || null, !!req.body?.notListed);
   ok(res, { ok: true });
 }));
+router.delete('/items/:id/links/:store', asyncHandler(async (req, res) => ok(res, await svc.removeLink(req.params.id, storeParam(req.params.store)))));
 router.post('/sync', asyncHandler(async (_req, res) => ok(res, await svc.syncFromInventory())));
 router.get('/settings', asyncHandler(async (_req, res) => ok(res, { ...(await svc.getSettings()), options: await svc.settingsOptions() })));
 router.get('/run-status', asyncHandler(async (_req, res) => ok(res, await svc.runStatus())));

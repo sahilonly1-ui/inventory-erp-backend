@@ -1009,6 +1009,8 @@ async function pickMemoryVariant(page, job) {
 
 async function scrapeStore(context, job, s) {
   if (breaker.isOpen(s.store)) return { store: s.store, status: 'blocked', skipped: true, note: 'Skipped for now: this store has been blocking this run' };
+  // Pages the admin removed as wrong for this product are never picked again.
+  if (Array.isArray(s.rejected) && s.rejected.length && !s._rejSeeded) s = { ...s, _rejSeeded: true, _bads: [...(s._bads || []), ...s.rejected] };
   const page = await context.newPage();
   const tag = `${s.store}-${slug(job.name)}`;
   try {
@@ -1080,7 +1082,7 @@ async function scrapeStore(context, job, s) {
         const e = await findViaEngine(page, s.store, job, domain);
         if (e.hit) url = e.hit.href; else why += ' engines: ' + e.why;
       }
-      if (url && s._bad && urlKey(s.store, url) === urlKey(s.store, s._bad)) url = null;
+      if (url && [...(s._bads || []), ...(s._bad ? [s._bad] : [])].some(b => urlKey(s.store, b) === urlKey(s.store, url))) { why += ' only a page removed as wrong was found;'; url = null; }
       if (!url) {
         await debugDump(page, tag + '-search');
         // "Not listed" is only said when a page was really read and the product was

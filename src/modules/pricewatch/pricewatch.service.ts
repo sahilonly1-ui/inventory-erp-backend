@@ -1,7 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { logger } from '../../config/logger';
 import { BadRequestError, NotFoundError } from '../../common/errors';
-import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, normaliseAdminUrl, searchUrl, resolveLink, isShortLink, storeOfUrl } from './stores';
+import { STORES, STORE_KEYS, StoreKey, storeDef, officialDomains, normaliseStoreUrl, normaliseAdminUrl, searchUrl, resolveLink, isShortLink, storeOfUrl, urlIdentity, soldVia } from './stores';
 import { sellableStockSql } from '../../common/sellableStock';
 import { notListedRetryHours, leadingNotListed } from './notListed';
 import { variantName, variantKey } from './variant';
@@ -16,6 +16,7 @@ export interface Settings {
   autoSyncCategories: string[];  // limit the sync to these categories (empty = all)
   autoSyncBrands: string[];      // …and to these brands (empty = all)
   includeOutOfStock: boolean;    // also watch products of those brands/categories with no stock
+  recentDays: number;            // …and products added/changed in the Product Master within this many days
   defaultIntervalMins: number;   // an item is due for the agent after this
   priorityIntervalMins: number;  // …and starred items after this
   stores: StoreKey[];
@@ -33,6 +34,9 @@ const DEFAULTS: Settings = {
   autoSyncCategories: DEFAULT_CATEGORIES,
   autoSyncBrands: [],              // every brand
   includeOutOfStock: false,
+  // Products added or changed in the Product Master within this many days are watched
+  // even with no stock — to see where they can be bought (0 = off).
+  recentDays: 90,
   defaultIntervalMins: 360,
   priorityIntervalMins: 60,
   stores: [...STORE_KEYS],
@@ -71,6 +75,7 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
   next.defaultIntervalMins = Math.max(30, Math.round(next.defaultIntervalMins));
   next.priorityIntervalMins = Math.max(15, Math.round(next.priorityIntervalMins));
   next.batchSize = Math.min(25, Math.max(1, Math.round(next.batchSize)));
+  next.recentDays = Math.min(730, Math.max(0, Math.round(Number(next.recentDays) || 0)));
   await x(
     `INSERT INTO price_watch_settings(key,value,"updatedAt") VALUES('main',$1::jsonb,now())
      ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,"updatedAt"=now()`,
@@ -91,12 +96,13 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
   // (case-insensitive; an empty list means any) and, unless out-of-stock
   // products are included, it has sellable stock (Stock Report rule).
   const stockOf = `COALESCE(${sellableStockSql('p')}, 0)`;
-  const params = [s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()), s.includeOutOfStock, !!s.autoSyncInStock];
+  const params = [s.autoSyncBrands.map(b => b.toLowerCase()), s.autoSyncCategories.map(c => c.toLowerCase()), s.includeOutOfStock, !!s.autoSyncInStock, Math.max(0, Math.round(Number(s.recentDays ?? 90)) || 0)];
   // In-scope products, plus every product an item already points at (so a hand-added
   // product is grouped with its other colours too). One query, everything in memory.
   const prods = await q<{ id: string; model: string; brand: string | null; stock: number; inScope: boolean }>(`
     WITH base AS (
       SELECT p.id, p.model, p.brand, ${stockOf}::int AS stock,
+        ($5::int > 0 AND GREATEST(p."updatedAt", p."createdAt") > now() - make_interval(days => $5::int)) AS recent,
         ($4::boolean
           AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
           AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))) AS listed
@@ -107,7 +113,7 @@ export async function syncFromInventory(): Promise<{ added: number; paused: numb
             AND (cardinality($1::text[])=0 OR lower(p.brand) = ANY($1::text[]))
             AND (cardinality($2::text[])=0 OR lower(c.name) = ANY($2::text[]))))
     )
-    SELECT id, model, brand, stock, (listed AND ($3::boolean OR stock > 0)) AS "inScope" FROM base`, ...params);
+    SELECT id, model, brand, stock, (listed AND ($3::boolean OR stock > 0 OR recent)) AS "inScope" FROM base`, ...params);
   const items = await q<{ id: string; productId: string | null; groupKey: string | null; name: string; brand: string | null; source: string; priority: boolean; active: boolean; dismissed: boolean }>(
     `SELECT id, "productId", "groupKey", name, brand, source, priority, active, dismissed FROM price_watch_items`);
   const mapRows = await q<{ itemId: string; productId: string }>(`SELECT "itemId", "productId" FROM price_watch_group_products`);
@@ -236,7 +242,19 @@ export async function listItems() {
     q(`SELECT * FROM price_watch_links WHERE "itemId" = ANY($1::text[])`, ids),
   ]);
   const num = (v: any) => (v === null || v === undefined ? null : Number(v));
-  const clean = (s: any) => s && ({ ...s, price: num(s.price), mrp: num(s.mrp), effectivePrice: num(s.effectivePrice) });
+  // Best offer worked out again from the stored offers, so a change in how offers are
+  // ranked shows at once (not only after the next scan).
+  const clean = (s: any) => {
+    if (!s) return s;
+    const out = { ...s, price: num(s.price), mrp: num(s.mrp), effectivePrice: num(s.effectivePrice) };
+    const offers = Array.isArray(s.offers) ? s.offers.filter((o: any) => typeof o?.value === 'number') : [];
+    if (offers.length && out.price) {
+      const b = bestOfferOf(offers);
+      out.bestOffer = b ? offerLabel(b) : null;
+      out.effectivePrice = b ? out.price - b.value : null;
+    }
+    return out;
+  };
 
   return items.map(i => {
     const stores: Record<string, any> = {};
@@ -246,8 +264,51 @@ export async function listItems() {
       const g = good.find(r => r.itemId === i.id && r.store === k);
       stores[k] = { link: l ?? null, latest: clean(last) ?? null, lastGood: clean(g) ?? null };
     }
+    // Ai+: the brand site's Buy button opens Flipkart, so it is in stock when Flipkart is.
+    const via = soldVia(i.brand);
+    const vs = via ? stores[via]?.latest : null;
+    if (via && vs && ['ok', 'suspect'].includes(vs.status) && typeof vs.inStock === 'boolean') {
+      for (const s of [stores.official?.latest, stores.official?.lastGood]) if (s) { s.inStock = vs.inStock; s.stockVia = via; }
+    }
     return { ...i, stores };
   });
+}
+
+/**
+ * Price drops: store prices that fell at their last change within `days` and are still
+ * at the lower price — what is worth buying now. Only clean readings (status ok) count,
+ * so a misread page doesn't look like a drop.
+ */
+export async function priceDrops(days = 7) {
+  const d = Math.min(60, Math.max(1, Math.round(days)));
+  const rows = await q(`
+    WITH s AS (
+      SELECT "itemId", store, price::float AS price, "fetchedAt",
+             LAG(price::float) OVER w AS prev, LAG("fetchedAt") OVER w AS "prevAt"
+      FROM price_snapshots WHERE status='ok' AND "fetchedAt" > now() - make_interval(days => $1::int + 45)
+      WINDOW w AS (PARTITION BY "itemId", store ORDER BY "fetchedAt")
+    ),
+    change AS (
+      SELECT DISTINCT ON ("itemId", store) "itemId", store, price, prev, "fetchedAt" AS "droppedAt", "prevAt"
+      FROM s WHERE prev IS NOT NULL AND price <> prev ORDER BY "itemId", store, "fetchedAt" DESC
+    ),
+    cur AS (
+      SELECT DISTINCT ON ("itemId", store) "itemId", store, price::float AS price, url, "inStock", "effectivePrice"::float AS "effectivePrice", "bestOffer", "fetchedAt"
+      FROM price_snapshots WHERE status IN ('ok','suspect') AND "fetchedAt" > now() - interval '5 days' ORDER BY "itemId", store, "fetchedAt" DESC
+    )
+    SELECT i.id AS "itemId", i.name, i.brand, c.store, c.prev AS "was", c.price AS "now", c."droppedAt", c."prevAt",
+           cur.url, cur."inStock", cur."effectivePrice", cur."bestOffer", cur."fetchedAt",
+           COALESCE((SELECT SUM(${sellableStockSql('p2')}) FROM price_watch_group_products g2 JOIN products p2 ON p2.id=g2."productId" WHERE g2."itemId"=i.id),
+                    (SELECT ${sellableStockSql('p')} FROM products p WHERE p.id=i."productId"), 0)::int AS stock
+    FROM change c
+    JOIN cur ON cur."itemId"=c."itemId" AND cur.store=c.store AND cur.price=c.price
+    JOIN price_watch_items i ON i.id=c."itemId" AND i.dismissed=false
+    WHERE c.price < c.prev AND c."droppedAt" > now() - make_interval(days => $1::int)
+      AND c.prev - c.price >= GREATEST(20, c.prev * 0.01)
+      AND c.price > c.prev * 0.4            -- a fall of more than 60% is a misread, not a deal
+    ORDER BY (c.prev - c.price) / c.prev DESC
+    LIMIT 300`, d);
+  return rows.map((r: any) => ({ ...r, was: Number(r.was), now: Number(r.now), drop: Number(r.was) - Number(r.now), pct: Math.round(((Number(r.was) - Number(r.now)) / Number(r.was)) * 1000) / 10 }));
 }
 
 export async function history(itemId: string, days = 30) {
@@ -356,6 +417,28 @@ export async function setLink(itemId: string, store: StoreKey, url: string | nul
 // No paid API or scraping service is involved.
 
 // How long a store is left alone after "not listed" depends on how many checks in a row said so (notListed.ts).
+
+/**
+ * "Remove link": the page shown for a store is the wrong product. It is forgotten with
+ * every price read from it, never picked again for this product, and the store is
+ * searched once more — if nothing right turns up, the store shows no price instead of
+ * a wrong one.
+ */
+export async function removeLink(itemId: string, store: StoreKey) {
+  const item = (await q(`SELECT id FROM price_watch_items WHERE id=$1`, itemId))[0];
+  if (!item) throw new NotFoundError('Item not found');
+  const urls = new Set<string>();
+  for (const r of await q<{ url: string | null }>(`SELECT url FROM price_watch_links WHERE "itemId"=$1 AND store=$2`, itemId, store)) if (r.url) urls.add(r.url);
+  for (const r of await q<{ url: string | null }>(
+    `SELECT DISTINCT ON (store) url FROM price_snapshots WHERE "itemId"=$1 AND store=$2 AND url IS NOT NULL ORDER BY store, "fetchedAt" DESC`, itemId, store)) if (r.url) urls.add(r.url);
+  for (const u of urls) {
+    await x(`INSERT INTO price_watch_rejected("itemId",store,url) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, itemId, store, u);
+    await x(`DELETE FROM price_snapshots WHERE "itemId"=$1 AND store=$2 AND url=$3`, itemId, store, u);
+  }
+  await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND store=$2`, itemId, store);
+  await requestRefresh(itemId);
+  return { removed: [...urls] };
+}
 
 export async function requestRefresh(id: string, rediscover = false) {
   if (rediscover) await x(`DELETE FROM price_watch_links WHERE "itemId"=$1 AND "lockedByUser"=false`, id);
@@ -467,6 +550,7 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
      FROM price_snapshots WHERE "itemId" = ANY($1::text[]) AND "fetchedAt" > now() - interval '30 days'
      GROUP BY "itemId", store`, items.map(i => i.id));
   const recentBy = new Map<string, string[]>(recent.map(r => [`${r.itemId}|${r.store}`, r.recent ?? []] as [string, string[]]));
+  const rejected = await q<{ itemId: string; store: string; url: string }>(`SELECT "itemId", store, url FROM price_watch_rejected WHERE "itemId" = ANY($1::text[])`, items.map(i => i.id));
   return items.map(i => {
     const query = [i.name, i.variant].filter(Boolean).join(' ');
     const stores = STORES
@@ -488,6 +572,7 @@ export async function agentJobs(opts: { itemId?: string; limit?: number; request
           locked: !!l?.lockedByUser,   // pasted by the admin — never second-guessed
           searchUrl: l?.url ? null : searchUrl(st.key, query, i.brand),
           officialSite: st.key === 'official' ? officialDomains(i.brand)[0] ?? null : undefined,
+          rejected: rejected.filter(r => r.itemId === i.id && r.store === st.key).map(r => r.url).slice(0, 20),
         };
       }).filter(Boolean);
     return { itemId: i.id, name: i.name, brand: i.brand, variant: i.variant, ean: i.ean, stores };
@@ -512,6 +597,27 @@ function offerValue(o: AgentOffer, price: number): number {
   let v = o.amount ?? (o.percent ? (price * o.percent) / 100 : 0);
   if (o.maxDiscount) v = Math.min(v, o.maxDiscount);
   return Math.max(0, Math.round(v));
+}
+
+/**
+ * The offer shown under a store's price: the best instant bank-card discount on full
+ * payment. Wallet / co-brand cashback (Amazon Pay ICICI, NeuCoins, Flipkart Axis
+ * cashback), UPI and pay-later offers count only when there is no such discount, and
+ * EMI-only offers only when nothing else exists.
+ */
+export function offerTier(o: { offerType?: string | null; mode?: string | null; bank?: string | null; cardType?: string | null }): number {
+  const emi = /^emi$/i.test(String(o.mode ?? '').trim());
+  const card = /card/i.test(String(o.cardType ?? '')) || (!o.cardType && !!o.bank && !/upi|pay later|wallet/i.test(String(o.bank)));
+  if (emi) return 4;
+  if (o.offerType === 'instant_discount' && card) return 1;
+  if (o.offerType === 'cashback' && card) return 2;
+  return 3;
+}
+export const offerLabel = (b: { value: number; offerType?: string | null; bank?: string | null; cardType?: string | null; mode?: string | null }) =>
+  [`₹${b.value.toLocaleString('en-IN')} ${b.offerType === 'cashback' ? 'cashback' : 'off'}`, b.bank, b.cardType, b.mode].filter(Boolean).join(' · ');
+export function bestOfferOf<T extends { offerType?: string | null; mode?: string | null; bank?: string | null; cardType?: string | null; value: number }>(offers: T[]): T | undefined {
+  return offers.filter(o => o.offerType !== 'no_cost_emi' && o.value > 0)
+    .sort((a, b) => offerTier(a) - offerTier(b) || b.value - a.value)[0];
 }
 
 /** Checks one store result. Exported for tests. */
@@ -560,14 +666,10 @@ export function verify(r: AgentResult, expected: number | null, brand: string | 
   // savings are still listed under the store but don't set the effective price.
   // When the only bank saving is on EMI (Reliance "₹5,000 off on ICICI No Cost EMI"),
   // that one is shown, marked EMI.
-  const usable = offers.filter(o => o.offerType !== 'no_cost_emi' && o.value > 0);
-  const byValue = (a: { value: number }, b: { value: number }) => b.value - a.value;
-  const best = usable.filter(o => !/^emi$/i.test(String(o.mode ?? '').trim())).sort(byValue)[0] ?? usable.sort(byValue)[0];
+  const best = bestOfferOf(offers);
   const effectivePrice = best && best.value > 0 ? price - best.value : null;
   // "₹1,500 off · HDFC Bank · Credit Card · Full swipe" — what the saving is, then on what.
-  const bestOffer = best && best.value > 0
-    ? [`₹${best.value.toLocaleString('en-IN')} ${best.offerType === 'cashback' ? 'cashback' : 'off'}`, best.bank, best.cardType, best.mode].filter(Boolean).join(' · ')
-    : null;
+  const bestOffer = best && best.value > 0 ? offerLabel(best) : null;
   if (r.note) notes.push(String(r.note).slice(0, /^Stock from:/.test(String(r.note)) ? 1100 : 300));
   return {
     status, url, price, mrp, offers, effectivePrice, bestOffer, notes,
@@ -586,6 +688,7 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
   const prevGood = await q(
     `SELECT DISTINCT ON (store) store, price::float FROM price_snapshots WHERE "itemId"=$1 AND status='ok' ORDER BY store, "fetchedAt" DESC`, itemId);
   const links = await q(`SELECT * FROM price_watch_links WHERE "itemId"=$1`, itemId);
+  const rejected = await q<{ store: string; url: string }>(`SELECT store, url FROM price_watch_rejected WHERE "itemId"=$1`, itemId);
 
   const saved: { store: string; status: string; notes: string[] }[] = [];
   for (const r of results) {
@@ -593,6 +696,10 @@ export async function agentSubmit(itemId: string, results: AgentResult[], method
     const link = links.find(l => l.store === r.store);
     const expected = prevGood.find(p => p.store === r.store)?.price ?? null;
     const v: any = verify(r, expected, item.brand, item.ourPrice ?? null, !!link?.lockedByUser);
+    // A page the admin removed as wrong (an older scraper may still send it): no price.
+    if (v.url && rejected.some(u => u.store === r.store && urlIdentity(r.store as StoreKey, u.url) === urlIdentity(r.store as StoreKey, v.url))) {
+      Object.assign(v, { status: 'not_found', url: null, price: null, offers: [], effectivePrice: null, bestOffer: null, notes: ['Only the page you removed as wrong was found — searching again next run'] });
+    }
 
     // Amazon often has one page per colour, and one colour can be "currently unavailable"
     // while another sells. A page found automatically that says unavailable is forgotten,

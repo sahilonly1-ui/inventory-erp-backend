@@ -98,6 +98,16 @@ export const BRAND_SITES: Record<string, string[]> = {
   amazon: ['amazon.in'],
 };
 
+// Brand sites that don't sell themselves: their Buy button sends the customer to a
+// marketplace. Their stock is that marketplace's stock.
+export const SOLD_VIA: Record<string, StoreKey> = {
+  'aiplusstore.com': 'flipkart',
+};
+export const soldVia = (brand?: string | null): StoreKey | null => {
+  const d = officialDomains(brand)[0];
+  return d ? SOLD_VIA[d] ?? null : null;
+};
+
 export function officialDomains(brand?: string | null): string[] {
   if (!brand) return [];
   return BRAND_SITES[brand.trim().toLowerCase()] ?? [];
