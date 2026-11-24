@@ -1477,9 +1477,11 @@ async function watch() {
   };
   process.on('uncaughtException', recover);
   process.on('unhandledRejection', recover);
-  // Scheduled full refreshes are GitHub's job; the PC only handles ERP refresh
-  // clicks unless DUE_EVERY_MIN is set.
-  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN || 0) * 60_000;
+  // While the PC is on, it also keeps every product fresh on schedule: when nothing was
+  // asked for, every 15 minutes it takes the products that are due (a home connection
+  // gets Amazon and Flipkart pages far more reliably than the cloud). The cloud runs
+  // cover the hours the PC is off. DUE_EVERY_MIN=0 turns this off.
+  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN ?? 15) * 60_000;
   let lastUpdateCheck = 0;
   for (;;) {
     // Every 10 minutes (and while idle), pick up a newer version of the scraper from the ERP.
