@@ -674,7 +674,8 @@ async function amazonSoppOffers(page, price) {
         let d; try { d = JSON.parse(el.getAttribute('data-side-sheet')); } catch { continue; }
         const view = /BankDiscount|BankOffer/i.test(d.contentId || '') ? 'bankOfferSecondaryView' : /Cashback/i.test(d.contentId || '') ? 'cashbackSecondaryView' : null;
         if (!view || !asin || !d.encryptedMerchantId) continue;
-        const u = `/gp/product/ajax/a2iSMXSecondaryView?deviceType=web&requestId=${encodeURIComponent(d.sr || '')}&asin=${asin}&isVariationalMember=0&isVariationalParent=0&isB2BCustomer=false&buyingOptionIndex=${Number(d.buyingOptionIndex) || 0}&encryptedMerchantId=${encodeURIComponent(d.encryptedMerchantId)}&showFeatures=sopp,inemi,promotions,vendorPoweredCoupon,sns&language=en_IN&isPrime=false&featureParams=viewName:${view}`;
+        const u = `/gp/product/ajax/a2iSMXSecondaryView?deviceType=web&requestId=${encodeURIComponent(d.sr || '')}&asin=${asin}&isVariationalMember=0&isVariationalParent=0&isB2BCustomer=false&buyingOptionIndex=${Number(d.buyingOptionIndex) || 0}&encryptedMerchantId=${encodeURIComponent(d.encryptedMerchantId)}&productTypeName=SPEAKERS&productGroupID=speakers_display_on_website&showFeatures=sopp,inemi,promotions,vendorPoweredCoupon,sns&language=en_IN&isPrime=false&featureParams=viewName:${view}`;
+        // (Amazon answers empty without a product type; this one is accepted for every product.)
         if (!urls.includes(u)) urls.push(u);
       }
     }
