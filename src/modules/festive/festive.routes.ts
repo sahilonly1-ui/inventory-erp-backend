@@ -14,8 +14,9 @@ router.get('/events', asyncHandler(async (req: Request, res: Response) => {
   if (!DAY.test(from) || !DAY.test(to)) throw new BadRequestError('from and to must be YYYY-MM-DD');
   const span = (Date.parse(to) - Date.parse(from)) / 86_400_000;
   if (!(span >= 0 && span <= 400)) throw new BadRequestError('Range must be 0–400 days');
-  res.set('Cache-Control', 'public, max-age=3600');
-  ok(res, await svc.events(from, to));
+  const data = await svc.events(from, to);
+  res.set('Cache-Control', 'public, max-age=3600');   // only a good answer is cached
+  ok(res, data);
 }));
 
 router.get('/status', authenticate, asyncHandler(async (_req: Request, res: Response) => ok(res, await svc.status())));
