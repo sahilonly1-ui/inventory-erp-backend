@@ -1612,7 +1612,7 @@ function report(perStore) {
   }
 }
 
-export { launch, scrapeStore, readPage, pickMemoryVariant, findViaSitemap, crossCheck, runJobs, breaker, debugDump, pruneDebugFolder };
+export { launch, scrapeStore, amazonSoppOffers, readPage, pickMemoryVariant, findViaSitemap, crossCheck, runJobs, breaker, debugDump, pruneDebugFolder };
 // Run when started directly (`node index.mjs`), not when imported by tests.
 // fileURLToPath handles Windows paths ("C:\\…") and spaces correctly.
 const isMain = (() => {

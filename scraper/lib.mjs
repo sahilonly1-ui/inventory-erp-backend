@@ -274,7 +274,8 @@ export function offerBlocks(text) {
 
 export function parseOffer(text) {
   const t = String(text).replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ').trim();
-  const bank = BANKS.find(([, re]) => re.test(t))?.[0] ?? null;
+  // "ICICI Bank Credit Card (Excluding Amazon Pay ICICI Card)" is ICICI's offer.
+  const bank = BANKS.find(([, re]) => re.test(t.replace(/\((excluding|except|not (valid|applicable) on)[^)]*\)/gi, ' ')))?.[0] ?? null;
   const lower = t.toLowerCase();
 
   let offerType = 'other';
