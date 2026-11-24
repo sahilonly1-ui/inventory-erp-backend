@@ -8,7 +8,12 @@ for (const u of URLS) {
   const reqs = [];
   page.on('request', r => { const x = r.url(); if (/offer|vsx|sopp|itembox|bankOffer|ajax|secondary/i.test(x) && !/\.(js|css|png|jpg|gif|svg|woff)/.test(x)) reqs.push(r.method() + ' ' + x.slice(0, 300)); });
   await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => console.log('goto', e.message));
-  await page.waitForTimeout(6000);
+  await page.waitForTimeout(3000);
+  for (let k = 0; k < 2; k++) {
+    const b = page.getByText(/continue shopping/i).first();
+    if (await b.count()) { await b.click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(4000); }
+  }
+  await page.waitForTimeout(3000);
   for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(700); }
   console.log('PROBE ' + JSON.stringify({ u, title: await page.title(), body: (await page.evaluate(() => document.body.innerText)).slice(0, 600) }));
   const info = await page.evaluate(() => {
