@@ -11,7 +11,7 @@ for (const u of URLS) {
   if (await b.count() && /continue shopping/i.test(await page.evaluate(() => document.body.innerText.slice(0, 500)))) { await b.click({ timeout: 5000 }).catch(() => {}); await page.waitForTimeout(2000); await go(); }
   const seen = await page.evaluate(() => ({ path: location.pathname, triggers: document.querySelectorAll('[data-action="side-sheet"][data-side-sheet]').length, asinInput: document.querySelector('input#ASIN, input[name="ASIN"]')?.value }));
   const r = await amazonSoppOffers(page, 37989);
-  console.log('PROBE ' + JSON.stringify({ u, seen, popups: r.popupCount, lines: r.lineCount, offers: r.offers.map(o => `${o.bank}|${o.offerType}|${o.mode}|${o.amount}|${o.percent}|${o.maxDiscount}|${o.minTxn}`) }));
+  console.log('PROBE ' + JSON.stringify({ u, text: (r.popups || []).map(t => t.slice(0, 1200)), seen, popups: r.popupCount, lines: r.lineCount, offers: r.offers.map(o => `${o.bank}|${o.offerType}|${o.mode}|${o.amount}|${o.percent}|${o.maxDiscount}|${o.minTxn}`) }));
   await page.close();
 }
 await browser.close();

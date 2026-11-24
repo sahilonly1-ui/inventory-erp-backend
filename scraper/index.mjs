@@ -694,7 +694,7 @@ async function amazonSoppOffers(page, price) {
     const o = parseOffer(l.replace(/\b(see all|details|shop items|sign up for free)\b/gi, ''));
     if ((o.bank || o.offerType === 'cashback') && (o.amount || o.percent)) add(o);
   }
-  return { offers, popupCount: texts.popups.length, lineCount: texts.lines.length };
+  return { offers, popupCount: texts.popups.length, lineCount: texts.lines.length, popups: texts.popups };
 }
 
 /** Amazon: open "See all offers & discounts" and read exact savings, both tabs. */
