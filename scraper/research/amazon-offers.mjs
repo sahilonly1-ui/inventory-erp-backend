@@ -2,6 +2,7 @@
 process.env.SCRAPER_TEST = '1';
 const { launch } = await import('../index.mjs');
 const URLS = JSON.parse(process.env.SITES || '[]');
+// (card layout: "Bank Offer · Upto ₹X discount on select Credit Cards · 50 offers" opens a side sheet)
 const { browser, context } = await launch();
 for (const u of URLS) {
   const page = await context.newPage();
@@ -24,13 +25,13 @@ for (const u of URLS) {
   console.log('PROBE ' + JSON.stringify({ u, ...info }));
   // Click the "Bank Offer" card
   const before = reqs.length;
-  const card = page.getByText(/^Bank Offer$/).filter({ visible: true }).first();
+  const card = page.locator('[data-action="side-sheet"]').filter({ hasText: /Bank Offer/ }).first();
   if (await card.count()) {
     await card.click({ timeout: 5000 }).catch(e => console.log('click', e.message));
     await page.waitForTimeout(4000);
     const sheet = await page.evaluate(() => {
-      const vis = [...document.querySelectorAll('.a-popover, #vsxoffers_feature_div, [id*=side-sheet], [class*=side-sheet], .a-sheet-web, [role=dialog]')].filter(e => e.offsetHeight > 0);
-      return vis.map(e => `${e.tagName}#${e.id}.${String(e.className).slice(0, 60)} :: ${(e.innerText || '').slice(0, 2500)}`).slice(0, 3);
+      const vis = [...document.querySelectorAll('.a-popover, [id*=side-sheet], [class*=side-sheet], [class*=sheet], [role=dialog]')].filter(e => e.offsetHeight > 100);
+      return vis.map(e => `${e.tagName}#${e.id}.${String(e.className).slice(0, 80)} :: ${(e.innerText || '').slice(0, 3000)}`).slice(0, 4);
     });
     console.log('PROBE ' + JSON.stringify({ u, clicked: true, newReqs: reqs.slice(before, before + 15), sheet }));
   } else console.log('PROBE ' + JSON.stringify({ u, clicked: false, text: (await page.evaluate(() => document.body.innerText)).match(/.{0,200}Bank Offer.{0,300}/s)?.[0] }));
