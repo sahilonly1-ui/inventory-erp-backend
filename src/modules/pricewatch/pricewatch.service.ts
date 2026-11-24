@@ -304,6 +304,7 @@ export async function priceDrops(days = 7) {
     JOIN cur ON cur."itemId"=c."itemId" AND cur.store=c.store AND cur.price=c.price
     JOIN price_watch_items i ON i.id=c."itemId" AND i.dismissed=false
     WHERE c.price < c.prev AND c."droppedAt" > now() - make_interval(days => $1::int)
+      AND cur."inStock" IS DISTINCT FROM false   -- out of stock: can't be bought, so not a deal
       AND c.prev - c.price >= GREATEST(20, c.prev * 0.01)
       AND c.price > c.prev * 0.4            -- a fall of more than 60% is a misread, not a deal
     ORDER BY (c.prev - c.price) / c.prev DESC
