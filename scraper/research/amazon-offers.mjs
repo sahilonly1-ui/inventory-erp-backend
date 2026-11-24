@@ -8,7 +8,9 @@ for (const u of URLS) {
   const reqs = [];
   page.on('request', r => { const x = r.url(); if (/offer|vsx|sopp|itembox|bankOffer|ajax|secondary/i.test(x) && !/\.(js|css|png|jpg|gif|svg|woff)/.test(x)) reqs.push(r.method() + ' ' + x.slice(0, 300)); });
   await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => console.log('goto', e.message));
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(6000);
+  for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(700); }
+  console.log('PROBE ' + JSON.stringify({ u, title: await page.title(), body: (await page.evaluate(() => document.body.innerText)).slice(0, 600) }));
   const info = await page.evaluate(() => {
     const modals = [...document.querySelectorAll('[data-a-modal],[data-a-popover],[data-action]')].map(e => ({ tag: e.tagName, id: e.id, cls: String(e.className).slice(0, 80), modal: (e.getAttribute('data-a-modal') || e.getAttribute('data-a-popover') || e.getAttribute('data-action') || '').slice(0, 400), text: (e.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100) })).filter(m => /offer|bank|cashback|vsx|emi/i.test(m.modal + m.text + m.id + m.cls)).slice(0, 25);
     const cards = [...document.querySelectorAll('[id*=offer i],[class*=offer i]')].map(e => `${e.tagName}#${e.id}.${String(e.className).slice(0, 60)} :: ${(e.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120)}`).slice(0, 30);
