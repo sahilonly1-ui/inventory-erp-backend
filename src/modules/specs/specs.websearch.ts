@@ -25,9 +25,19 @@ async function get(url: string): Promise<string> {
   } catch { return ''; } finally { clearTimeout(t); }
 }
 
+/** Bing wraps result links (bing.com/ck/a?…&u=a1<base64 of the address>). */
+export function unwrapBing(href: string): string {
+  const u = href.replace(/&amp;/g, '&');
+  const enc = u.match(/[?&]u=a1([^&]+)/)?.[1];
+  if (!/bing\.com\/ck\//.test(u) || !enc) return u;
+  try { return Buffer.from(enc.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); } catch { return u; }
+}
 export function parseBing(html: string): { url: string; title: string }[] {
   const out: { url: string; title: string }[] = [];
-  for (const m of html.matchAll(/<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) out.push({ url: m[1].replace(/&amp;/g, '&'), title: decode(m[2]) });
+  for (const m of html.matchAll(/<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
+    const url = unwrapBing(m[1]);
+    if (/^https?:\/\//.test(url)) out.push({ url, title: decode(m[2]) });
+  }
   return out;
 }
 export function parseDdg(html: string): { url: string; title: string }[] {
@@ -45,25 +55,37 @@ export function parseDdg(html: string): { url: string; title: string }[] {
 let pausedUntil = 0;
 async function search(q: string): Promise<{ url: string; title: string }[]> {
   if (Date.now() < pausedUntil) return [];
-  const bing = parseBing(await get(`https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en-IN&cc=IN`));
-  if (bing.length) return bing;
   const ddg = parseDdg(await get(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=in-en`));
-  if (!ddg.length) pausedUntil = Date.now() + 20 * 60_000;   // both refused: rest a while
-  return ddg;
+  if (ddg.length) return ddg;
+  const bing = parseBing(await get(`https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en-IN&cc=IN`));
+  if (!bing.length) pausedUntil = Date.now() + 20 * 60_000;   // both refused: rest a while
+  return bing;
 }
 
 const tokens = (s: string) => (s.toLowerCase().match(/[a-z0-9]+/g) || []);
-const GENERIC = new Set(['5g', '4g', 'gb', 'with', 'and', 'the', 'smartphone', 'mobile', 'phone', 'wireless', 'bluetooth', 'earbuds', 'speaker', 'smartwatch', 'watch', 'headphones', 'black', 'blue', 'white', 'green']);
+const GENERIC = new Set(['5g', '4g', 'gb', 'tb', 'with', 'and', 'the', 'for', 'smartphone', 'mobile', 'phone', 'wireless', 'bluetooth', 'earbuds', 'earphone', 'earphones', 'tws', 'headset', 'headphone', 'headphones', 'speaker', 'portable', 'party', 'smartwatch', 'smart', 'watch', 'laptop', 'tv', 'inch', 'cm', 'black', 'blue', 'white', 'green', 'grey', 'gray', 'red', 'plastic', 'edition', 'new', 'cc', 'in']);
 
-/** Does a result belong to this product? Every model word (digits included) must be there. */
+/**
+ * Does a result belong to this product? The model numbers ("Q2s", "A3", "43", "110") must
+ * all be there; SKU codes ("NP960QFG", "WF-LS900N", "SCMP130") may be missing; of the
+ * other naming words most must be there.
+ */
 export function matchesProduct(title: string, brand: string, hit: { url: string; title: string }): boolean {
-  // RAM / storage ("4/128GB", "256 GB") is often left out of page titles and addresses.
-  const core = title.replace(/\b\d+\s*\/\s*\d+\s*(gb|tb)?\b/gi, ' ').replace(/\b\d+\s*(gb|tb)\b/gi, ' ');
-  const want = tokens(core).filter(t => !GENERIC.has(t) && t !== brand.toLowerCase() && !/^\d+gb$/.test(t) && !/^\d+\/\d+$/.test(t));
-  if (!want.length) return false;
+  // RAM / storage ("4/128GB", "256 GB"), sizes ("108 cm", "15.6") and bracketed extras are
+  // often left out of page titles and addresses.
+  const core = title.replace(/\([^)]*\)/g, ' ').replace(/\b([a-z]{1,4})-([a-z]*\d[a-z0-9]*)\b/gi, '$1$2').replace(/\b\d+\s*\/\s*\d+\s*(gb|tb)?\b/gi, ' ').replace(/\b\d+(\.\d+)?\s*(gb|tb|cm|inch|w|mah|mm)\b/gi, ' ').replace(/\b\d+\.\d+\b/g, ' ');
+  const all = tokens(core).filter(t => !GENERIC.has(t) && t !== brand.toLowerCase());
+  const sku = (t: string) => /[a-z]{2,}/.test(t) && /\d{3,}/.test(t) && t.length >= 6;
+  const model = all.filter(t => /\d/.test(t) && !sku(t));
+  const words = all.filter(t => !/\d/.test(t) && t.length > 1);
+  if (!model.length && !words.length) return false;
   const hay = (tokens(hit.title).join(' ') + ' ' + tokens(decodeURIComponent(hit.url)).join(' ')).replace(/\s+/g, ' ');
+  const list = hay.split(' ');
   const squashed = hay.replace(/\s+/g, '');
-  return want.every(w => hay.split(' ').includes(w) || (w.length >= 3 && squashed.includes(w)));
+  const has = (w: string) => list.includes(w) || (w.length >= 3 && squashed.includes(w));
+  if (!model.every(has)) return false;
+  const found = words.filter(has).length;
+  return words.length ? found / words.length >= 0.6 : model.length > 0;
 }
 
 /** Candidate spec pages for a product, best source first. */
