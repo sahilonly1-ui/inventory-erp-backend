@@ -10,8 +10,8 @@ for (const u of URLS) {
   await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => console.log('goto', e.message));
   await page.waitForTimeout(3000);
   for (let k = 0; k < 2; k++) {
-    const b = page.getByText(/continue shopping/i).first();
-    if (await b.count()) { await b.click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(4000); }
+    const b = page.locator('button:has-text("Continue shopping"), a:has-text("Continue shopping"), input[type="submit"]').first();
+    if (await b.count()) { await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), b.click({ timeout: 5000 }).catch(() => {})]); await page.waitForTimeout(2000); await page.goto(u, { waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); }
   }
   await page.waitForTimeout(3000);
   for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(700); }
