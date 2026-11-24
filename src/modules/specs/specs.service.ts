@@ -8,7 +8,7 @@ import { findOnBrandStore, specPairs, pairsToColumns } from './specs.brandstore'
 import { findSpecPages } from './specs.websearch';
 import { officialDomains, STORES } from '../pricewatch/stores';
 import { sellableStockSql } from '../../common/sellableStock';
-import { bestOfferOf } from '../pricewatch/pricewatch.service';
+import { bestOfferOf, offerLabel } from '../pricewatch/pricewatch.service';
 
 /*
  * Specifications tab.
@@ -468,7 +468,7 @@ async function marketBest(productIds: string[]) {
     const b = offers.length ? bestOfferOf(offers) : null;
     const effective = b ? r.price - b.value : (r.eff ?? r.price);
     const cur = out.get(r.productId);
-    if (!cur || effective < cur.effective) out.set(r.productId, { price: r.price, effective, store: label(r.store), offer: b ? `${b.bank ?? 'Bank offer'}${b.cardType ? ' ' + b.cardType : ''}` : (r.bestOffer ?? null), at: r.fetchedAt });
+    if (!cur || effective < cur.effective) out.set(r.productId, { price: r.price, effective, store: label(r.store), offer: b ? offerLabel(b) : (r.bestOffer ?? null), at: r.fetchedAt });
   }
   return out;
 }
