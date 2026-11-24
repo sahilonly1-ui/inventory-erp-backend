@@ -502,7 +502,7 @@ export async function refetch(key: string, url: string | null) {
 // ── Background work (nobody needs to open the tab) ─────────────────────────
 // Bump when the readers change enough that rows read with an older one should be
 // re-read (quietly — the old specs stay on the sheet until a fuller read replaces them).
-const SPEC_ENGINE = '2026-11-25';
+const SPEC_ENGINE = '2026-11-25b';
 
 const jobOf = (r: any, mode: Job['mode'] = 'fetch'): Job => ({ key: r.key, title: r.title, brand: r.brand, categoryName: r.categoryName, url: r.sourceUrl ?? null, mode });
 
@@ -557,6 +557,11 @@ async function background() {
         `SELECT key, title, brand, "categoryName", "sourceUrl" FROM spec_entries
          WHERE manual = false AND status = 'OK' AND sources::text ILIKE '%gadgets360%' LIMIT 400`);
       if (old.length) await enqueue(old.map(r => jobOf(r, 'refresh')));
+      // With the newer search, "not found" and AI-only rows get one more try now.
+      const nf2: any[] = await (prisma as any).$queryRawUnsafe(
+        `SELECT key, title, brand, "categoryName", "sourceUrl", status FROM spec_entries
+         WHERE manual = false AND (status = 'NOT_FOUND' OR (status = 'OK' AND sources::text ILIKE '%ai:knowledge%')) LIMIT 400`);
+      if (nf2.length) await enqueue(nf2.map(r => jobOf(r, r.status === 'OK' ? 'source' : 'fetch')));
     }
   } catch (e: any) { logger.warn({ msg: e?.message }, 'Specs background work failed'); }
 }
