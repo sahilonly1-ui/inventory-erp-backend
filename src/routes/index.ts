@@ -14,6 +14,7 @@ import reportRoutes from '../modules/reports/report.routes';
 import importRoutes from '../modules/imports/import.routes';
 import priceWatchRoutes from '../modules/pricewatch/pricewatch.routes';
 import specsRoutes from '../modules/specs/specs.routes';
+import festiveRoutes from '../modules/festive/festive.routes';
 
 const router = Router();
 
@@ -39,6 +40,7 @@ router.use('/marketplace', marketplaceRoutes);
 router.use('/reports', reportRoutes);
 router.use('/imports', importRoutes);
 router.use('/specs', specsRoutes);
+router.use('/festive', festiveRoutes); // festival calendar for the ERP's look (public read)
 router.use('/price-watch', priceWatchRoutes); // admin-only market price tracker
 
 export default router;

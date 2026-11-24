@@ -673,3 +673,18 @@ CREATE INDEX IF NOT EXISTS price_watch_group_products_item ON price_watch_group_
 
 -- Offer lines as shown on the store page, kept with each result (to check offers).
 ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS "offerRaw" TEXT;
+
+-- Festival calendar for the ERP's festive look, read from Drik Panchang (one row per event per day).
+CREATE TABLE IF NOT EXISTS festive_events (
+  day DATE NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  href TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (day, name)
+);
+CREATE TABLE IF NOT EXISTS festive_sync (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);

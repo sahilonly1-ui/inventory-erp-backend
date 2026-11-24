@@ -7,6 +7,7 @@ import { prisma } from './config/prisma';
 import { logger } from './config/logger';
 import { initSocket } from './realtime/socket';
 import { startScheduler } from './scheduler';
+import { startFestiveSync } from './modules/festive/festive.service';
 
 // ── Auto-migrate the ENTIRE schema.sql on every startup ──────────────────────
 // schema.sql has grown into a running log of every ALTER TABLE ever added
@@ -110,6 +111,7 @@ async function bootstrap() {
 
   initSocket(server); // live stock updates over websocket
   startScheduler();   // nightly stock-in backup email
+  startFestiveSync(); // festival calendar (Drik Panchang) for the ERP's festive look
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
