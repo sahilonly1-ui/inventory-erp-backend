@@ -379,7 +379,8 @@ async function findInCatalogue(context, job, store, bad = []) {
   const price = Number(x.price) || null, mrp = Number(x.mrp) || null;
   return {
     hit: { href: best.href, text: x.name },
-    data: price ? { price, mrp: mrp && mrp > price ? mrp : null, inStock: store === 'reliance' ? x.sellable !== false : null, title: x.name, url: best.href, pg: x.pg || null, how: `${store === 'reliance' ? 'Reliance' : 'Croma'} catalogue` } : null,
+    data: price ? { price, mrp: mrp && mrp > price ? mrp : null, inStock: store === 'reliance' ? (x.sellable === false ? false : null) : null,   // sellable=true is also set for shop-only products, so it proves nothing
+      title: x.name, url: best.href, pg: x.pg || null, how: `${store === 'reliance' ? 'Reliance' : 'Croma'} catalogue` } : null,
   };
 }
 
