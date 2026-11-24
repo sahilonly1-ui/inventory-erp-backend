@@ -68,7 +68,7 @@ export async function syncFromDrik(): Promise<{ months: number; events: number; 
 
 export async function events(from: string, to: string) {
   return q<{ day: string; name: string; kind: string; detail: string }>(
-    `SELECT to_char(day, 'YYYY-MM-DD') day, name, kind, detail FROM festive_events
+    `SELECT to_char(day, 'YYYY-MM-DD') AS "day", name, kind, detail FROM festive_events
      WHERE day BETWEEN $1::date AND $2::date ORDER BY day, name`, from, to);
 }
 
