@@ -538,3 +538,12 @@ console.log('debug folder cleanup ok');
 ]) if (!/^(Moto Watch)$/.test(n)) ok(titleScore(n, b, t) >= 0.55, `should match: ${n} => ${t} (${titleScore(n, b, t)})`);
   console.log('wrong listings ok');
 }
+{
+  // Amazon bank-offer sheet text (card layout, read via its side-sheet address).
+  const { extractOffers } = await import('./lib.mjs');
+  const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1); } };
+  const t = "Additional flat INR 500 Instant Discount on SBI Credit Card EMI Trxn. Minimum purchase value INR 24990.00 See details Here's how\n10% Instant Discount up to INR 1500 on HDFC Bank Credit Card Non-EMI Trxn. Minimum purchase value INR 5000.00\nGet 5% back with Amazon Pay ICICI Bank credit card for Prime members. 3% back for others. Not applicable on EMI orders";
+  const o = extractOffers(t);
+  ok(o.length === 3 && o[0].mode === 'EMI' && o[1].bank === 'HDFC Bank' && o[1].mode === 'Full swipe' && o[1].percent === 10 && o[1].maxDiscount === 1500 && o[2].offerType === 'cashback', 'amazon sheet ' + JSON.stringify(o));
+  console.log('amazon sheet ok');
+}

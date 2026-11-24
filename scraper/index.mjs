@@ -663,8 +663,20 @@ async function amazonSoppOffers(page, price) {
     for (const el of document.querySelectorAll('[data-a-modal]')) {
       try {
         const m = JSON.parse(el.getAttribute('data-a-modal'));
-        if (m.url && /viewName:(bankOffer|cashback)SecondaryView/.test(m.url) && !urls.includes(m.url)) urls.push(m.url);
+        if (m.url && /viewName(:|%3A)(bankOffer|cashback)SecondaryView/.test(m.url) && !urls.includes(m.url)) urls.push(m.url);
       } catch { /* not JSON */ }
+    }
+    // Card layout ("Bank Offer · Upto ₹3,000 discount on select Credit Cards · 50 offers"):
+    // its side sheet is the same list, served by the same address for this product and seller.
+    if (!urls.length) {
+      const asin = (location.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/) || [])[1] || document.querySelector('input#ASIN, input[name="ASIN"]')?.value;
+      for (const el of document.querySelectorAll('[data-action="side-sheet"][data-side-sheet]')) {
+        let d; try { d = JSON.parse(el.getAttribute('data-side-sheet')); } catch { continue; }
+        const view = /BankDiscount|BankOffer/i.test(d.contentId || '') ? 'bankOfferSecondaryView' : /Cashback/i.test(d.contentId || '') ? 'cashbackSecondaryView' : null;
+        if (!view || !asin || !d.encryptedMerchantId) continue;
+        const u = `/gp/product/ajax/a2iSMXSecondaryView?deviceType=web&requestId=${encodeURIComponent(d.sr || '')}&asin=${asin}&isVariationalMember=0&isVariationalParent=0&isB2BCustomer=false&buyingOptionIndex=${Number(d.buyingOptionIndex) || 0}&encryptedMerchantId=${encodeURIComponent(d.encryptedMerchantId)}&showFeatures=sopp,inemi,promotions,vendorPoweredCoupon,sns&language=en_IN&isPrime=false&featureParams=viewName:${view}`;
+        if (!urls.includes(u)) urls.push(u);
+      }
     }
     for (const u of urls.slice(0, 3)) {
       try {
