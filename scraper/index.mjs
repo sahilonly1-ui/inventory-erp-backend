@@ -31,6 +31,30 @@ const WATCH = process.env.WATCH === '1';
 // asked for, and at below-normal priority. GitHub's runner has the machine to itself
 // and keeps the old settings. (Images, video and fonts are skipped in both — see launch.)
 const ITEM_CONCURRENCY = Number(process.env.CONCURRENCY || (WATCH ? 1 : 6));
+// Stores read at the same time for one product. In the cloud every store at once;
+// on the showroom PC two, so at most two shop pages are open and the PC stays usable.
+const STORE_CONCURRENCY = Number(process.env.STORE_CONCURRENCY || (WATCH ? 2 : 12));
+
+// ── Being gentle with the showroom PC ───────────────────────────────────────
+// The PC is also used for billing and office work, so the scraper only uses what
+// is spare: it runs at below-normal priority (Chrome inherits it), pauses its own
+// schedule while the PC is short of memory, and refreshes on schedule far less
+// during shop hours. Products asked for from the ERP still run straight away.
+const istHour = () => Number(new Intl.DateTimeFormat('en-IN', { hour: 'numeric', hourCycle: 'h23', timeZone: 'Asia/Kolkata' }).format(new Date()));
+const SHOP_FROM = Number(process.env.SHOP_FROM ?? 10), SHOP_TO = Number(process.env.SHOP_TO ?? 21);
+const shopHours = () => { const h = istHour(); return h >= SHOP_FROM && h < SHOP_TO; };
+const MIN_FREE_MB = Number(process.env.MIN_FREE_MB ?? 1200);
+const freeMb = () => Math.round(os.freemem() / 1048576);
+const memoryLow = () => freeMb() < MIN_FREE_MB;
+
+/** Runs fn over items with at most `limit` running at once, keeping the order of results. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  const run = async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, run));
+  return out;
+}
 const DUMPS = !WATCH || process.env.DEBUG_DUMPS === '1';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -67,7 +91,9 @@ async function launch() {
     // Full Chromium in new-headless mode looks like a normal browser to stores;
     // the slimmer "headless shell" is easier for bot checks to spot.
     channel: process.env.CHROME_PATH ? undefined : (process.env.CHANNEL || 'chromium'),
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox',
+      // On the PC: fewer page processes and no background extras, to keep memory down.
+      ...(WATCH ? ['--renderer-process-limit=2', '--disable-extensions', '--disable-background-networking', '--disable-component-update', '--mute-audio', '--js-flags=--max-old-space-size=512'] : [])],
   });
   const context = await browser.newContext({
     userAgent: UA, locale: 'en-IN', timezoneId: 'Asia/Kolkata',
@@ -1408,7 +1434,7 @@ async function runJobs(context, jobs, mode, budget = null) {
       const job = jobs[next++];
       const t = Date.now();
       const stores = job.stores.filter(s => !ONLY.length || ONLY.includes(s.store));
-      const results = crossCheck(await Promise.all(stores.map(s => scrapeStore(context, job, s))));
+      const results = crossCheck(await mapLimit(stores, STORE_CONCURRENCY, s => scrapeStore(context, job, s)));
       results.forEach(r => {
         const st = r.skipped ? 'skipped' : r.status;
         if (!r.skipped) breaker.record(r.store, r.status);
@@ -1500,8 +1526,11 @@ async function watch() {
   // asked for, every 15 minutes it takes the products that are due (a home connection
   // gets Amazon and Flipkart pages far more reliably than the cloud). The cloud runs
   // cover the hours the PC is off. DUE_EVERY_MIN=0 turns this off.
-  const DUE_EVERY = Number(process.env.DUE_EVERY_MIN ?? 15) * 60_000;
-  let lastUpdateCheck = 0;
+  // Shop hours: every 60 minutes, 8 products. Outside them: every 15 minutes, 20 products.
+  const DUE_EVERY = () => Number(shopHours() ? (process.env.DUE_EVERY_SHOP_MIN ?? 60) : (process.env.DUE_EVERY_MIN ?? 15)) * 60_000;
+  const DUE_BATCH = () => (shopHours() ? Number(process.env.DUE_BATCH_SHOP ?? 8) : Number(process.env.DUE_BATCH ?? 20));
+  try { os.setPriority(0, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* not allowed — carry on */ }
+  let lastUpdateCheck = 0, lowNoted = 0;
   for (;;) {
     // Every 10 minutes (and while idle), pick up a newer version of the scraper from the ERP.
     if (Date.now() - lastUpdateCheck > 10 * 60_000) {
@@ -1515,8 +1544,14 @@ async function watch() {
     try {
       let jobs = await api('/price-watch/bot/jobs?queued=1&limit=12&worker=local', {}, 2);
       let kind = 'requested';
-      if (!jobs.length && DUE_EVERY > 0 && Date.now() - lastDue > DUE_EVERY) {
-        jobs = await api('/price-watch/bot/jobs?limit=20&worker=local', {}, 2); kind = 'due'; lastDue = Date.now();
+      if (!jobs.length && DUE_EVERY() > 0 && Date.now() - lastDue > DUE_EVERY()) {
+        if (memoryLow()) {
+          // The PC is short of memory: leave the scheduled refresh for later (the cloud runs cover it).
+          if (Date.now() - lowNoted > 10 * 60_000) { console.log(`(PC busy: ${freeMb()} MB free — scheduled refresh waits)`); lowNoted = Date.now(); }
+          if (b) { await b.browser.close().catch(() => {}); b = null; }
+        } else {
+          jobs = await api(`/price-watch/bot/jobs?limit=${DUE_BATCH()}&worker=local`, {}, 2); kind = 'due'; lastDue = Date.now();
+        }
       }
       if (!jobs.length) {
         // Close Chrome 2 idle minutes after the last refresh — nothing runs in between.
@@ -1527,8 +1562,11 @@ async function watch() {
       if (!b || !b.browser.isConnected()) b = await launch();
       const t0 = Date.now();
       console.log(`\n${new Date().toLocaleTimeString('en-IN')} — ${jobs.length} ${kind} product(s)`);
-      await runJobs(b.context, jobs, 'local');
-      console.log(`  done in ${Math.round((Date.now() - t0) / 1000)}s`);
+      // A scheduled batch stops early if the PC runs short of memory; asked-for products always finish.
+      const r = await runJobs(b.context, jobs, 'local', kind === 'due' ? { expired: memoryLow } : null);
+      console.log(`  done in ${Math.round((Date.now() - t0) / 1000)}s${r.left ? ` (stopped early, PC busy — ${r.left} left for later)` : ''}`);
+      // Chrome is closed after every scheduled batch so it gives its memory back at once.
+      if (kind === 'due' && b) { await b.browser.close().catch(() => {}); b = null; }
       idleSince = Date.now();
     } catch (e) {
       console.log(`! ${e.message} — retrying in 15 s`);
